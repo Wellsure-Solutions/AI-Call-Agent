@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Portal</title>
+    <style>
+        :root {
+            --primary: #002147;
+            --secondary-bg: #FFFFFF;
+            --accent: #B8860B;
+            --neutral-text: #333333;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f6f8;
+            color: var(--neutral-text);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .container {
+            background-color: var(--secondary-bg);
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 33, 71, 0.1);
+            width: 100%;
+            max-width: 500px;
+            padding: 2rem;
+            text-align: center;
+            border-top: 6px solid var(--primary);
+        }
+        h1 {
+            color: var(--primary);
+            margin-top: 0;
+        }
+        .controls {
+            margin: 2rem 0;
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+        }
+        button {
+            background-color: var(--primary);
+            color: var(--secondary-bg);
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        button:hover { background-color: #001530; }
+        button:active { transform: scale(0.98); }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+            color: #666666;
+        }
+        button#stopBtn { background-color: var(--accent); }
+        button#stopBtn:hover { background-color: #966d09; }
+
+        .status {
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 1rem;
+            color: var(--accent);
+        }
+        #chatLog {
+            text-align: left;
+            background: #f9f9f9;
+            padding: 1rem;
+            border-radius: 8px;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #eeeeee;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .msg { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
+        .role { font-weight: bold; color: var(--primary); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Seller Agent</h1>
+    <div class="status" id="statusText">Ready to connect...</div>
+
+    <div class="controls">
+        <button id="startBtn">Start Call</button>
+        <button id="stopBtn" disabled>End Call</button>
+    </div>
+
+    <div id="chatLog"></div>
+</div>
+
+<script>
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let workletNode = null;
+    let nextPlayTime = 0;
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const statusText = document.getElementById("statusText");
+    const chatLog = document.getElementById("chatLog");
+
+    function logMessage(role, text) {
+        const div = document.createElement("div");
+        div.className = "msg";
+        div.innerHTML = `<span class="role">${role}:</span> ${text}`;
+        chatLog.appendChild(div);
+        chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function playAudioChunk(arrayBuffer) {
+        if (!audioContext) return;
+
+        const int16Data = new Int16Array(arrayBuffer);
+        const float32Data = new Float32Array(int16Data.length);
+        for (let i = 0; i < int16Data.length; i++) {
+            float32Data[i] = int16Data[i] / 32768.0;
+        }
+
+        const buffer = audioContext.createBuffer(1, float32Data.length, 24000);
+        buffer.copyToChannel(float32Data, 0);
+
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+
+        const currentTime = audioContext.currentTime;
+        if (nextPlayTime < currentTime) nextPlayTime = currentTime;
+
+        source.start(nextPlayTime);
+        nextPlayTime += buffer.duration;
+    }
+
+    startBtn.onclick = async () => {
+        try {
+            statusText.innerText = "Requesting microphone access...";
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+            nextPlayTime = audioContext.currentTime;
+
+            const workletCode = `
+                class PCMProcessor extends AudioWorkletProcessor {
+                    process(inputs, outputs, parameters) {
+                        const input = inputs[0];
+                        if (input.length > 0) {
+                            const channelData = input[0];
+                            const pcm16 = new Int16Array(channelData.length);
+                            for (let i = 0; i < channelData.length; i++) {
+                                pcm16[i] = Math.max(-32768, Math.min(32767, channelData[i] * 32768));
+                            }
+                            this.port.postMessage(pcm16.buffer);
+                        }
+                        return true;
+                    }
+                }
+                registerProcessor('pcm-processor', PCMProcessor);
+            `;
+
+            const blob = new Blob([workletCode], { type: 'application/javascript' });
+            const workletUrl = URL.createObjectURL(blob);
+
+            await audioContext.audioWorklet.addModule(workletUrl);
+
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = () => {
+                statusText.innerText = "Connected! Start speaking.";
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+
+                const source = audioContext.createMediaStreamSource(mediaStream);
+
+                workletNode = new AudioWorkletNode(audioContext, 'pcm-processor');
+
+                workletNode.port.onmessage = (event) => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(event.data);
+                    }
+                };
+
+                source.connect(workletNode);
+
+                const zeroGain = audioContext.createGain();
+                zeroGain.gain.value = 0;
+                workletNode.connect(zeroGain);
+                zeroGain.connect(audioContext.destination);
+            };
+
+            ws.onmessage = async (event) => {
+                if (typeof event.data === "string") {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.role && msg.content) {
+                            logMessage(msg.role, msg.content);
+                        } else if (msg.error) {
+                            logMessage("system", msg.error);
+                        }
+                    } catch(e) {
+                        console.error("Text parse error", e);
+                    }
+                } else {
+                    playAudioChunk(event.data);
+                }
+            };
+
+            ws.onclose = () => { stopCall("Call ended."); };
+            ws.onerror = () => { stopCall("Connection error."); };
+
+        } catch (err) {
+            console.error(err);
+            statusText.innerText = "Microphone access denied or error occurred.";
+        }
+    };
+
+    stopBtn.onclick = () => stopCall("Call disconnected by user.");
+
+    function stopCall(status) {
+        if (ws) {
+            ws.close();
+            ws = null;
+        }
+        if (workletNode) {
+            workletNode.disconnect();
+            workletNode = null;
+        }
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            mediaStream = null;
+        }
+        if (audioContext) {
+            audioContext.close();
+            audioContext = null;
+        }
+
+        statusText.innerText = status;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+    }
+</script>
+</body>
+</html>
