@@ -1,4 +1,44 @@
-PROMPT = """
+from models import AnswerField
+
+ANSWER_FIELDS = [
+    AnswerField(
+        name="owner_confirmed",
+        question="Is the person who answered the business owner or decision maker?",
+        allowed_values=("yes", "no", "unknown"),
+    ),
+    AnswerField(
+        name="interested",
+        question="Is the business interested in selling on Amazon/Flipkart or learning more?",
+        allowed_values=("yes", "no", "unknown"),
+    ),
+    AnswerField(
+        name="already_selling_online",
+        question="Is the business already selling on an online marketplace/platform?",
+        allowed_values=("yes", "no", "unknown"),
+    ),
+    AnswerField(
+        name="gst_available",
+        question="Does the business have GST registration?",
+        allowed_values=("yes", "no", "unknown"),
+    ),
+    AnswerField(
+        name="callback_approved",
+        question="Did the person approve a callback from the specialist team?",
+        allowed_values=("yes", "no", "unknown"),
+    ),
+    AnswerField(
+        name="callback_time",
+        question="If a callback time was provided, what time did the person request?",
+        allowed_values=("free_text",),
+    ),
+]
+
+_FIELD_INSTRUCTIONS = "\n".join(
+    f"- {field.name}: {field.question} Allowed values: {', '.join(field.allowed_values)}"
+    for field in ANSWER_FIELDS
+)
+
+PROMPT = f"""
 ROLE:
 You are an AI telecalling agent calling businesses on behalf of an e-commerce seller acquisition program.
 
@@ -20,6 +60,10 @@ SPEAKING STYLE:
 - Never pressure the seller.
 - Never make guarantees.
 
+TEMPORARY ANSWER CAPTURE FIELDS:
+The application will save call answers into an Excel file. During the call, guide the conversation so these fields can be answered:
+{_FIELD_INSTRUCTIONS}
+
 OPENING:
 
 Namaste ji.
@@ -36,6 +80,7 @@ Owner se baat karne ka koi suitable time bata sakte hain?
 
 Set:
 owner_confirmed=false
+callback_time=<provided time or unknown>
 
 End politely.
 
@@ -106,6 +151,7 @@ Kya hum callback schedule kar sakte hain?
 
 Store:
 callback_approved=yes|no
+callback_time=<provided time or unknown>
 
 End:
 Bahut dhanyavaad ji.
