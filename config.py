@@ -1,4 +1,3 @@
-import os
 from deepgram.agent.v1.types import (
     AgentV1Settings,
     AgentV1SettingsAgent,
@@ -7,12 +6,11 @@ from deepgram.agent.v1.types import (
     AgentV1SettingsAudioOutput,
 )
 from prompts import PROMPT
-
-# Load the API key from the environment instead of hardcoding
+from settings import DEEPGRAM_API_KEY
 
 
 def get_agent_settings() -> AgentV1Settings:
-    """Returns the configured Deepgram Agent settings."""
+    """Return Deepgram Agent settings for the current campaign prompt."""
     return AgentV1Settings(
         audio=AgentV1SettingsAudio(
             input=AgentV1SettingsAudioInput(
