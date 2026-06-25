@@ -43,6 +43,12 @@ def get_agent_settings() -> AgentV1Settings:
                     "type": "eleven_labs",
                     "model_id": "eleven_multilingual_v2",
                     "voice_id": "IpXGk4Ks434Jj33XXcNh",
+                    "voice_settings": {
+                        "stability": 0.62,
+                        "similarity_boost": 0.85,
+                        "style": 0.18,
+                        "use_speaker_boost": True,
+                    },
                 }
             },
             greeting="Namaste ji. Main Hindi mein baat karunga, aap aaraam se jawab dijiye.",
