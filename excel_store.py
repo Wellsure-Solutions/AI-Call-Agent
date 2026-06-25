@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-import html
-import zipfile
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from xml.etree import ElementTree as ET
+from threading import Lock
+
+try:
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.worksheet.worksheet import Worksheet
+except ImportError:  # pragma: no cover - exercised only when dependency is missing
+    Workbook = None
+    load_workbook = None
+    Worksheet = object
 
 from models import CallSession
 from prompts import ANSWER_FIELDS
 
-SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+SHEET_NAME = "Call Answers"
 HEADERS = [
     "call_id",
     "started_at",
@@ -21,84 +26,67 @@ HEADERS = [
 ]
 
 
-def _column_name(index: int) -> str:
-    name = ""
-    while index:
-        index, remainder = divmod(index - 1, 26)
-        name = chr(65 + remainder) + name
-    return name
-
-
-def _cell(reference: str, value: object) -> str:
-    safe = html.escape("" if value is None else str(value))
-    return f'<c r="{reference}" t="inlineStr"><is><t xml:space="preserve">{safe}</t></is></c>'
-
-
-def _row(index: int, values: list[object]) -> str:
-    cells = "".join(_cell(f"{_column_name(col)}{index}", value) for col, value in enumerate(values, start=1))
-    return f'<row r="{index}">{cells}</row>'
-
-
-def _build_workbook(rows: list[list[object]]) -> dict[str, str]:
-    dimension = f"A1:{_column_name(len(HEADERS))}{max(1, len(rows))}"
-    sheet_rows = "".join(_row(index, row) for index, row in enumerate(rows, start=1))
-    sheet = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="{SHEET_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="{dimension}"/>
-  <sheetViews><sheetView workbookViewId="0"/></sheetViews>
-  <sheetFormatPr defaultRowHeight="15"/>
-  <sheetData>{sheet_rows}</sheetData>
-</worksheet>'''
-    return {
-        "[Content_Types].xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-</Types>''',
-        "_rels/.rels": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>''',
-        "xl/workbook.xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Call Answers" sheetId="1" r:id="rId1"/></sheets>
-</workbook>''',
-        "xl/_rels/workbook.xml.rels": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-</Relationships>''',
-        "xl/worksheets/sheet1.xml": sheet,
-    }
-
-
-def _read_rows(path: Path) -> list[list[str]]:
-    if not path.exists():
-        return [HEADERS]
-    with zipfile.ZipFile(path) as workbook:
-        sheet_xml = workbook.read("xl/worksheets/sheet1.xml")
-    root = ET.fromstring(sheet_xml)
-    rows: list[list[str]] = []
-    for row in root.findall(f".//{{{SHEET_NS}}}row"):
-        values = []
-        for cell in row.findall(f"{{{SHEET_NS}}}c"):
-            text = cell.find(f".//{{{SHEET_NS}}}t")
-            values.append(text.text if text is not None and text.text is not None else "")
-        rows.append(values)
-    return rows or [HEADERS]
-
-
 class ExcelAnswerStore:
-    """Append-only .xlsx answer store with no runtime database dependency."""
+    """Thread-safe append-only Excel store for captured call answers.
+
+    The store intentionally keeps Excel as a reporting/export layer. Its public
+    API accepts the domain-level ``CallSession`` object so future GSM/Asterisk
+    adapters can persist results without depending on browser-specific code.
+    """
 
     def __init__(self, workbook_path: Path) -> None:
         self.workbook_path = workbook_path
+        self._lock = Lock()
 
     def append_call(self, session: CallSession) -> None:
+        if Workbook is None or load_workbook is None:
+            raise RuntimeError("openpyxl is required to save call answers. Install requirements.txt.")
         self.workbook_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = _read_rows(self.workbook_path)
-        row = [
+        with self._lock:
+            workbook = self._load_or_create_workbook()
+            sheet = self._get_answer_sheet(workbook)
+            sheet.append(self._session_to_row(session))
+            self._format_sheet(sheet)
+            workbook.save(self.workbook_path)
+            workbook.close()
+
+    def _load_or_create_workbook(self):
+        if self.workbook_path.exists():
+            workbook = load_workbook(self.workbook_path)
+            sheet = self._get_answer_sheet(workbook)
+            self._ensure_headers(sheet)
+            return workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = SHEET_NAME
+        sheet.append(HEADERS)
+        self._format_sheet(sheet)
+        return workbook
+
+    def _get_answer_sheet(self, workbook) -> Worksheet:
+        if SHEET_NAME in workbook.sheetnames:
+            return workbook[SHEET_NAME]
+        sheet = workbook.active
+        if sheet.max_row == 1 and all(cell.value is None for cell in sheet[1]):
+            sheet.title = SHEET_NAME
+        else:
+            sheet = workbook.create_sheet(SHEET_NAME)
+        self._ensure_headers(sheet)
+        return sheet
+
+    def _ensure_headers(self, sheet: Worksheet) -> None:
+        existing = [cell.value for cell in sheet[1]] if sheet.max_row else []
+        if existing[: len(HEADERS)] == HEADERS:
+            return
+        if sheet.max_row == 1 and all(value is None for value in existing):
+            sheet.delete_rows(1)
+        sheet.insert_rows(1)
+        for column, header in enumerate(HEADERS, start=1):
+            sheet.cell(row=1, column=column, value=header)
+
+    def _session_to_row(self, session: CallSession) -> list[object]:
+        return [
             session.call_id,
             session.started_at.isoformat(),
             session.ended_at.isoformat() if session.ended_at else "",
@@ -107,15 +95,20 @@ class ExcelAnswerStore:
             *(session.answers.get(field.name, "unknown") for field in ANSWER_FIELDS),
             session.transcript_text,
         ]
-        rows.append(row)
-        payload = _build_workbook(rows)
-        with NamedTemporaryFile("wb", delete=False, suffix=".xlsx", dir=self.workbook_path.parent) as tmp:
-            temp_path = Path(tmp.name)
-        try:
-            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as workbook:
-                for name, content in payload.items():
-                    workbook.writestr(name, content)
-            temp_path.replace(self.workbook_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+
+    def _format_sheet(self, sheet: Worksheet) -> None:
+        sheet.freeze_panes = "A2"
+        for cell in sheet[1]:
+            cell.style = "Headline 3"
+        widths = {
+            "A": 38,
+            "B": 28,
+            "C": 28,
+            "D": 18,
+            "E": 20,
+        }
+        for column, width in widths.items():
+            sheet.column_dimensions[column].width = width
+        for column in range(6, len(HEADERS) + 1):
+            letter = sheet.cell(row=1, column=column).column_letter
+            sheet.column_dimensions[letter].width = 26 if column < len(HEADERS) else 90

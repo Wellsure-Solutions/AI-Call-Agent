@@ -9,6 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from answer_extractor import AnswerExtractor
+from call_service import CallResultService
 from config import DEEPGRAM_API_KEY, get_agent_settings
 from excel_store import ExcelAnswerStore
 from models import CallSession
@@ -17,6 +18,7 @@ from settings import ANSWERS_WORKBOOK, HOST, PORT
 app = FastAPI(title="Autonomous Calling Agent")
 answer_extractor = AnswerExtractor()
 answer_store = ExcelAnswerStore(ANSWERS_WORKBOOK)
+call_result_service = CallResultService(answer_extractor, answer_store)
 
 
 @app.get("/")
@@ -117,9 +119,7 @@ class DeepgramCallBridge:
             pass
 
     def _persist_call(self, status: str) -> None:
-        self.session.finish(status)
-        self.session.answers = answer_extractor.extract(self.session)
-        answer_store.append_call(self.session)
+        call_result_service.finalize(self.session, status)
         print(f"Saved call {self.session.call_id} answers to {ANSWERS_WORKBOOK}")
 
 
