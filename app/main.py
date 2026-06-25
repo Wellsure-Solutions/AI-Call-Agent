@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_control import is_closing_call_message
 from app.services.call_service import CallResultService
+from app.services.transcript_sanitizer import strip_spoken_internal_commands
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
 from app.storage.excel_store import ExcelAnswerStore
 from app.core.models import CallSession
@@ -119,8 +120,11 @@ class DeepgramCallBridge:
                 return
 
             if msg_type == "ConversationText" or (role and content):
-                self.session.add_turn(role, content)
-                payload = json.dumps({"role": role or "agent", "content": content or ""})
+                cleaned_content = strip_spoken_internal_commands(content) if role == "assistant" else (content or "")
+                if not cleaned_content:
+                    return
+                self.session.add_turn(role, cleaned_content)
+                payload = json.dumps({"role": role or "agent", "content": cleaned_content})
                 self._queue_threadsafe("text", payload)
         except Exception as exc:
             print(f"[deepgram] handler error for call {self.session.call_id}: {exc}")
