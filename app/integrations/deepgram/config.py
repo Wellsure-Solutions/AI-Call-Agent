@@ -45,6 +45,6 @@ def get_agent_settings() -> AgentV1Settings:
                     "voice_id": "IpXGk4Ks434Jj33XXcNh",
                 }
             },
-            greeting="Namaste ji. Main Hindi mein baat karunga, aap aaraam se jawab dijiye.",
+            greeting="Namaste sir",
         ),
     )
