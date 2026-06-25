@@ -122,3 +122,4 @@ class AnswerExtractor:
                 value = "unknown"
             normalized[field.name] = value
         return normalized
+
