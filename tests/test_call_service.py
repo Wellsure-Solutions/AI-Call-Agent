@@ -1,5 +1,5 @@
-from call_service import CallResultService
-from models import CallSession
+from app.services.call_service import CallResultService
+from app.core.models import CallSession
 
 
 class FakeExtractor:

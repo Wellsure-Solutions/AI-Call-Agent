@@ -11,8 +11,8 @@ except ImportError:  # pragma: no cover - exercised only when dependency is miss
     load_workbook = None
     Worksheet = object
 
-from models import CallSession
-from prompts import ANSWER_FIELDS
+from app.core.models import CallSession
+from app.core.prompts import ANSWER_FIELDS
 
 SHEET_NAME = "Call Answers"
 HEADERS = [
@@ -112,4 +112,3 @@ class ExcelAnswerStore:
         for column in range(6, len(HEADERS) + 1):
             letter = sheet.cell(row=1, column=column).column_letter
             sheet.column_dimensions[letter].width = 26 if column < len(HEADERS) else 90
-

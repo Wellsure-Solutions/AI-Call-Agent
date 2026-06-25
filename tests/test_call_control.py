@@ -1,6 +1,6 @@
 import types
 
-from call_control import is_closing_call_message
+from app.services.call_control import is_closing_call_message
 
 
 def test_detects_deepgram_closing_call_function_name():

@@ -5,8 +5,8 @@ from deepgram.agent.v1.types import (
     AgentV1SettingsAudioInput,
     AgentV1SettingsAudioOutput,
 )
-from prompts import PROMPT
-from settings import DEEPGRAM_API_KEY
+from app.core.prompts import PROMPT
+from app.core.settings import DEEPGRAM_API_KEY
 
 
 def get_agent_settings() -> AgentV1Settings:

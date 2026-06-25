@@ -1,4 +1,4 @@
-from models import AnswerField
+from app.core.models import AnswerField
 
 ANSWER_FIELDS = [
     AnswerField(

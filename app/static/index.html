@@ -219,7 +219,8 @@
                         } else if (msg.role && msg.content) {
                             logMessage(msg.role, msg.content);
                         } else if (msg.error) {
-                            logMessage("system", msg.error);
+                            const detailText = msg.details ? ` ${JSON.stringify(msg.details)}` : "";
+                            logMessage("system", `${msg.error}${detailText}`);
                         }
                     } catch(e) {
                         console.error("Text parse error", e);

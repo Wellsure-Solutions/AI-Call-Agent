@@ -4,8 +4,8 @@ import json
 import sys
 import types
 
-from answer_extractor import AnswerExtractor
-from models import CallSession
+from app.services.answer_extractor import AnswerExtractor
+from app.core.models import CallSession
 
 
 def test_extracts_sales_qualification_answers_with_openai(monkeypatch):

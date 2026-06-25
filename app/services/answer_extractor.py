@@ -4,9 +4,9 @@ import json
 import logging
 from typing import Any
 
-from models import CallSession
-from prompts import ANSWER_FIELDS
-from settings import OPENAI_API_KEY, OPENAI_MODEL
+from app.core.models import CallSession
+from app.core.prompts import ANSWER_FIELDS
+from app.core.settings import OPENAI_API_KEY, OPENAI_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -122,4 +122,3 @@ class AnswerExtractor:
                 value = "unknown"
             normalized[field.name] = value
         return normalized
-
