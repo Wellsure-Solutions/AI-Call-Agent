@@ -2,14 +2,14 @@
 
 ## Current Base
 
-The current codebase is now structured around a reusable Deepgram call bridge, a temporary prompt-driven answer schema, and an Excel answer store. It keeps the existing browser WebSocket flow working while making the core call lifecycle reusable for future Asterisk/GSM gateway integration.
+The current codebase is organized under the `app/` package: core domain/configuration in `app/core`, business services in `app/services`, provider integrations in `app/integrations`, storage/export adapters in `app/storage`, and browser assets in `app/static`. It is structured around a reusable Deepgram call bridge, a prompt-driven answer schema, and an Excel answer store. It keeps the existing browser WebSocket flow working while making the core call lifecycle reusable for future Asterisk/GSM gateway integration.
 
 ## Level 1 — Stable Local Voice Agent
 
 - Keep Deepgram as the real-time speech/listen/think/speak provider.
 - Use the browser UI for manual test calls and audio debugging.
 - Save one row per call to `data/call_answers.xlsx`.
-- Keep temporary campaign questions in `prompts.py` so the prompt and Excel columns can change together without adding a database.
+- Keep temporary campaign questions in `app/core/prompts.py` so the prompt and Excel columns can change together without adding a database.
 - Add operational health checks and environment-based configuration.
 
 ## Level 2 — Campaign and Prompt Modularity
@@ -89,7 +89,7 @@ The current codebase is now structured around a reusable Deepgram call bridge, a
 
 ## Level 8 — Optimization and Intelligence
 
-- Use post-call LLM extraction with confidence scores once the base flow is stable.
+- Extend the current post-call OpenAI extraction with confidence scores once the base flow is stable.
 - Add A/B tests for prompts and voices.
 - Add language and intent detection.
 - Add automatic campaign performance summaries.
