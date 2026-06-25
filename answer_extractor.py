@@ -1,84 +1,124 @@
-import re
-from collections.abc import Iterable
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
 
 from models import CallSession
 from prompts import ANSWER_FIELDS
+from settings import OPENAI_API_KEY, OPENAI_MODEL
 
-YES_WORDS = ("yes", "haan", "han", "bilkul", "interested", "bataiye", "details", "try", "kar sakte", "theek")
-NO_WORDS = ("no", "nahi", "nahin", "bilkul nahi", "zarurat nahi", "interested nahi", "mat", "not interested")
-OWNER_WORDS = ("owner", "malik", "decision", "main hi", "mai hi", "haan ji", "bol raha")
-ONLINE_WORDS = ("amazon", "flipkart", "meesho", "online", "marketplace", "website")
-GST_WORDS = ("gst", "registration", "number")
-CALLBACK_WORDS = ("callback", "call back", "phone", "sampark", "baad", "kal", "shaam", "subah")
+logger = logging.getLogger(__name__)
 
 
-def _last_customer_answer_after(transcript: Iterable[tuple[str, str]], markers: tuple[str, ...]) -> str:
-    seen_marker = False
-    latest = ""
-    for role, content in transcript:
-        lowered = content.lower()
-        if role != "user" and any(marker in lowered for marker in markers):
-            seen_marker = True
-            continue
-        if seen_marker and role == "user":
-            latest = lowered
-            seen_marker = False
-    return latest
-
-
-def _classify_yes_no(text: str) -> str:
-    if not text:
-        return "unknown"
-    if any(word in text for word in NO_WORDS):
-        return "no"
-    if any(word in text for word in YES_WORDS):
-        return "yes"
-    return "unknown"
-
-
-def _extract_callback_time(text: str) -> str:
-    if not text:
-        return "unknown"
-    patterns = [
-        r"(?:kal|tomorrow)(?:\s+(?:subah|shaam|morning|evening))?",
-        r"(?:aaj|today)(?:\s+(?:subah|shaam|morning|evening))?",
-        r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm|baje)?\b",
-        r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
-    ]
-    matches = []
-    for pattern in patterns:
-        matches.extend(re.findall(pattern, text, flags=re.IGNORECASE))
-    return ", ".join(dict.fromkeys(match.strip() for match in matches if match.strip())) or "unknown"
+class AnswerExtractionError(RuntimeError):
+    """Raised when the AI extraction service cannot produce valid answers."""
 
 
 class AnswerExtractor:
-    """Best-effort temporary extractor driven by prompt answer fields, without a DB."""
+    """Extract campaign answers with OpenAI structured output instead of keyword rules."""
+
+    def __init__(self, api_key: str | None = OPENAI_API_KEY, model: str = OPENAI_MODEL) -> None:
+        self.api_key = api_key
+        self.model = model
 
     def extract(self, session: CallSession) -> dict[str, str]:
-        transcript = [(turn.role, turn.content) for turn in session.transcript]
-        customer_text = " ".join(content.lower() for role, content in transcript if role == "user")
+        if not self.api_key:
+            raise AnswerExtractionError("OPENAI_API_KEY is required for AI answer extraction.")
 
-        answers = {field.name: "unknown" for field in ANSWER_FIELDS}
-        answers["owner_confirmed"] = self._owner_confirmed(transcript, customer_text)
-        answers["interested"] = _classify_yes_no(
-            _last_customer_answer_after(transcript, ("interested", "products bechne", "marketplaces"))
-        )
-        answers["already_selling_online"] = _classify_yes_no(
-            _last_customer_answer_after(transcript, ("online platform", "selling kar", "marketplace"))
-        )
-        answers["gst_available"] = _classify_yes_no(_last_customer_answer_after(transcript, GST_WORDS))
-        callback_answer = _last_customer_answer_after(transcript, CALLBACK_WORDS)
-        answers["callback_approved"] = _classify_yes_no(callback_answer)
-        answers["callback_time"] = _extract_callback_time(customer_text)
-        if answers["callback_approved"] == "unknown" and answers["callback_time"] != "unknown":
-            answers["callback_approved"] = "yes"
-        return answers
+        try:
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover - dependency availability differs by environment
+            raise AnswerExtractionError("openai package is required. Install requirements.txt.") from exc
 
-    def _owner_confirmed(self, transcript: list[tuple[str, str]], customer_text: str) -> str:
-        answer = _last_customer_answer_after(transcript, ("owner", "decision maker", "malik"))
-        classified = _classify_yes_no(answer)
-        if classified != "unknown":
-            return classified
-        if any(word in customer_text for word in OWNER_WORDS):
-            return "yes"
-        return "unknown"
+        client = OpenAI(api_key=self.api_key)
+        schema = self._json_schema()
+        response = client.responses.create(
+            model=self.model,
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict post-call QA analyst for a Hindi/Hinglish sales calling agent. "
+                        "Read the transcript and infer the final customer answers semantically. "
+                        "Do not rely on keywords only. If the transcript does not support an answer, use unknown. "
+                        "Return only values that match the provided JSON schema."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": self._build_user_prompt(session),
+                },
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "call_answer_extraction",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        )
+        answers = self._parse_response(response)
+        return self._normalize_answers(answers)
+
+    def _build_user_prompt(self, session: CallSession) -> str:
+        fields = "\n".join(
+            f"- {field.name}: {field.question}; allowed values: {', '.join(field.allowed_values)}"
+            for field in ANSWER_FIELDS
+        )
+        return (
+            "Extract these fields from the call transcript. Prefer the customer's latest clear answer.\n\n"
+            f"Fields:\n{fields}\n\n"
+            f"Call status: {session.status}\n"
+            f"Transcript:\n{session.transcript_text or '[empty transcript]'}"
+        )
+
+    def _json_schema(self) -> dict[str, Any]:
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for field in ANSWER_FIELDS:
+            required.append(field.name)
+            if field.allowed_values == ("free_text",):
+                properties[field.name] = {
+                    "type": "string",
+                    "description": f"{field.question} Use unknown when unavailable.",
+                }
+            else:
+                properties[field.name] = {
+                    "type": "string",
+                    "enum": list(field.allowed_values),
+                    "description": field.question,
+                }
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": properties,
+            "required": required,
+        }
+
+    def _parse_response(self, response: Any) -> dict[str, Any]:
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return json.loads(output_text)
+
+        # Compatibility path for mocked SDK responses or SDK shape changes.
+        for item in getattr(response, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    return json.loads(text)
+        raise AnswerExtractionError("OpenAI response did not contain structured output text.")
+
+    def _normalize_answers(self, answers: dict[str, Any]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for field in ANSWER_FIELDS:
+            raw_value = answers.get(field.name, "unknown")
+            value = str(raw_value).strip() if raw_value is not None else "unknown"
+            if not value:
+                value = "unknown"
+            if field.allowed_values != ("free_text",) and value not in field.allowed_values:
+                logger.warning("invalid_answer_value", extra={"field": field.name, "value": value})
+                value = "unknown"
+            normalized[field.name] = value
+        return normalized

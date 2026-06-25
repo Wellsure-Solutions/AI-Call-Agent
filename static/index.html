@@ -103,6 +103,8 @@
     let mediaStream = null;
     let workletNode = null;
     let nextPlayTime = 0;
+    let messageSeq = 0;
+    const recentMessages = new Set();
 
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
@@ -110,9 +112,19 @@
     const chatLog = document.getElementById("chatLog");
 
     function logMessage(role, text) {
+        const normalized = `${role}:${text}`.trim();
+        if (recentMessages.has(normalized)) return;
+        recentMessages.add(normalized);
+        if (recentMessages.size > 100) {
+            recentMessages.clear();
+            recentMessages.add(normalized);
+        }
         const div = document.createElement("div");
         div.className = "msg";
-        div.innerHTML = `<span class="role">${role}:</span> ${text}`;
+        div.dataset.seq = String(++messageSeq);
+        div.innerHTML = `<span class="role"></span> <span class="content"></span>`;
+        div.querySelector(".role").textContent = `${role}:`;
+        div.querySelector(".content").textContent = text;
         chatLog.appendChild(div);
         chatLog.scrollTop = chatLog.scrollHeight;
     }
@@ -171,7 +183,8 @@
 
             await audioContext.audioWorklet.addModule(workletUrl);
 
-            ws = new WebSocket(`ws://${window.location.host}/ws`);
+            const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
             ws.binaryType = "arraybuffer";
 
             ws.onopen = () => {
@@ -201,7 +214,9 @@
                 if (typeof event.data === "string") {
                     try {
                         const msg = JSON.parse(event.data);
-                        if (msg.role && msg.content) {
+                        if (msg.event === "closing_call") {
+                            stopCall("Agent completed the call.");
+                        } else if (msg.role && msg.content) {
                             logMessage(msg.role, msg.content);
                         } else if (msg.error) {
                             logMessage("system", msg.error);
@@ -227,8 +242,11 @@
 
     function stopCall(status) {
         if (ws) {
-            ws.close();
+            const socket = ws;
             ws = null;
+            if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+                socket.close();
+            }
         }
         if (workletNode) {
             workletNode.disconnect();
