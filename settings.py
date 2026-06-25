@@ -7,3 +7,6 @@ ANSWERS_WORKBOOK = Path(os.getenv("CALL_AGENT_ANSWERS_WORKBOOK", DATA_DIR / "cal
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 HOST = os.getenv("CALL_AGENT_HOST", "127.0.0.1")
 PORT = int(os.getenv("CALL_AGENT_PORT", "8000"))
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")

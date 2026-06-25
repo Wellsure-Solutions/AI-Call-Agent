@@ -9,6 +9,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
 from answer_extractor import AnswerExtractor
+from call_control import is_closing_call_message
+from call_service import CallResultService
 from config import DEEPGRAM_API_KEY, get_agent_settings
 from excel_store import ExcelAnswerStore
 from models import CallSession
@@ -17,6 +19,7 @@ from settings import ANSWERS_WORKBOOK, HOST, PORT
 app = FastAPI(title="Autonomous Calling Agent")
 answer_extractor = AnswerExtractor()
 answer_store = ExcelAnswerStore(ANSWERS_WORKBOOK)
+call_result_service = CallResultService(answer_extractor, answer_store)
 
 
 @app.get("/")
@@ -38,6 +41,7 @@ class DeepgramCallBridge:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.message_queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue()
         self.client_task: asyncio.Task | None = None
+        self.closing_requested = False
 
     async def run(self) -> None:
         await self.websocket.accept()
@@ -58,7 +62,7 @@ class DeepgramCallBridge:
                 threading.Thread(target=connection.start_listening, daemon=True).start()
                 self.client_task = asyncio.create_task(self._send_to_client())
 
-                while True:
+                while not self.closing_requested:
                     client_audio_data = await self.websocket.receive_bytes()
                     if client_audio_data:
                         connection.send_media(client_audio_data)
@@ -90,6 +94,11 @@ class DeepgramCallBridge:
             msg_type = getattr(message, "type", "Unknown")
             print(f"[deepgram] call={self.session.call_id} message type={msg_type}")
 
+            if is_closing_call_message(message, content):
+                self.closing_requested = True
+                self._queue_threadsafe("control", json.dumps({"event": "closing_call"}))
+                return
+
             if msg_type == "ConversationText" or (role and content):
                 self.session.add_turn(role, content)
                 payload = json.dumps({"role": role or "agent", "content": content or ""})
@@ -113,13 +122,16 @@ class DeepgramCallBridge:
                     await self.websocket.send_bytes(data)
                 elif message_type == "text" and isinstance(data, str):
                     await self.websocket.send_text(data)
+                elif message_type == "control" and isinstance(data, str):
+                    await self.websocket.send_text(data)
+                    await self.websocket.close(code=1000, reason="agent_closing_call")
+                    self.closing_requested = True
+                    break
         except asyncio.CancelledError:
             pass
 
     def _persist_call(self, status: str) -> None:
-        self.session.finish(status)
-        self.session.answers = answer_extractor.extract(self.session)
-        answer_store.append_call(self.session)
+        call_result_service.finalize(self.session, status)
         print(f"Saved call {self.session.call_id} answers to {ANSWERS_WORKBOOK}")
 
 
