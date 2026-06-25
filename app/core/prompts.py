@@ -1,4 +1,4 @@
-from models import AnswerField
+from app.core.models import AnswerField
 
 ANSWER_FIELDS = [
     AnswerField(
@@ -48,12 +48,15 @@ OBJECTIVES:
 3. Check current online selling status.
 4. Capture GST availability.
 5. Ask callback permission.
-6. End politely.
+6. When the final polite goodbye has been spoken, call _closing_call() exactly once so the app can end the call.
+
+End politely.
 
 Maximum call duration: 90 seconds.
 
 SPEAKING STYLE:
-- Hindi first.
+- Hindi first; use simple spoken Hindi with light Hinglish only when natural.
+- Speak clearly for Indian phone audio: short sentences, no fast English phrases, one question at a time.
 - Natural Hinglish.
 - Short responses.
 - Never sound robotic.
@@ -129,6 +132,7 @@ already_selling_online=yes|no|unknown
 End:
 Samay dene ke liye dhanyavaad ji.
 Aapka din shubh ho.
+Then call _closing_call().
 
 IF INTERESTED=YES
 
@@ -157,6 +161,7 @@ End:
 Bahut dhanyavaad ji.
 Hamari team aapse jaldi sampark karegi.
 Aapka din shubh ho.
+Then call _closing_call().
 
 OBJECTION HANDLING
 
