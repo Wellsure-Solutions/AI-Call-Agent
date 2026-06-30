@@ -1,27 +1,23 @@
-import asyncio
 import json
-import threading
-from dataclasses import asdict, is_dataclass
 
 import uvicorn
-from deepgram import DeepgramClient
-from deepgram.core.events import EventType
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 
+from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
-from app.services.call_control import is_closing_call_message
 from app.services.call_service import CallResultService
-from app.services.transcript_sanitizer import strip_spoken_internal_commands
-from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
 from app.storage.excel_store import ExcelAnswerStore
-from app.core.models import CallSession
 from app.core.settings import ANSWERS_WORKBOOK, HOST, INDEX_HTML, PORT
+from app.telephony.adapters.browser_adapter import BrowserAdapter
+from app.telephony.audio.audio_bridge import AudioBridge
+from app.telephony.call_manager import CallManager
 
 app = FastAPI(title="Autonomous Calling Agent")
 answer_extractor = AnswerExtractor()
 answer_store = ExcelAnswerStore(ANSWERS_WORKBOOK)
 call_result_service = CallResultService(answer_extractor, answer_store)
+call_manager = CallManager()
 
 
 @app.get("/")
@@ -34,134 +30,26 @@ async def health_check():
     return {"status": "ok", "answers_workbook": str(ANSWERS_WORKBOOK)}
 
 
-def _safe_event_payload(event) -> dict[str, object]:
-    """Return a serializable event payload for Deepgram diagnostics."""
-    if event is None:
-        return {}
-    if is_dataclass(event):
-        return asdict(event)
-    if isinstance(event, dict):
-        return event
-    payload: dict[str, object] = {}
-    for name in ("type", "description", "message", "code", "variant", "role", "content"):
-        value = getattr(event, name, None)
-        if value is not None:
-            payload[name] = value
-    if not payload:
-        payload["repr"] = repr(event)
-    return payload
-
-
-class DeepgramCallBridge:
-    """Bridges browser/Asterisk audio to Deepgram and persists temporary call answers."""
-
-    def __init__(self, websocket: WebSocket):
-        self.websocket = websocket
-        self.session = CallSession()
-        self.loop: asyncio.AbstractEventLoop | None = None
-        self.message_queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue()
-        self.client_task: asyncio.Task | None = None
-        self.closing_requested = False
-
-    async def run(self) -> None:
-        await self.websocket.accept()
-        if not DEEPGRAM_API_KEY:
-            await self.websocket.send_text(json.dumps({"error": "DEEPGRAM_API_KEY is not set on the server."}))
-            await self.websocket.close()
-            return
-
-        self.loop = asyncio.get_running_loop()
-        client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
-        close_status = "completed"
-
-        try:
-            with client.agent.v1.connect() as connection:
-                self._register_handlers(connection)
-                connection.send_settings(get_agent_settings())
-
-                threading.Thread(target=connection.start_listening, daemon=True).start()
-                self.client_task = asyncio.create_task(self._send_to_client())
-
-                while not self.closing_requested:
-                    client_audio_data = await self.websocket.receive_bytes()
-                    if client_audio_data:
-                        connection.send_media(client_audio_data)
-        except WebSocketDisconnect:
-            close_status = "client_disconnected"
-            print(f"Client disconnected for call {self.session.call_id}.")
-        except Exception as exc:
-            close_status = "error"
-            print(f"Connection error for call {self.session.call_id}: {exc}")
-        finally:
-            if self.client_task is not None:
-                self.client_task.cancel()
-            self._persist_call(close_status)
-
-    def _register_handlers(self, connection) -> None:
-        connection.on(EventType.OPEN, lambda _event: print(f"[deepgram] opened call {self.session.call_id}"))
-        connection.on(EventType.MESSAGE, self._on_message)
-        connection.on(EventType.CLOSE, lambda _event: print(f"[deepgram] closed call {self.session.call_id}"))
-        connection.on(EventType.ERROR, self._on_error)
-
-    def _on_message(self, message) -> None:
-        try:
-            if isinstance(message, bytes):
-                self._queue_threadsafe("audio", message)
-                return
-
-            role = getattr(message, "role", None)
-            content = getattr(message, "content", None)
-            msg_type = getattr(message, "type", "Unknown")
-            print(f"[deepgram] call={self.session.call_id} message type={msg_type} payload={_safe_event_payload(message)}")
-
-            if is_closing_call_message(message, content):
-                self.closing_requested = True
-                self._queue_threadsafe("control", json.dumps({"event": "closing_call"}))
-                return
-
-            if msg_type == "ConversationText" or (role and content):
-                cleaned_content = strip_spoken_internal_commands(content) if role == "assistant" else (content or "")
-                if not cleaned_content:
-                    return
-                self.session.add_turn(role, cleaned_content)
-                payload = json.dumps({"role": role or "agent", "content": cleaned_content})
-                self._queue_threadsafe("text", payload)
-        except Exception as exc:
-            print(f"[deepgram] handler error for call {self.session.call_id}: {exc}")
-
-    def _on_error(self, error) -> None:
-        error_payload = _safe_event_payload(error)
-        print(f"[deepgram] call={self.session.call_id} error: {error_payload}")
-        self._queue_threadsafe("text", json.dumps({"error": "Deepgram agent error", "details": error_payload}))
-
-    def _queue_threadsafe(self, message_type: str, data: bytes | str) -> None:
-        if self.loop is not None:
-            asyncio.run_coroutine_threadsafe(self.message_queue.put((message_type, data)), self.loop)
-
-    async def _send_to_client(self) -> None:
-        try:
-            while True:
-                message_type, data = await self.message_queue.get()
-                if message_type == "audio" and isinstance(data, bytes):
-                    await self.websocket.send_bytes(data)
-                elif message_type == "text" and isinstance(data, str):
-                    await self.websocket.send_text(data)
-                elif message_type == "control" and isinstance(data, str):
-                    await self.websocket.send_text(data)
-                    await self.websocket.close(code=1000, reason="agent_closing_call")
-                    self.closing_requested = True
-                    break
-        except asyncio.CancelledError:
-            pass
-
-    def _persist_call(self, status: str) -> None:
-        call_result_service.finalize(self.session, status)
-        print(f"Saved call {self.session.call_id} answers to {ANSWERS_WORKBOOK}")
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await DeepgramCallBridge(websocket).run()
+    adapter = BrowserAdapter(websocket)
+    session = call_manager.create_session(campaign_name="browser", direction="browser")
+    bridge = AudioBridge(session, call_result_service)
+    adapter.audio_bridge = bridge
+    adapter.attach(session)
+
+    if not DEEPGRAM_API_KEY:
+        await websocket.accept()
+        await websocket.send_text(json.dumps({"error": "DEEPGRAM_API_KEY is not set on the server."}))
+        await websocket.close()
+        call_manager.destroy_session(session.call_id)
+        return
+
+    try:
+        await adapter.start()
+    finally:
+        call_manager.destroy_session(session.call_id)
+        print(f"Saved call {session.call_id} answers to {ANSWERS_WORKBOOK}")
 
 
 if __name__ == "__main__":
