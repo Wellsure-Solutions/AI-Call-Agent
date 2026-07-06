@@ -5,13 +5,13 @@ import audioop
 import base64
 import json
 import logging
-import os
 from typing import ClassVar
 
 from fastapi import WebSocket, WebSocketDisconnect
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
+from app.core.settings import PUBLIC_BASE_URL, TWILIO_FROM_NUMBER
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_session import CallSession
@@ -50,12 +50,10 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
     def __init__(self, audio_bridge: AudioBridge | None = None) -> None:
         super().__init__()
-        self.account_sid = os.environ["TWILIO_ACCOUNT_SID"]
-        self.auth_token = os.environ["TWILIO_AUTH_TOKEN"]
-        self.from_number = "+17629999974"
-        self.public_base_url = "https://zh5th3zd-8000.inc1.devtunnels.ms"
+        self.from_number = TWILIO_FROM_NUMBER
+        self.public_base_url = PUBLIC_BASE_URL
 
-        self._client = Client(self.account_sid, self.auth_token)
+        self._client = Client()
         self.call_sid: str | None = None
         self.stream_sid: str | None = None
         self.websocket: WebSocket | None = None  # set once Twilio's stream connects
@@ -87,6 +85,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
             status_callback=f"{self.public_base_url}/twilio/status",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             machine_detection="DetectMessageEnd",
+            trim="trim-silence",
         )
         self.call_sid = call.sid
         self.session.metadata["call_sid"] = self.call_sid
@@ -99,10 +98,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
     async def hangup(self) -> None:
         self.closing_requested = True
-        if self.call_sid:
-            await asyncio.to_thread(self._client.calls(self.call_sid).update, status="completed")
+        await self._complete_twilio_call()
         if self.websocket is not None:
-            await self.websocket.close(code=1000, reason="agent_closing_call")
+            try:
+                await self.websocket.close(code=1000, reason="agent_closing_call")
+            except RuntimeError:
+                pass
 
     async def answer(self) -> None:
         # Nothing to do here for Twilio: by the time start() runs, Twilio has
@@ -206,8 +207,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
                     await self.send_audio(data)
                 elif message_type == "control" and isinstance(data, str):
                     self.closing_requested = True
+                    await self._complete_twilio_call()
                     if self.websocket is not None:
-                        await self.websocket.close(code=1000, reason="agent_closing_call")
+                        try:
+                            await self.websocket.close(code=1000, reason="agent_closing_call")
+                        except RuntimeError:
+                            pass
                     break
                 # "text" (live transcript, meant for a browser UI) has no
                 # destination on a phone call's audio-only WebSocket --
@@ -216,6 +221,15 @@ class TwilioAdapter(BaseTelephonyAdapter):
                 # instead of trying to send them down this socket.
         except asyncio.CancelledError:
             pass
+
+
+    async def _complete_twilio_call(self) -> None:
+        if not self.call_sid:
+            return
+        try:
+            await asyncio.to_thread(self._client.calls(self.call_sid).update, status="completed")
+        except Exception as exc:
+            logger.warning("Unable to complete Twilio call %s: %s", self.call_sid, exc)
 
     # ------------------------------------------------------------------
     # TwiML builder -- used by the /twilio/twiml webhook route

@@ -85,7 +85,12 @@ class CallSession:
         if not content:
             return
         normalized_role = (role or "agent").strip().lower()
-        self.transcript.append(TranscriptTurn(role=normalized_role, content=content.strip()))
+        normalized_content = content.strip()
+        if self.transcript:
+            previous = self.transcript[-1]
+            if previous.role == normalized_role and previous.content == normalized_content:
+                return
+        self.transcript.append(TranscriptTurn(role=normalized_role, content=normalized_content))
 
     def finish(self, status: str = "completed") -> None:
         status_map = {
