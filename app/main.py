@@ -12,13 +12,14 @@ from app.core.settings import ANSWERS_WORKBOOK, HOST, INDEX_HTML, PORT
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
+from app.telephony.twilio_routes import router as twilio_router
 
 app = FastAPI(title="Autonomous Calling Agent")
 answer_extractor = AnswerExtractor()
 answer_store = ExcelAnswerStore(ANSWERS_WORKBOOK)
 call_result_service = CallResultService(answer_extractor, answer_store)
 call_manager = CallManager()
-
+app.include_router(twilio_router)
 
 @app.get("/")
 async def get_ui():
