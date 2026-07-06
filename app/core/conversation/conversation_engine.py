@@ -10,7 +10,7 @@ from deepgram import DeepgramClient
 from deepgram.core.events import EventType
 
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
-from app.services.call_control import is_closing_call_message
+from app.services.call_control import is_closing_call_message, is_terminal_assistant_text
 from app.services.transcript_sanitizer import strip_spoken_internal_commands
 from app.telephony.call_session import CallSession
 from app.telephony.state_machine import CallState
@@ -56,6 +56,7 @@ class ConversationEngine:
         self.connection = None
         self._connection_context = None
         self.closing_requested = False
+        self._close_after_audio_done = False
 
     async def start(self) -> None:
         if not DEEPGRAM_API_KEY:
@@ -103,11 +104,19 @@ class ConversationEngine:
                 self._call_threadsafe(self.on_finished)
                 return
 
+            if msg_type == "AgentAudioDone" and self._close_after_audio_done:
+                self.closing_requested = True
+                self.session.safe_transition_to(CallState.AI_FINISHED)
+                self._call_threadsafe(self.on_finished)
+                return
+
             if msg_type == "ConversationText" or (role and content):
                 cleaned_content = strip_spoken_internal_commands(content) if role == "assistant" else (content or "")
                 if not cleaned_content:
                     return
                 self.session.add_turn(role, cleaned_content)
+                if role == "assistant" and is_terminal_assistant_text(cleaned_content):
+                    self._close_after_audio_done = True
                 payload = json.dumps({"role": role or "agent", "content": cleaned_content})
                 self._call_threadsafe(lambda: self.on_text(payload))
         except Exception as exc:

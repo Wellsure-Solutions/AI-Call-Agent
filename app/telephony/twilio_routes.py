@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.excel_store import ExcelAnswerStore
-from app.core.settings import ANSWERS_WORKBOOK
+from app.core.settings import ANSWERS_WORKBOOK, PUBLIC_BASE_URL
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
@@ -120,7 +120,6 @@ async def media_stream(websocket: WebSocket):
 
 def router_ws_url(request: Request) -> str:
     """Builds the wss:// URL Twilio should stream audio to, from PUBLIC_BASE_URL."""
-    import os
-    base = "https://zh5th3zd-8000.inc1.devtunnels.ms"
+    base = PUBLIC_BASE_URL
     ws_base = base.replace("https://", "wss://").replace("http://", "ws://")
     return f"{ws_base}/twilio/media-stream"

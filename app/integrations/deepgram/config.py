@@ -6,7 +6,17 @@ from deepgram.agent.v1.types import (
     AgentV1SettingsAudioOutput,
 )
 from app.core.prompts import PROMPT
-from app.core.settings import DEEPGRAM_API_KEY
+from app.core.settings import (
+    DEEPGRAM_API_KEY,
+    DEEPGRAM_GREETING,
+    DEEPGRAM_LISTEN_MODEL,
+    DEEPGRAM_SPEAK_MODEL_ID,
+    DEEPGRAM_SPEAK_PROVIDER,
+    DEEPGRAM_SPEAK_VOICE_ID,
+    DEEPGRAM_THINK_MODEL,
+    DEEPGRAM_THINK_PROVIDER,
+    DEEPGRAM_THINK_TEMPERATURE,
+)
 
 
 def get_agent_settings() -> AgentV1Settings:
@@ -28,23 +38,24 @@ def get_agent_settings() -> AgentV1Settings:
                 "provider": {
                     "type": "deepgram",
                     "version": "v2",
-                    "model": "flux-general-multi",
+                    "model": DEEPGRAM_LISTEN_MODEL,
                 }
             },
             think={
                 "provider": {
-                    "type": "google",
-                    "model": "gemini-2.5-flash-lite",
+                    "type": DEEPGRAM_THINK_PROVIDER,
+                    "model": DEEPGRAM_THINK_MODEL,
+                    "temperature": DEEPGRAM_THINK_TEMPERATURE,
                 },
                 "prompt": PROMPT,
             },
             speak={
                 "provider": {
-                    "type": "eleven_labs",
-                    "model_id": "eleven_multilingual_v2",
-                    "voice_id": "IpXGk4Ks434Jj33XXcNh",
+                    "type": DEEPGRAM_SPEAK_PROVIDER,
+                    "model_id": DEEPGRAM_SPEAK_MODEL_ID,
+                    "voice_id": DEEPGRAM_SPEAK_VOICE_ID,
                 }
             },
-            greeting="Namaste sir",
+            greeting=DEEPGRAM_GREETING,
         ),
     )
