@@ -16,6 +16,8 @@ from app.core.settings import (
     DEEPGRAM_THINK_MODEL,
     DEEPGRAM_THINK_PROVIDER,
     DEEPGRAM_THINK_TEMPERATURE,
+    DEEPGRAM_EAGER_EOT_THRESHOLD,
+    DEEPGRAM_EOT_THRESHOLD
 )
 
 
@@ -39,6 +41,9 @@ def get_agent_settings() -> AgentV1Settings:
                     "type": "deepgram",
                     "version": "v2",
                     "model": DEEPGRAM_LISTEN_MODEL,
+                    "language_hints": ["hi", "en"],
+                    "eot_threshold": DEEPGRAM_EOT_THRESHOLD,
+                    "eager_eot_threshold": DEEPGRAM_EAGER_EOT_THRESHOLD
                 }
             },
             think={
