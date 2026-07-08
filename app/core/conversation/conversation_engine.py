@@ -7,7 +7,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Callable
 
 from deepgram import DeepgramClient
-from deepgram.clients.agent.enums import AgentWebSocketEvents
+from deepgram.core.events import EventType
 
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
 from app.services.call_control import is_closing_call_message, is_terminal_assistant_text
@@ -67,7 +67,7 @@ class ConversationEngine:
         self.connection = self._connection_context.__enter__()
         self.session.deepgram_connection = self.connection
         self._register_handlers(self.connection)
-        self.connection.send_settings(get_agent_settings(self.session.metadata.get("lead")))
+        self.connection.send_settings(get_agent_settings())
         self.session.safe_transition_to(CallState.AI_ACTIVE)
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
 
@@ -82,12 +82,10 @@ class ConversationEngine:
             self.connection = None
 
     def _register_handlers(self, connection) -> None:
-        connection.on(AgentWebSocketEvents.Open, lambda _event: print(f"[deepgram] opened call {self.session.call_id}"))
-        connection.on(AgentWebSocketEvents.ConversationText, self._on_message)
-        connection.on(AgentWebSocketEvents.AudioData, self._on_message)
-        connection.on(AgentWebSocketEvents.AgentAudioDone, self._on_message)
-        connection.on(AgentWebSocketEvents.Close, lambda _event: print(f"[deepgram] closed call {self.session.call_id}"))
-        connection.on(AgentWebSocketEvents.Error, self._on_error)
+        connection.on(EventType.OPEN, lambda _event: print(f"[deepgram] opened call {self.session.call_id}"))
+        connection.on(EventType.MESSAGE, self._on_message)
+        connection.on(EventType.CLOSE, lambda _event: print(f"[deepgram] closed call {self.session.call_id}"))
+        connection.on(EventType.ERROR, self._on_error)
 
     def _on_message(self, message) -> None:
         try:
