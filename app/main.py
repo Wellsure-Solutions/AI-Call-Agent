@@ -8,11 +8,12 @@ from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.excel_store import ExcelAnswerStore
-from app.core.settings import ANSWERS_WORKBOOK, HOST, INDEX_HTML, PORT
+from app.core.settings import ANSWERS_WORKBOOK, BROWSER_CALL_HTML, HOST, INDEX_HTML, PORT
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
 from app.telephony.twilio_routes import media_router, router as twilio_router
+from app.api.dashboard import router as dashboard_router
 
 app = FastAPI(title="Autonomous Calling Agent")
 answer_extractor = AnswerExtractor()
@@ -21,10 +22,16 @@ call_result_service = CallResultService(answer_extractor, answer_store)
 call_manager = CallManager()
 app.include_router(twilio_router)
 app.include_router(media_router)
+app.include_router(dashboard_router)
 
 @app.get("/")
 async def get_ui():
     return FileResponse(INDEX_HTML)
+
+
+@app.get("/browser")
+async def get_browser_call_ui():
+    return FileResponse(BROWSER_CALL_HTML)
 
 
 @app.get("/health")

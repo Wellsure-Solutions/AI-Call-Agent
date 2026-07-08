@@ -7,6 +7,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 APP_DIR = ROOT_DIR / "app"
 STATIC_DIR = APP_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
+BROWSER_CALL_HTML = STATIC_DIR / "browser_call.html"
 DATA_DIR = Path(os.getenv("CALL_AGENT_DATA_DIR", ROOT_DIR / "data"))
 ANSWERS_WORKBOOK = Path(os.getenv("CALL_AGENT_ANSWERS_WORKBOOK", DATA_DIR / "call_answers.xlsx"))
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
