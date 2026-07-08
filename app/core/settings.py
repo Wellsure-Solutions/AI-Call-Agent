@@ -27,8 +27,8 @@ DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.7"
 DEEPGRAM_SPEAK_PROVIDER = os.getenv("DEEPGRAM_SPEAK_PROVIDER", "eleven_labs")
 DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_flash_v2_5")
 DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "IpXGk4Ks434Jj33XXcNh")
-
-
-DEEPGRAM_GREETING = os.getenv("DEEPGRAM_GREETING", "Namaste sir, main Priya amazon se bol rahi hoon. Kya ye baat karne ka sahi samay hai?")
-DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.6"))
+# Ms9OTvWb99V6DwRHZn6q
+# k2intd1ORm0YUH8etnXg
+DEEPGRAM_GREETING = os.getenv("DEEPGRAM_GREETING", "Namaste sir, main amazon se Priya bol rahi hoon. Kya ye baat karne ka sahi samay hai?")
+DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.5"))
 DEEPGRAM_EAGER_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EAGER_EOT_THRESHOLD", "0.5"))
