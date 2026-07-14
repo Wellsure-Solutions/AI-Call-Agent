@@ -67,7 +67,7 @@ class ConversationEngine:
         self.connection = self._connection_context.__enter__()
         self.session.deepgram_connection = self.connection
         self._register_handlers(self.connection)
-        self.connection.send_settings(get_agent_settings())
+        self.connection.send_settings(get_agent_settings(self.session.metadata))
         self.session.safe_transition_to(CallState.AI_ACTIVE)
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
 
