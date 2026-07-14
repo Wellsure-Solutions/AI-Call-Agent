@@ -86,7 +86,7 @@
             <div class="card">
                 <div class="actions" style="justify-content:space-between;align-items:center">
                     <div><h2>Lead Upload Center</h2><div class="sub">Import from Excel/CSV, paste from a spreadsheet, or add one lead manually. Required: Business Name, Phone Number, Category.</div></div>
-                    <button class="btn ghost" onclick="downloadTemplate()">Download CSV Template</button>
+                    <button class="btn ghost" onclick="downloadTemplate()">Download Excel Template</button>
                 </div>
                 <div class="tabs" style="margin-top:16px">
                     <button class="btn active" data-lead-tab="filePane">File upload</button>
@@ -184,7 +184,7 @@ async function importMappedLeads() {
     clearMapping(); refresh();
 }
 function formatImportProblems(result) { const rejected = result.rejected || []; if (!rejected.length) return ''; return `<br><b>Review needed:</b> ${rejected.slice(0,5).map(item => `Row ${item.row}: ${(item.errors || []).join(', ')}`).join('; ')}${rejected.length > 5 ? `; +${rejected.length - 5} more` : ''}`; }
-function downloadTemplate() { const csv = 'Business Name,Phone Number,Category,Notes\nSharma Electronics,+919876543210,Mobile Accessories,Owner prefers evenings\n'; const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type:'text/csv' })); link.download = 'lead-upload-template.csv'; link.click(); URL.revokeObjectURL(link.href); }
+function downloadTemplate() { window.location.href = '/api/leads/template'; }
 function renderLeads() {
     const query = ($('leadSearch')?.value || '').toLowerCase();
     const rows = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query));

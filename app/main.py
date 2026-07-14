@@ -190,6 +190,16 @@ async def stats():
     }
 
 
+@app.get("/api/leads/template")
+async def lead_template():
+    try:
+        filename, content, media_type = answer_store.export_lead_template()
+    except Exception as exc:
+        logger.exception("lead_template_failed")
+        raise HTTPException(status_code=500, detail=f"Unable to generate lead template: {exc}") from exc
+    return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.get("/api/export/{fmt}")
 async def export_calls(fmt: str):
     if fmt not in {"xlsx", "csv", "json"}:

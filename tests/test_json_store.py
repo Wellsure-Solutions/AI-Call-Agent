@@ -61,3 +61,35 @@ def test_update_lead_tracks_call_metadata(tmp_path):
     assert updated is not None
     assert updated["status"] == "calling"
     assert store.get_lead(lead_id)["last_call_id"] == "call-123"
+
+
+def test_phone_numbers_are_normalized_for_indian_calling(tmp_path):
+    store = JsonCallStore(tmp_path)
+
+    assert store.validate_lead({"business_name": "A", "phone_number": "9251528417", "category": "Retail"})[0]["phone_number"] == "+919251528417"
+    assert store.validate_lead({"business_name": "B", "phone_number": "919251528417", "category": "Retail"})[0]["phone_number"] == "+919251528417"
+    assert store.validate_lead({"business_name": "C", "phone_number": "+919251528417", "category": "Retail"})[0]["phone_number"] == "+919251528417"
+
+
+def test_scientific_notation_phone_numbers_expand_before_normalization(tmp_path):
+    store = JsonCallStore(tmp_path)
+
+    normalized, errors = store.validate_lead({"business_name": "Sci", "phone_number": "9.19251528417E+11", "category": "Retail"})
+
+    assert errors == []
+    assert normalized["phone_number"] == "+919251528417"
+
+
+def test_excel_lead_template_formats_phone_column_as_text(tmp_path):
+    openpyxl = __import__("openpyxl")
+    store = JsonCallStore(tmp_path)
+
+    filename, content, media_type = store.export_lead_template()
+    workbook = openpyxl.load_workbook(__import__("io").BytesIO(content))
+    sheet = workbook.active
+
+    assert filename == "lead-upload-template.xlsx"
+    assert media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert sheet["B1"].number_format == "@"
+    assert sheet["B2"].number_format == "@"
+    assert sheet["B2"].value == "+919876543210"
