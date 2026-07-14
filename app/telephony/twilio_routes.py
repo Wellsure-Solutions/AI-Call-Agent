@@ -25,8 +25,8 @@ from pydantic import BaseModel
 
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
-from app.storage.excel_store import ExcelAnswerStore
-from app.core.settings import ANSWERS_WORKBOOK, PUBLIC_BASE_URL
+from app.storage.json_store import JsonCallStore
+from app.core.settings import DATA_DIR, PUBLIC_BASE_URL
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/twilio", tags=["twilio"])
 media_router = APIRouter(tags=["twilio-media"])
 
 _answer_extractor = AnswerExtractor()
-_answer_store = ExcelAnswerStore(ANSWERS_WORKBOOK)
+_answer_store = JsonCallStore(DATA_DIR)
 call_result_service = CallResultService(_answer_extractor, _answer_store)
 call_manager = CallManager()
 
@@ -44,6 +44,10 @@ call_manager = CallManager()
 class OutboundCallRequest(BaseModel):
     phone_number: str
     campaign_name: str = "twilio_outbound"
+    lead_id: str | None = None
+    business_name: str | None = None
+    category: str | None = None
+    notes: str | None = None
 
 
 @router.post("/outbound")
@@ -54,6 +58,13 @@ async def start_outbound_call(request: OutboundCallRequest):
         campaign_name=request.campaign_name,
         phone_number=request.phone_number,
         direction="twilio",
+        metadata={
+            "lead_id": request.lead_id,
+            "business_name": request.business_name,
+            "category": request.category,
+            "notes": request.notes,
+            "phone_number": request.phone_number,
+        },
     )
     bridge = AudioBridge(session, call_result_service)
     adapter = TwilioAdapter(audio_bridge=bridge)
