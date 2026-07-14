@@ -21,8 +21,20 @@ from app.core.settings import (
 )
 
 
-def get_agent_settings() -> AgentV1Settings:
+def get_agent_settings(context: dict | None = None) -> AgentV1Settings:
     """Return Deepgram Agent settings for the current campaign prompt."""
+    prompt = PROMPT
+    if context:
+        business_name = context.get("business_name") or ""
+        category = context.get("category") or ""
+        notes = context.get("notes") or ""
+        if business_name or category or notes:
+            prompt = (
+                PROMPT
+                + "\n\n### CURRENT LEAD CONTEXT\n"
+                + "Use this context naturally to personalize the opening and pitch. Do not read it like a form.\n"
+                + f"Business Name: {business_name}\nCategory: {category}\nNotes: {notes}\n"
+            )
     return AgentV1Settings(
         audio=AgentV1SettingsAudio(
             input=AgentV1SettingsAudioInput(
@@ -52,7 +64,7 @@ def get_agent_settings() -> AgentV1Settings:
                     "model": DEEPGRAM_THINK_MODEL,
                     "temperature": DEEPGRAM_THINK_TEMPERATURE,
                 },
-                "prompt": PROMPT,
+                "prompt": prompt,
             },
             speak={
                 "provider": {
