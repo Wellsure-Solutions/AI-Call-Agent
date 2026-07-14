@@ -1,33 +1,200 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Call Testing Dashboard</title>
-<style>
-:root{--bg:#f5f7fb;--card:#fff;--ink:#172033;--muted:#697386;--brand:#2446d8;--ok:#11a36a;--warn:#d98610;--bad:#d64545;--line:#e6eaf2}*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}.side{background:#0d1730;color:#fff;padding:24px;position:sticky;top:0;height:100vh}.brand{font-weight:800;font-size:22px;margin-bottom:30px}.nav button{display:block;width:100%;margin:8px 0;padding:12px 14px;border:0;border-radius:12px;background:transparent;color:#cbd5e1;text-align:left;font-weight:700;cursor:pointer}.nav button.active,.nav button:hover{background:#1c2b52;color:#fff}.main{padding:28px;overflow:auto}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:22px}.top h1{margin:0;font-size:28px}.sub{color:var(--muted);margin-top:4px}.grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(4,minmax(150px,1fr))}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 8px 24px rgba(22,34,51,.04);padding:18px}.stat .label{color:var(--muted);font-size:13px}.stat .value{font-size:28px;font-weight:850;margin-top:8px}.charts{grid-template-columns:1.4fr 1fr;margin-top:16px}.bar{display:flex;align-items:center;gap:10px;margin:10px 0}.bar span:first-child{width:110px;color:var(--muted);font-size:13px}.track{flex:1;height:10px;background:#edf1f7;border-radius:999px;overflow:hidden}.fill{height:100%;background:linear-gradient(90deg,#2446d8,#5fd0ff)}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:0;border-radius:11px;background:var(--brand);color:#fff;font-weight:800;padding:11px 14px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}.btn.secondary{background:#eef2ff;color:#2446d8}.btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:12px;padding:11px;background:#fff;color:var(--ink)}textarea{min-height:110px}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.tablewrap{overflow:auto}.toolbar{display:flex;gap:10px;margin:0 0 14px}.table{width:100%;border-collapse:collapse}.table th,.table td{padding:12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}.table th{font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.04em}.table tr{cursor:pointer}.badge{padding:5px 9px;border-radius:999px;background:#edf1f7;font-size:12px;font-weight:800}.yes{background:#dcfce7;color:#166534}.no{background:#fee2e2;color:#991b1b}.modal{position:fixed;inset:0;background:rgba(6,10,22,.58);display:none;align-items:center;justify-content:center;padding:24px}.modal.open{display:flex}.panel{max-width:900px;max-height:90vh;overflow:auto;background:#fff;border-radius:20px;padding:22px;width:100%}pre{white-space:pre-wrap;background:#0d1730;color:#dbeafe;border-radius:14px;padding:14px}.hidden{display:none}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.stats,.charts,.formgrid{grid-template-columns:1fr}.toolbar{flex-direction:column}}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Call Testing Dashboard</title>
+    <style>
+        :root { --bg:#f5f7fb; --card:#fff; --ink:#172033; --muted:#697386; --brand:#2446d8; --ok:#11a36a; --warn:#d98610; --bad:#d64545; --line:#e6eaf2; }
+        * { box-sizing: border-box; }
+        body { margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--ink); }
+        .layout { display:grid; grid-template-columns:260px 1fr; min-height:100vh; }
+        .side { background:#0d1730; color:#fff; padding:24px; position:sticky; top:0; height:100vh; }
+        .brand { font-weight:800; font-size:22px; margin-bottom:30px; }
+        .nav button { display:block; width:100%; margin:8px 0; padding:12px 14px; border:0; border-radius:12px; background:transparent; color:#cbd5e1; text-align:left; font-weight:700; cursor:pointer; }
+        .nav button.active, .nav button:hover { background:#1c2b52; color:#fff; }
+        .main { padding:28px; overflow:auto; }
+        .top { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:22px; }
+        h1, h2, h3 { margin-top:0; }
+        .sub { color:var(--muted); margin-top:4px; }
+        .grid { display:grid; gap:16px; }
+        .stats { grid-template-columns:repeat(4,minmax(150px,1fr)); }
+        .card { background:var(--card); border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 24px rgba(22,34,51,.04); padding:18px; }
+        .stat .label { color:var(--muted); font-size:13px; }
+        .stat .value { font-size:28px; font-weight:850; margin-top:8px; }
+        .charts { grid-template-columns:1.4fr 1fr; margin-top:16px; }
+        .bar { display:flex; align-items:center; gap:10px; margin:10px 0; }
+        .bar span:first-child { width:120px; color:var(--muted); font-size:13px; }
+        .track { flex:1; height:10px; background:#edf1f7; border-radius:999px; overflow:hidden; }
+        .fill { height:100%; background:linear-gradient(90deg,#2446d8,#5fd0ff); }
+        .actions, .tabs { display:flex; gap:10px; flex-wrap:wrap; }
+        .btn { border:0; border-radius:11px; background:var(--brand); color:#fff; font-weight:800; padding:11px 14px; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
+        .btn.secondary { background:#eef2ff; color:#2446d8; }
+        .btn.ghost { background:#fff; color:var(--ink); border:1px solid var(--line); }
+        .btn.danger { background:#fee2e2; color:#991b1b; }
+        .btn:disabled { opacity:.55; cursor:not-allowed; }
+        input, select, textarea { width:100%; border:1px solid var(--line); border-radius:12px; padding:11px; background:#fff; color:var(--ink); }
+        label { display:block; font-weight:750; margin-bottom:6px; }
+        textarea { min-height:130px; resize:vertical; }
+        .formgrid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+        .three { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
+        .dropzone { border:2px dashed #b8c2d9; border-radius:18px; padding:24px; text-align:center; background:#f8faff; cursor:pointer; }
+        .dropzone.drag { border-color:var(--brand); background:#eef2ff; }
+        .tabs button { background:#fff; color:var(--ink); border:1px solid var(--line); }
+        .tabs button.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+        .notice { border-radius:14px; padding:12px; margin:12px 0; background:#eef2ff; color:#1e3a8a; }
+        .notice.ok { background:#dcfce7; color:#166534; }
+        .notice.warn { background:#fff7ed; color:#9a3412; }
+        .notice.bad { background:#fee2e2; color:#991b1b; }
+        .tablewrap { overflow:auto; }
+        .toolbar { display:flex; gap:10px; margin:0 0 14px; }
+        .table { width:100%; border-collapse:collapse; }
+        .table th, .table td { padding:12px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
+        .table th { font-size:12px; text-transform:uppercase; color:var(--muted); letter-spacing:.04em; }
+        .table tr.clickable { cursor:pointer; }
+        .badge { padding:5px 9px; border-radius:999px; background:#edf1f7; font-size:12px; font-weight:800; }
+        .yes { background:#dcfce7; color:#166534; }
+        .no { background:#fee2e2; color:#991b1b; }
+        .modal { position:fixed; inset:0; background:rgba(6,10,22,.58); display:none; align-items:center; justify-content:center; padding:24px; z-index:20; }
+        .modal.open { display:flex; }
+        .panel { max-width:900px; max-height:90vh; overflow:auto; background:#fff; border-radius:20px; padding:22px; width:100%; }
+        pre { white-space:pre-wrap; background:#0d1730; color:#dbeafe; border-radius:14px; padding:14px; }
+        .hidden { display:none !important; }
+        @media(max-width:900px){ .layout{grid-template-columns:1fr}.side{height:auto;position:relative}.stats,.charts,.formgrid,.three{grid-template-columns:1fr}.toolbar{flex-direction:column} }
+    </style>
 </head>
-<body><div class="layout"><aside class="side"><div class="brand">📞 AI Call Agent</div><div class="nav"><button class="active" data-page="overview">Dashboard Overview</button><button data-page="leads">Lead Upload</button><button data-page="calls">Calls</button><button data-page="browser">Browser Test Call</button></div></aside><main class="main"><div class="top"><div><h1 id="title">Dashboard Overview</h1><div class="sub">Monitor outbound test calls, leads, and AI responses.</div></div><div class="actions"><a class="btn secondary" href="/api/export/xlsx">Excel</a><a class="btn secondary" href="/api/export/csv">CSV</a><a class="btn secondary" href="/api/export/json">JSON</a></div></div>
-<section id="overview" class="page"><div id="stats" class="grid stats"></div><div class="grid charts"><div class="card"><h3>Calls over time</h3><div id="timeChart"></div></div><div class="card"><h3>Call outcomes</h3><div id="outcomeChart"></div></div></div></section>
-<section id="leads" class="page hidden"><div class="grid" style="grid-template-columns:1fr 1fr"><div class="card"><h3>Upload leads</h3><form id="previewForm"><label>Excel or CSV file</label><input name="file" type="file" accept=".csv,.xlsx,.xls"><p class="sub">Or paste rows copied from Excel / CSV below.</p><textarea name="pasted_data" placeholder="Business Name, Phone Number, Category, Notes&#10;Sharma Electronics,9876543210,Mobile Accessories,Owner asked for evening callback"></textarea><br><br><button class="btn" type="submit">Preview & Map Columns</button></form></div><div class="card"><h3>Column mapping</h3><div id="mappingBox" class="sub">Upload data to start mapping.</div></div></div><div class="card" style="margin-top:16px"><h3>Imported leads</h3><div id="leadTable"></div></div></section>
-<section id="calls" class="page hidden"><div class="card"><div class="toolbar"><input id="search" placeholder="Search business, phone, category..."><select id="statusFilter"><option value="">All statuses</option></select><select id="interestFilter"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select></div><div id="callTable" class="tablewrap"></div></div></section>
-<section id="browser" class="page hidden"><div class="card" style="max-width:620px"><h3>Browser voice test</h3><div class="sub" id="statusText">Ready to connect...</div><br><div class="actions"><button id="startBtn" class="btn">Start Call</button><button id="stopBtn" class="btn ghost" disabled>End Call</button></div><div id="chatLog" style="margin-top:18px;max-height:300px;overflow:auto"></div></div></section>
-</main></div><div id="modal" class="modal"><div class="panel"><div class="actions" style="justify-content:space-between"><h2>Call detail</h2><button class="btn ghost" onclick="modal.classList.remove('open')">Close</button></div><div id="detail"></div></div></div>
+<body>
+<div class="layout">
+    <aside class="side">
+        <div class="brand">📞 AI Call Agent</div>
+        <div class="nav">
+            <button class="active" data-page="overview">Dashboard Overview</button>
+            <button data-page="leads">Lead Upload</button>
+            <button data-page="calls">Calls</button>
+            <button data-page="browser">Browser Test Call</button>
+        </div>
+    </aside>
+    <main class="main">
+        <div class="top">
+            <div><h1 id="pageTitle">Dashboard Overview</h1><div class="sub">Monitor outbound test calls, leads, and AI responses.</div></div>
+            <div class="actions"><a class="btn secondary" href="/api/export/xlsx">Excel</a><a class="btn secondary" href="/api/export/csv">CSV</a><a class="btn secondary" href="/api/export/json">JSON</a></div>
+        </div>
+
+        <section id="overview" class="page"><div id="stats" class="grid stats"></div><div class="grid charts"><div class="card"><h3>Calls over time</h3><div id="timeChart"></div></div><div class="card"><h3>Call outcomes</h3><div id="outcomeChart"></div></div></div></section>
+
+        <section id="leads" class="page hidden">
+            <div class="card">
+                <div class="actions" style="justify-content:space-between;align-items:center">
+                    <div><h2>Lead Upload Center</h2><div class="sub">Import from Excel/CSV, paste from a spreadsheet, or add one lead manually. Required: Business Name, Phone Number, Category.</div></div>
+                    <button class="btn ghost" onclick="downloadTemplate()">Download CSV Template</button>
+                </div>
+                <div class="tabs" style="margin-top:16px">
+                    <button class="btn active" data-lead-tab="filePane">File upload</button>
+                    <button class="btn" data-lead-tab="pastePane">Paste from Excel</button>
+                    <button class="btn" data-lead-tab="manualPane">Manual entry</button>
+                </div>
+                <div id="leadMessage"></div>
+                <div id="filePane" class="leadPane" style="margin-top:16px">
+                    <form id="fileForm">
+                        <input id="leadFile" name="file" type="file" accept=".csv,.xlsx,.xls" class="hidden">
+                        <div id="dropzone" class="dropzone"><b>Drop Excel/CSV here</b><br><span class="sub">or click to browse. Supports .xlsx, .xls, .csv.</span><div id="fileName" class="sub"></div></div>
+                        <br><button class="btn" type="submit">Preview & Validate File</button>
+                    </form>
+                </div>
+                <div id="pastePane" class="leadPane hidden" style="margin-top:16px">
+                    <form id="pasteForm"><label>Paste copied spreadsheet rows</label><textarea name="pasted_data" placeholder="Business Name&#9;Phone Number&#9;Category&#9;Notes&#10;Sharma Electronics&#9;9876543210&#9;Mobile Accessories&#9;Owner prefers evenings"></textarea><br><br><button class="btn" type="submit">Preview & Validate Pasted Rows</button></form>
+                </div>
+                <div id="manualPane" class="leadPane hidden" style="margin-top:16px">
+                    <form id="manualForm" class="formgrid"><div><label>Business Name *</label><input name="business_name" placeholder="Sharma Electronics" required></div><div><label>Phone Number *</label><input name="phone_number" placeholder="+919876543210" required></div><div><label>Category *</label><input name="category" placeholder="Mobile Accessories" required></div><div><label>Notes</label><input name="notes" placeholder="Owner prefers evening callback"></div><div><button class="btn" type="submit">Add Lead</button></div></form>
+                </div>
+            </div>
+            <div id="mappingCard" class="card hidden" style="margin-top:16px"><h3>Map columns & import</h3><div id="mappingSummary" class="notice"></div><div id="mappingBox"></div><div id="previewTable" class="tablewrap" style="margin-top:14px"></div></div>
+            <div class="card" style="margin-top:16px"><div class="actions" style="justify-content:space-between"><h3>Imported leads</h3><input id="leadSearch" style="max-width:320px" placeholder="Search leads..."></div><div id="leadTable" class="tablewrap"></div></div>
+        </section>
+
+        <section id="calls" class="page hidden"><div class="card"><div class="toolbar"><input id="search" placeholder="Search business, phone, category..."><select id="statusFilter"><option value="">All statuses</option></select><select id="interestFilter"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select></div><div id="callTable" class="tablewrap"></div></div></section>
+
+        <section id="browser" class="page hidden"><div class="card" style="max-width:620px"><h3>Browser voice test</h3><div class="sub" id="statusText">Ready to connect...</div><br><div class="actions"><button id="startBtn" class="btn">Start Call</button><button id="stopBtn" class="btn ghost" disabled>End Call</button></div><div id="chatLog" style="margin-top:18px;max-height:300px;overflow:auto"></div></div></section>
+    </main>
+</div>
+<div id="modal" class="modal"><div class="panel"><div class="actions" style="justify-content:space-between"><h2>Call detail</h2><button class="btn ghost" onclick="modal.classList.remove('open')">Close</button></div><div id="detail"></div></div></div>
 <script>
-let previewRows=[], headers=[], calls=[]; const $=id=>document.getElementById(id);
-function page(name){document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$(name).classList.remove('hidden');$('title').textContent=name;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===name));$('title').innerText=name==='overview'?'Dashboard Overview':name==='leads'?'Lead Upload':name==='calls'?'Calls':'Browser Test Call'}
-document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{page(b.dataset.page); refresh()});
-async function refresh(){const [s,c,l]=await Promise.all([fetch('/api/stats').then(r=>r.json()),fetch('/api/calls').then(r=>r.json()),fetch('/api/leads').then(r=>r.json())]); calls=c.calls||[]; renderStats(s); renderCalls(); renderLeads(l.leads||[])}
-function renderStats(s){const items=[['Total leads',s.total_leads],['Total calls made',s.total_calls],['Calls answered',s.calls_answered],['Calls not answered',s.calls_not_answered],['Busy/Failed calls',s.busy_failed_calls],['Average call duration',`${s.average_call_duration}s`],['Interested responses',s.interested_responses],['Callback requested',s.callback_requested],['Success rate',`${s.success_rate}%`]];$('stats').innerHTML=items.map(i=>`<div class="card stat"><div class="label">${i[0]}</div><div class="value">${i[1]??0}</div></div>`).join(''); chart('timeChart',s.calls_over_time||{}); chart('outcomeChart',s.outcomes||{})}
-function chart(id,obj){const max=Math.max(1,...Object.values(obj));$(id).innerHTML=Object.entries(obj).map(([k,v])=>`<div class="bar"><span>${k}</span><div class="track"><div class="fill" style="width:${v/max*100}%"></div></div><b>${v}</b></div>`).join('')||'<p class="sub">No data yet.</p>'}
-$('previewForm').onsubmit=async e=>{e.preventDefault();const res=await fetch('/api/leads/preview',{method:'POST',body:new FormData(e.target)});const data=await res.json();headers=data.headers||[];previewRows=data.rows||[];const guess=n=>headers.find(h=>h.toLowerCase().includes(n))||'';const select=n=>`<select id="map_${n}"><option value="">Select column</option>${headers.map(h=>`<option ${guess(n.split('_')[0])===h?'selected':''}>${h}</option>`).join('')}</select>`;$('mappingBox').innerHTML=`<div class="formgrid"><label>Business Name ${select('business_name')}</label><label>Phone Number ${select('phone_number')}</label><label>Category ${select('category')}</label><label>Notes ${select('notes')}</label></div><br><button class="btn" onclick="importLeads()">Import ${data.total_rows} rows</button><pre>${JSON.stringify(previewRows.slice(0,3),null,2)}</pre>`}
-async function importLeads(){const mapping={business_name:$('map_business_name').value,phone_number:$('map_phone_number').value,category:$('map_category').value,notes:$('map_notes').value};const res=await fetch('/api/leads/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows:previewRows,mapping})});alert(`Imported ${(await res.json()).imported} leads`);refresh()}
-function renderLeads(leads){$('leadTable').innerHTML=table(['Business Name','Phone','Category','Notes','Status'],leads.map(l=>[l.business_name,l.phone_number,l.category,l.notes,l.status]))}
-function renderCalls(){const q=($('search')?.value||'').toLowerCase(), st=$('statusFilter')?.value||'', int=$('interestFilter')?.value||'';const statuses=[...new Set(calls.map(c=>c.call_status).filter(Boolean))];$('statusFilter').innerHTML='<option value="">All statuses</option>'+statuses.map(x=>`<option ${x===st?'selected':''}>${x}</option>`).join('');let rows=calls.filter(c=>(!q||[c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q))&&(!st||c.call_status===st)&&(!int||String(!!c.interested)===int));$('callTable').innerHTML=`<table class="table"><thead><tr>${['Business Name','Phone Number','Category','Call Status','Interested','Callback Requested','Duration','Timestamp'].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(c=>`<tr onclick="detail('${c.call_id}')"><td>${c.business_name||''}</td><td>${c.phone||''}</td><td>${c.category||''}</td><td><span class="badge">${c.call_status||''}</span></td><td><span class="badge ${c.interested?'yes':'no'}">${c.interested?'Yes':'No'}</span></td><td><span class="badge ${c.callback_requested?'yes':'no'}">${c.callback_requested?'Yes':'No'}</span></td><td>${c.duration||0}s</td><td>${c.timestamp||''}</td></tr>`).join('')}</tbody></table>`}
-$('search').oninput=renderCalls;$('statusFilter').onchange=renderCalls;$('interestFilter').onchange=renderCalls;
-async function detail(id){const c=await fetch('/api/calls/'+id).then(r=>r.json());$('detail').innerHTML=`<h3>${c.business_name||'Unknown business'}</h3><p><b>Phone:</b> ${c.phone||''} &nbsp; <b>Category:</b> ${c.category||''}</p><p><b>Status:</b> ${c.call_status} &nbsp; <b>Duration:</b> ${c.duration}s</p><h3>Structured AI response</h3><pre>${JSON.stringify(c.structured_response||{},null,2)}</pre><h3>Transcript</h3><pre>${c.transcript||'No transcript saved.'}</pre>`;$('modal').classList.add('open')}
-function table(h,rows){return `<table class="table"><thead><tr>${h.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(x=>`<td>${x||''}</td>`).join('')}</tr>`).join('')}</tbody></table>`}
-let ws=null,audioContext=null,mediaStream=null,workletNode=null,nextPlayTime=0;const startBtn=$('startBtn'),stopBtn=$('stopBtn'),statusText=$('statusText'),chatLog=$('chatLog');function logMessage(r,t){chatLog.innerHTML+=`<div><b>${r}:</b> ${t}</div>`;chatLog.scrollTop=chatLog.scrollHeight}function playAudioChunk(ab){if(!audioContext)return;const i16=new Int16Array(ab), f32=new Float32Array(i16.length);for(let i=0;i<i16.length;i++)f32[i]=i16[i]/32768;const b=audioContext.createBuffer(1,f32.length,24000);b.copyToChannel(f32,0);const s=audioContext.createBufferSource();s.buffer=b;s.connect(audioContext.destination);if(nextPlayTime<audioContext.currentTime)nextPlayTime=audioContext.currentTime;s.start(nextPlayTime);nextPlayTime+=b.duration}
+let previewRows = [], headers = [], calls = [], leads = [];
+const $ = id => document.getElementById(id);
+const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+
+function setPage(name) {
+    document.querySelectorAll('.page').forEach(page => page.classList.add('hidden'));
+    $(name).classList.remove('hidden');
+    document.querySelectorAll('.nav button').forEach(button => button.classList.toggle('active', button.dataset.page === name));
+    $('pageTitle').innerText = name === 'overview' ? 'Dashboard Overview' : name === 'leads' ? 'Lead Upload' : name === 'calls' ? 'Calls' : 'Browser Test Call';
+}
+document.querySelectorAll('.nav button').forEach(button => button.onclick = () => { setPage(button.dataset.page); refresh(); });
+
+async function refresh() {
+    const [stats, callData, leadData] = await Promise.all([fetch('/api/stats').then(r => r.json()), fetch('/api/calls').then(r => r.json()), fetch('/api/leads').then(r => r.json())]);
+    calls = callData.calls || [];
+    leads = leadData.leads || [];
+    renderStats(stats); renderCalls(); renderLeads();
+}
+function renderStats(s) {
+    const items = [['Total leads', s.total_leads], ['Total calls made', s.total_calls], ['Calls answered', s.calls_answered], ['Calls not answered', s.calls_not_answered], ['Busy/Failed calls', s.busy_failed_calls], ['Average call duration', `${s.average_call_duration}s`], ['Interested responses', s.interested_responses], ['Callback requested', s.callback_requested], ['Success rate', `${s.success_rate}%`]];
+    $('stats').innerHTML = items.map(item => `<div class="card stat"><div class="label">${item[0]}</div><div class="value">${item[1] ?? 0}</div></div>`).join('');
+    chart('timeChart', s.calls_over_time || {}); chart('outcomeChart', s.outcomes || {});
+}
+function chart(id, obj) { const max = Math.max(1, ...Object.values(obj)); $(id).innerHTML = Object.entries(obj).map(([k,v]) => `<div class="bar"><span>${escapeHtml(k)}</span><div class="track"><div class="fill" style="width:${v / max * 100}%"></div></div><b>${v}</b></div>`).join('') || '<p class="sub">No data yet.</p>'; }
+
+function showLeadMessage(message, type = 'notice') { $('leadMessage').innerHTML = `<div class="notice ${type}">${message}</div>`; }
+document.querySelectorAll('[data-lead-tab]').forEach(button => button.onclick = () => { document.querySelectorAll('[data-lead-tab]').forEach(b => b.classList.remove('active')); button.classList.add('active'); document.querySelectorAll('.leadPane').forEach(p => p.classList.add('hidden')); $(button.dataset.leadTab).classList.remove('hidden'); });
+$('dropzone').onclick = () => $('leadFile').click();
+$('leadFile').onchange = () => $('fileName').innerText = $('leadFile').files[0]?.name || '';
+['dragenter','dragover'].forEach(eventName => $('dropzone').addEventListener(eventName, event => { event.preventDefault(); $('dropzone').classList.add('drag'); }));
+['dragleave','drop'].forEach(eventName => $('dropzone').addEventListener(eventName, event => { event.preventDefault(); $('dropzone').classList.remove('drag'); }));
+$('dropzone').addEventListener('drop', event => { $('leadFile').files = event.dataTransfer.files; $('fileName').innerText = $('leadFile').files[0]?.name || ''; });
+$('fileForm').onsubmit = event => { event.preventDefault(); previewLeads(new FormData(event.target)); };
+$('pasteForm').onsubmit = event => { event.preventDefault(); previewLeads(new FormData(event.target)); };
+$('manualForm').onsubmit = async event => { event.preventDefault(); const payload = Object.fromEntries(new FormData(event.target).entries()); const response = await fetch('/api/leads/manual', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) { showLeadMessage(formatImportProblems(data.detail || data), 'bad'); return; } showLeadMessage('Manual lead added successfully.', 'ok'); event.target.reset(); refresh(); };
+
+async function previewLeads(formData) {
+    showLeadMessage('Validating rows and preparing column mapping...');
+    const response = await fetch('/api/leads/preview', { method:'POST', body:formData });
+    const data = await response.json();
+    if (!response.ok) { showLeadMessage(escapeHtml(data.detail || 'Unable to preview leads.'), 'bad'); return; }
+    headers = data.headers || []; previewRows = data.rows || [];
+    $('mappingCard').classList.remove('hidden');
+    $('mappingSummary').innerText = `${data.total_rows || 0} rows detected. Map your source columns to the required fields, then import.`;
+    renderMapping(); renderPreviewTable(previewRows.slice(0, 25));
+}
+function renderMapping() {
+    const aliases = { business_name:['business','business name','company','name','store'], phone_number:['phone','phone number','mobile','contact','number'], category:['category','type','industry','segment'], notes:['notes','note','remarks','comment'] };
+    const guess = field => headers.find(header => aliases[field].some(alias => header.toLowerCase().includes(alias))) || '';
+    const select = field => `<select id="map_${field}"><option value="">Select column</option>${headers.map(header => `<option value="${escapeHtml(header)}" ${guess(field) === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}</select>`;
+    $('mappingBox').innerHTML = `<div class="formgrid"><div><label>Business Name *</label>${select('business_name')}</div><div><label>Phone Number *</label>${select('phone_number')}</div><div><label>Category *</label>${select('category')}</div><div><label>Notes</label>${select('notes')}</div></div><br><div class="actions"><button class="btn" onclick="importMappedLeads()">Import ${previewRows.length} rows</button><button class="btn ghost" onclick="clearMapping()">Clear Preview</button></div>`;
+}
+function renderPreviewTable(rows) { $('previewTable').innerHTML = table(headers, rows.map(row => headers.map(header => row[header]))); }
+function clearMapping() { previewRows = []; headers = []; $('mappingCard').classList.add('hidden'); }
+async function importMappedLeads() {
+    const mapping = { business_name:$('map_business_name').value, phone_number:$('map_phone_number').value, category:$('map_category').value, notes:$('map_notes').value };
+    if (!mapping.business_name || !mapping.phone_number || !mapping.category) { showLeadMessage('Map Business Name, Phone Number, and Category before importing.', 'bad'); return; }
+    const response = await fetch('/api/leads/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ rows:previewRows, mapping }) });
+    const result = await response.json();
+    const type = result.rejected?.length ? 'warn' : 'ok';
+    showLeadMessage(`Imported ${result.imported} of ${result.total_submitted} submitted rows. ${result.duplicates || 0} duplicates skipped. ${formatImportProblems(result)}`, type);
+    clearMapping(); refresh();
+}
+function formatImportProblems(result) { const rejected = result.rejected || []; if (!rejected.length) return ''; return `<br><b>Review needed:</b> ${rejected.slice(0,5).map(item => `Row ${item.row}: ${(item.errors || []).join(', ')}`).join('; ')}${rejected.length > 5 ? `; +${rejected.length - 5} more` : ''}`; }
+function downloadTemplate() { const csv = 'Business Name,Phone Number,Category,Notes\nSharma Electronics,+919876543210,Mobile Accessories,Owner prefers evenings\n'; const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type:'text/csv' })); link.download = 'lead-upload-template.csv'; link.click(); URL.revokeObjectURL(link.href); }
+function renderLeads() { const query = ($('leadSearch')?.value || '').toLowerCase(); const rows = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query)); $('leadTable').innerHTML = table(['Business Name','Phone','Category','Notes','Status'], rows.map(lead => [lead.business_name, lead.phone_number, lead.category, lead.notes, lead.status])); }
+$('leadSearch').oninput = renderLeads;
+
+function renderCalls() { const q = ($('search')?.value || '').toLowerCase(), st = $('statusFilter')?.value || '', int = $('interestFilter')?.value || ''; const statuses = [...new Set(calls.map(c => c.call_status).filter(Boolean))]; $('statusFilter').innerHTML = '<option value="">All statuses</option>' + statuses.map(x => `<option ${x === st ? 'selected' : ''}>${escapeHtml(x)}</option>`).join(''); const rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int)); $('callTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone Number','Category','Call Status','Interested','Callback Requested','Duration','Timestamp'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(c => `<tr class="clickable" onclick="detail('${c.call_id}')"><td>${escapeHtml(c.business_name)}</td><td>${escapeHtml(c.phone)}</td><td>${escapeHtml(c.category)}</td><td><span class="badge">${escapeHtml(c.call_status)}</span></td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td><td>${c.duration || 0}s</td><td>${escapeHtml(c.timestamp)}</td></tr>`).join('')}</tbody></table>`; }
+$('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls; $('interestFilter').onchange = renderCalls;
+async function detail(id) { const c = await fetch('/api/calls/' + id).then(r => r.json()); $('detail').innerHTML = `<h3>${escapeHtml(c.business_name || 'Unknown business')}</h3><p><b>Phone:</b> ${escapeHtml(c.phone)} &nbsp; <b>Category:</b> ${escapeHtml(c.category)}</p><p><b>Status:</b> ${escapeHtml(c.call_status)} &nbsp; <b>Duration:</b> ${c.duration || 0}s</p><h3>Structured AI response</h3><pre>${escapeHtml(JSON.stringify(c.structured_response || {}, null, 2))}</pre><h3>Transcript</h3><pre>${escapeHtml(c.transcript || 'No transcript saved.')}</pre>`; $('modal').classList.add('open'); }
+function table(headers, rows) { return `<table class="table"><thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table>`; }
+
+let ws=null,audioContext=null,mediaStream=null,workletNode=null,nextPlayTime=0;const startBtn=$('startBtn'),stopBtn=$('stopBtn'),statusText=$('statusText'),chatLog=$('chatLog');function logMessage(r,t){chatLog.innerHTML+=`<div><b>${escapeHtml(r)}:</b> ${escapeHtml(t)}</div>`;chatLog.scrollTop=chatLog.scrollHeight}function playAudioChunk(ab){if(!audioContext)return;const i16=new Int16Array(ab), f32=new Float32Array(i16.length);for(let i=0;i<i16.length;i++)f32[i]=i16[i]/32768;const b=audioContext.createBuffer(1,f32.length,24000);b.copyToChannel(f32,0);const s=audioContext.createBufferSource();s.buffer=b;s.connect(audioContext.destination);if(nextPlayTime<audioContext.currentTime)nextPlayTime=audioContext.currentTime;s.start(nextPlayTime);nextPlayTime+=b.duration}
 startBtn.onclick=async()=>{mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});audioContext=new(window.AudioContext||window.webkitAudioContext)({sampleRate:48000});nextPlayTime=audioContext.currentTime;const code=`class PCMProcessor extends AudioWorkletProcessor{process(inputs){const input=inputs[0];if(input.length>0){const d=input[0],p=new Int16Array(d.length);for(let i=0;i<d.length;i++)p[i]=Math.max(-32768,Math.min(32767,d[i]*32768));this.port.postMessage(p.buffer)}return true}}registerProcessor('pcm-processor',PCMProcessor);`;await audioContext.audioWorklet.addModule(URL.createObjectURL(new Blob([code],{type:'application/javascript'})));ws=new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws`);ws.binaryType='arraybuffer';ws.onopen=()=>{statusText.innerText='Connected! Start speaking.';startBtn.disabled=true;stopBtn.disabled=false;const source=audioContext.createMediaStreamSource(mediaStream);workletNode=new AudioWorkletNode(audioContext,'pcm-processor');workletNode.port.onmessage=e=>ws.readyState===WebSocket.OPEN&&ws.send(e.data);source.connect(workletNode);const z=audioContext.createGain();z.gain.value=0;workletNode.connect(z);z.connect(audioContext.destination)};ws.onmessage=e=>{if(typeof e.data==='string'){const m=JSON.parse(e.data); if(m.event==='closing_call')stopCall('Agent completed the call.'); else if(m.role&&m.content)logMessage(m.role,m.content); else if(m.error)logMessage('system',m.error)}else playAudioChunk(e.data)};ws.onclose=()=>stopCall('Call ended.');ws.onerror=()=>stopCall('Connection error.')};stopBtn.onclick=()=>stopCall('Call disconnected by user.');function stopCall(s){if(ws){const x=ws;ws=null;if(x.readyState<=1)x.close()} if(workletNode){workletNode.disconnect();workletNode=null} if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null} if(audioContext){audioContext.close();audioContext=null} statusText.innerText=s;startBtn.disabled=false;stopBtn.disabled=true;refresh()}
-refresh();setInterval(refresh,15000);
-</script></body></html>
+refresh(); setInterval(refresh,15000);
+</script>
+</body>
+</html>

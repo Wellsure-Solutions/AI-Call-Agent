@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -16,6 +17,24 @@ except ImportError:  # pragma: no cover
     load_workbook = None
 
 from app.core.models import CallSession
+
+REQUIRED_LEAD_FIELDS = ("business_name", "phone_number", "category")
+EXPORT_HEADERS = [
+    "call_id",
+    "lead_id",
+    "business_name",
+    "phone",
+    "category",
+    "notes",
+    "call_status",
+    "interested",
+    "callback_requested",
+    "duration",
+    "timestamp",
+    "summary",
+    "transcript",
+    "structured_response",
+]
 
 
 class JsonCallStore:
@@ -63,34 +82,67 @@ class JsonCallStore:
         except json.JSONDecodeError:
             return []
 
-    def import_leads(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def import_leads(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Validate and import normalized lead rows.
+
+        Returns an enterprise-friendly summary so UI/API callers can show what
+        happened instead of silently dropping bad rows.
+        """
         now = datetime.now(timezone.utc).isoformat()
         leads = self.list_leads()
-        existing = {lead.get("phone_number") for lead in leads}
+        existing = {self._phone_key(lead.get("phone_number", "")) for lead in leads}
         imported: list[dict[str, Any]] = []
-        for row in rows:
-            phone = str(row.get("phone_number", "")).strip()
-            business = str(row.get("business_name", "")).strip()
-            category = str(row.get("category", "")).strip()
-            if not phone or not business or not category:
+        rejected: list[dict[str, Any]] = []
+        duplicate_count = 0
+
+        for index, row in enumerate(rows, start=1):
+            normalized, errors = self.validate_lead(row)
+            if errors:
+                rejected.append({"row": index, "errors": errors, "lead": row})
                 continue
+            phone_key = self._phone_key(normalized["phone_number"])
+            if phone_key in existing:
+                duplicate_count += 1
+                rejected.append({"row": index, "errors": ["Duplicate phone number"], "lead": normalized})
+                continue
+            existing.add(phone_key)
             lead = {
                 "lead_id": str(uuid4()),
-                "business_name": business,
-                "phone_number": phone,
-                "category": category,
-                "notes": str(row.get("notes", "") or "").strip(),
+                "business_name": normalized["business_name"],
+                "phone_number": normalized["phone_number"],
+                "category": normalized["category"],
+                "notes": normalized.get("notes", ""),
                 "created_at": now,
                 "status": "new",
             }
-            if phone in existing:
-                continue
-            existing.add(phone)
             leads.append(lead)
             imported.append(lead)
+
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.leads_path.write_text(json.dumps(leads, ensure_ascii=False, indent=2), encoding="utf-8")
-        return imported
+        return {
+            "imported": len(imported),
+            "duplicates": duplicate_count,
+            "rejected": rejected,
+            "total_submitted": len(rows),
+            "leads": imported,
+        }
+
+    def validate_lead(self, row: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+        normalized = {
+            "business_name": self._clean_text(row.get("business_name")),
+            "phone_number": self._normalize_phone(row.get("phone_number")),
+            "category": self._clean_text(row.get("category")),
+            "notes": self._clean_text(row.get("notes")),
+        }
+        errors: list[str] = []
+        for field in REQUIRED_LEAD_FIELDS:
+            if not normalized[field]:
+                errors.append(f"Missing {field.replace('_', ' ')}")
+        digit_count = len(re.sub(r"\D", "", normalized["phone_number"]))
+        if normalized["phone_number"] and digit_count < 7:
+            errors.append("Phone number is too short")
+        return normalized, errors
 
     def parse_upload(self, content: bytes, filename: str) -> tuple[list[str], list[dict[str, Any]]]:
         suffix = Path(filename).suffix.lower()
@@ -110,27 +162,37 @@ class JsonCallStore:
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
         except csv.Error:
-            dialect = csv.excel
+            dialect = csv.excel_tab if "\t" in sample else csv.excel
         reader = csv.DictReader(StringIO(text), dialect=dialect)
-        headers = reader.fieldnames or []
-        return headers, list(reader)
+        headers = [header.strip() for header in (reader.fieldnames or [])]
+        rows: list[dict[str, Any]] = []
+        for row in reader:
+            rows.append({str(key or "").strip(): value for key, value in row.items()})
+        return headers, rows
 
     def export_calls(self, fmt: str) -> tuple[str, bytes, str]:
         calls = self.list_calls()
         if fmt == "json":
             return "call_results.json", json.dumps(calls, ensure_ascii=False, indent=2).encode("utf-8"), "application/json"
         rows = [self._flat_call(call) for call in calls]
-        headers = list(rows[0].keys()) if rows else ["call_id", "business_name", "phone", "category", "call_status", "interested", "callback_requested", "duration", "timestamp", "summary"]
+        headers = list(rows[0].keys()) if rows else EXPORT_HEADERS
         if fmt == "csv":
             out = StringIO()
             writer = csv.DictWriter(out, fieldnames=headers)
-            writer.writeheader(); writer.writerows(rows)
+            writer.writeheader()
+            writer.writerows(rows)
             return "call_results.csv", out.getvalue().encode("utf-8"), "text/csv"
         if Workbook is None:
             raise RuntimeError("openpyxl is required for Excel export.")
-        wb = Workbook(); ws = wb.active; ws.title = "Call Results"; ws.append(headers)
-        for row in rows: ws.append([row.get(h, "") for h in headers])
-        bio = BytesIO(); wb.save(bio); wb.close()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Call Results"
+        ws.append(headers)
+        for row in rows:
+            ws.append([row.get(header, "") for header in headers])
+        bio = BytesIO()
+        wb.save(bio)
+        wb.close()
         return "call_results.xlsx", bio.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     def _session_to_record(self, session: CallSession) -> dict[str, Any]:
@@ -159,4 +221,20 @@ class JsonCallStore:
         return "; ".join(f"{k}: {v}" for k, v in answers.items() if v not in (None, ""))
 
     def _flat_call(self, call: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in call.items() if k not in {"structured_response"}} | {"structured_response": json.dumps(call.get("structured_response", {}), ensure_ascii=False)}
+        row = {key: call.get(key, "") for key in EXPORT_HEADERS if key != "structured_response"}
+        row["structured_response"] = json.dumps(call.get("structured_response", {}), ensure_ascii=False)
+        return row
+
+    def _clean_text(self, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    def _normalize_phone(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        leading_plus = raw.startswith("+")
+        cleaned = re.sub(r"[^\d]", "", raw)
+        return f"+{cleaned}" if leading_plus and cleaned else cleaned
+
+    def _phone_key(self, value: Any) -> str:
+        return re.sub(r"\D", "", str(value or ""))

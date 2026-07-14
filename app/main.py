@@ -45,7 +45,7 @@ async def preview_leads(file: UploadFile | None = File(default=None), pasted_dat
         raise HTTPException(status_code=400, detail="Upload a CSV/Excel file or paste tabular data.")
     if not headers and rows:
         headers = list(rows[0].keys())
-    return {"headers": headers, "rows": rows[:50], "total_rows": len(rows)}
+    return {"headers": headers, "rows": rows, "preview_rows": rows[:25], "total_rows": len(rows)}
 
 
 @app.post("/api/leads/import")
@@ -60,8 +60,21 @@ async def import_leads(payload: dict):
             "category": row.get(mapping.get("category", ""), ""),
             "notes": row.get(mapping.get("notes", ""), ""),
         })
-    imported = answer_store.import_leads(normalized)
-    return {"imported": len(imported), "leads": imported}
+    return answer_store.import_leads(normalized)
+
+
+@app.post("/api/leads/manual")
+async def manual_lead(payload: dict):
+    row = {
+        "business_name": payload.get("business_name", ""),
+        "phone_number": payload.get("phone_number", ""),
+        "category": payload.get("category", ""),
+        "notes": payload.get("notes", ""),
+    }
+    result = answer_store.import_leads([row])
+    if result["imported"] != 1:
+        raise HTTPException(status_code=422, detail=result)
+    return result
 
 
 @app.get("/api/calls")
