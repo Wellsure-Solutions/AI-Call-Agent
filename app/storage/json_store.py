@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -250,13 +251,51 @@ class JsonCallStore:
     def _clean_text(self, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
 
+    def export_lead_template(self) -> tuple[str, bytes, str]:
+        if Workbook is None:
+            raise RuntimeError("openpyxl is required for Excel templates.")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Leads"
+        headers = ["Business Name", "Phone Number", "Category", "Notes"]
+        ws.append(headers)
+        ws.append(["Sharma Electronics", "+919876543210", "Mobile Accessories", "Owner prefers evenings"])
+        for cell in ws["B"]:
+            cell.number_format = "@"
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 20
+        ws.column_dimensions["C"].width = 24
+        ws.column_dimensions["D"].width = 32
+        bio = BytesIO()
+        wb.save(bio)
+        wb.close()
+        return "lead-upload-template.xlsx", bio.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
     def _normalize_phone(self, value: Any) -> str:
         raw = str(value or "").strip()
         if not raw:
             return ""
-        leading_plus = raw.startswith("+")
-        cleaned = re.sub(r"[^\d]", "", raw)
-        return f"+{cleaned}" if leading_plus and cleaned else cleaned
+        raw = self._expand_scientific_notation(raw)
+        digits = re.sub(r"\D", "", raw)
+        if not digits:
+            return ""
+        if raw.lstrip().startswith("+"):
+            return f"+{digits}"
+        if len(digits) == 10:
+            return f"+91{digits}"
+        if len(digits) == 12 and digits.startswith("91"):
+            return f"+{digits}"
+        return f"+{digits}"
+
+    def _expand_scientific_notation(self, value: str) -> str:
+        candidate = value.strip().replace(",", "")
+        if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?[eE][+-]?\d+", candidate):
+            return value
+        try:
+            number = Decimal(candidate)
+        except InvalidOperation:
+            return value
+        return format(number.quantize(Decimal(1)) if number == number.to_integral_value() else number, "f")
 
     def _phone_key(self, value: Any) -> str:
         return re.sub(r"\D", "", str(value or ""))
