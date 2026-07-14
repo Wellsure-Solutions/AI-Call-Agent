@@ -113,6 +113,38 @@ async def call_lead(lead_id: str):
         raise HTTPException(status_code=502, detail=f"Unable to start Twilio call: {exc}") from exc
 
 
+@app.post("/api/leads/call-batch")
+async def call_lead_batch(payload: dict):
+    requested_ids = set(payload.get("lead_ids") or [])
+    max_calls = int(payload.get("max_calls") or 50)
+    leads = answer_store.list_leads()
+    if requested_ids:
+        leads = [lead for lead in leads if lead.get("lead_id") in requested_ids]
+    leads = [lead for lead in leads if lead.get("phone_number") and lead.get("status") not in {"calling"}][:max_calls]
+    started: list[dict] = []
+    failed: list[dict] = []
+    for lead in leads:
+        lead_id = lead.get("lead_id")
+        outbound = OutboundCallRequest(
+            phone_number=lead["phone_number"],
+            campaign_name="dashboard_batch",
+            lead_id=lead_id,
+            business_name=lead.get("business_name"),
+            category=lead.get("category"),
+            notes=lead.get("notes"),
+        )
+        try:
+            logger.info("dashboard_batch_call_requested", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
+            result = await start_outbound_call(outbound)
+            answer_store.update_lead(lead_id, status="calling", last_call_id=result.get("call_id"), last_call_sid=result.get("call_sid"))
+            started.append({"lead_id": lead_id, **result})
+        except Exception as exc:
+            logger.exception("dashboard_batch_call_failed", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
+            answer_store.update_lead(lead_id, status="call_failed", last_error=str(exc))
+            failed.append({"lead_id": lead_id, "error": str(exc)})
+    return {"requested": len(leads), "started": started, "failed": failed}
+
+
 @app.get("/api/live-calls")
 async def live_calls():
     return {"calls": call_status_tracker.list()}

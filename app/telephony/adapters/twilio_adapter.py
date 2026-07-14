@@ -179,7 +179,11 @@ class TwilioAdapter(BaseTelephonyAdapter):
             while not self.closing_requested:
                 audio = await self.receive_audio()
                 if audio:
-                    await self.audio_bridge.receive_telephony_audio(audio)
+                    accepted = await self.audio_bridge.receive_telephony_audio(audio)
+                    if not accepted:
+                        close_status = "ai_disconnected"
+                        logger.warning("AI audio bridge stopped accepting Twilio audio for call %s", self.session.call_id)
+                        break
                 else:
                     break  # Twilio sent "stop" -- call ended on the caller's side
         except WebSocketDisconnect:
@@ -221,6 +225,9 @@ class TwilioAdapter(BaseTelephonyAdapter):
                 # instead of trying to send them down this socket.
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            self.closing_requested = True
+            logger.exception("Twilio outbound audio pump failed for call %s: %s", self.session.call_id if self.session else "unknown", exc)
 
 
     async def _complete_twilio_call(self) -> None:

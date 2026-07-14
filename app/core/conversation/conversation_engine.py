@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from dataclasses import asdict, is_dataclass
 from typing import Callable
@@ -14,6 +15,8 @@ from app.services.call_control import is_closing_call_message, is_terminal_assis
 from app.services.transcript_sanitizer import strip_spoken_internal_commands
 from app.telephony.call_session import CallSession
 from app.telephony.state_machine import CallState
+
+logger = logging.getLogger(__name__)
 
 AudioCallback = Callable[[bytes], None]
 TextCallback = Callable[[str], None]
@@ -71,9 +74,18 @@ class ConversationEngine:
         self.session.safe_transition_to(CallState.AI_ACTIVE)
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
 
-    async def receive_audio(self, pcm_frame: bytes) -> None:
-        if self.connection is not None and pcm_frame:
+    async def receive_audio(self, pcm_frame: bytes) -> bool:
+        if self.connection is None or self.closing_requested or not pcm_frame:
+            return False
+        try:
             self.connection.send_media(pcm_frame)
+            return True
+        except Exception as exc:
+            self.closing_requested = True
+            self.session.metadata["deepgram_send_error"] = str(exc)
+            logger.exception("deepgram_send_media_failed", extra={"call_id": self.session.call_id})
+            self._call_threadsafe(self.on_finished)
+            return False
 
     async def stop(self) -> None:
         if self._connection_context is not None:
@@ -124,8 +136,12 @@ class ConversationEngine:
 
     def _on_error(self, error) -> None:
         error_payload = safe_event_payload(error)
+        self.closing_requested = True
+        self.session.metadata["deepgram_error"] = error_payload
+        logger.error("deepgram_agent_error", extra={"call_id": self.session.call_id, "details": error_payload})
         print(f"[deepgram] call={self.session.call_id} error: {error_payload}")
         self._call_threadsafe(lambda: self.on_text(json.dumps({"error": "Deepgram agent error", "details": error_payload})))
+        self._call_threadsafe(self.on_finished)
 
     def _call_threadsafe(self, callback: Callable[[], None]) -> None:
         if self.loop is not None:
