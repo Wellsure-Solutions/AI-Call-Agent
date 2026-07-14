@@ -112,14 +112,14 @@
             <div class="card" style="margin-top:16px"><div class="actions" style="justify-content:space-between"><h3>Imported leads</h3><input id="leadSearch" style="max-width:320px" placeholder="Search leads..."></div><div id="leadTable" class="tablewrap"></div></div>
         </section>
 
-        <section id="calls" class="page hidden"><div class="card"><div class="toolbar"><input id="search" placeholder="Search business, phone, category..."><select id="statusFilter"><option value="">All statuses</option></select><select id="interestFilter"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select></div><div id="callTable" class="tablewrap"></div></div></section>
+        <section id="calls" class="page hidden"><div class="card"><h3>Live call status</h3><div id="liveCallTable" class="tablewrap"></div></div><div class="card" style="margin-top:16px"><div class="toolbar"><input id="search" placeholder="Search business, phone, category..."><select id="statusFilter"><option value="">All statuses</option></select><select id="interestFilter"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select></div><div id="callTable" class="tablewrap"></div></div></section>
 
         <section id="browser" class="page hidden"><div class="card" style="max-width:620px"><h3>Browser voice test</h3><div class="sub" id="statusText">Ready to connect...</div><br><div class="actions"><button id="startBtn" class="btn">Start Call</button><button id="stopBtn" class="btn ghost" disabled>End Call</button></div><div id="chatLog" style="margin-top:18px;max-height:300px;overflow:auto"></div></div></section>
     </main>
 </div>
 <div id="modal" class="modal"><div class="panel"><div class="actions" style="justify-content:space-between"><h2>Call detail</h2><button class="btn ghost" onclick="modal.classList.remove('open')">Close</button></div><div id="detail"></div></div></div>
 <script>
-let previewRows = [], headers = [], calls = [], leads = [];
+let previewRows = [], headers = [], calls = [], leads = [], liveCalls = [];
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 
@@ -132,10 +132,11 @@ function setPage(name) {
 document.querySelectorAll('.nav button').forEach(button => button.onclick = () => { setPage(button.dataset.page); refresh(); });
 
 async function refresh() {
-    const [stats, callData, leadData] = await Promise.all([fetch('/api/stats').then(r => r.json()), fetch('/api/calls').then(r => r.json()), fetch('/api/leads').then(r => r.json())]);
+    const [stats, callData, leadData, liveData] = await Promise.all([fetch('/api/stats').then(r => r.json()), fetch('/api/calls').then(r => r.json()), fetch('/api/leads').then(r => r.json()), fetch('/api/live-calls').then(r => r.json())]);
     calls = callData.calls || [];
     leads = leadData.leads || [];
-    renderStats(stats); renderCalls(); renderLeads();
+    liveCalls = liveData.calls || [];
+    renderStats(stats); renderLiveCalls(); renderCalls(); renderLeads();
 }
 function renderStats(s) {
     const items = [['Total leads', s.total_leads], ['Total calls made', s.total_calls], ['Calls answered', s.calls_answered], ['Calls not answered', s.calls_not_answered], ['Busy/Failed calls', s.busy_failed_calls], ['Average call duration', `${s.average_call_duration}s`], ['Interested responses', s.interested_responses], ['Callback requested', s.callback_requested], ['Success rate', `${s.success_rate}%`]];
@@ -184,8 +185,33 @@ async function importMappedLeads() {
 }
 function formatImportProblems(result) { const rejected = result.rejected || []; if (!rejected.length) return ''; return `<br><b>Review needed:</b> ${rejected.slice(0,5).map(item => `Row ${item.row}: ${(item.errors || []).join(', ')}`).join('; ')}${rejected.length > 5 ? `; +${rejected.length - 5} more` : ''}`; }
 function downloadTemplate() { const csv = 'Business Name,Phone Number,Category,Notes\nSharma Electronics,+919876543210,Mobile Accessories,Owner prefers evenings\n'; const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type:'text/csv' })); link.download = 'lead-upload-template.csv'; link.click(); URL.revokeObjectURL(link.href); }
-function renderLeads() { const query = ($('leadSearch')?.value || '').toLowerCase(); const rows = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query)); $('leadTable').innerHTML = table(['Business Name','Phone','Category','Notes','Status'], rows.map(lead => [lead.business_name, lead.phone_number, lead.category, lead.notes, lead.status])); }
+function renderLeads() {
+    const query = ($('leadSearch')?.value || '').toLowerCase();
+    const rows = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query));
+    $('leadTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone','Category','Notes','Status','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(lead => `<tr><td>${escapeHtml(lead.business_name)}</td><td>${escapeHtml(lead.phone_number)}</td><td>${escapeHtml(lead.category)}</td><td>${escapeHtml(lead.notes)}</td><td><span class="badge">${escapeHtml(lead.status)}</span></td><td><button class="btn secondary" onclick="callLead('${lead.lead_id}')">Start Call</button></td></tr>`).join('')}</tbody></table>`;
+}
 $('leadSearch').oninput = renderLeads;
+async function callLead(leadId) {
+    showLeadMessage('Starting Twilio call...');
+    try {
+        const response = await fetch(`/api/leads/${leadId}/call`, { method:'POST' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Unable to start call');
+        showLeadMessage(`Call started. Call ID: ${escapeHtml(result.call_id)}. Status: ${escapeHtml(result.status || 'dialing')}`, 'ok');
+        setPage('calls');
+        await refresh();
+    } catch (error) {
+        console.error('callLead failed', error);
+        showLeadMessage(`Call failed to start: ${escapeHtml(error.message)}`, 'bad');
+    }
+}
+
+
+function renderLiveCalls() {
+    if (!$('liveCallTable')) return;
+    if (!liveCalls.length) { $('liveCallTable').innerHTML = '<p class="sub">No active dashboard-started calls yet.</p>'; return; }
+    $('liveCallTable').innerHTML = `<table class="table"><thead><tr>${['Business','Phone','Status','Call SID','Updated'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${liveCalls.map(call => `<tr><td>${escapeHtml(call.business_name)}</td><td>${escapeHtml(call.phone_number)}</td><td><span class="badge">${escapeHtml(call.status)}</span></td><td>${escapeHtml(call.call_sid || '')}</td><td>${escapeHtml(call.updated_at || '')}</td></tr>`).join('')}</tbody></table>`;
+}
 
 function renderCalls() { const q = ($('search')?.value || '').toLowerCase(), st = $('statusFilter')?.value || '', int = $('interestFilter')?.value || ''; const statuses = [...new Set(calls.map(c => c.call_status).filter(Boolean))]; $('statusFilter').innerHTML = '<option value="">All statuses</option>' + statuses.map(x => `<option ${x === st ? 'selected' : ''}>${escapeHtml(x)}</option>`).join(''); const rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int)); $('callTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone Number','Category','Call Status','Interested','Callback Requested','Duration','Timestamp'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(c => `<tr class="clickable" onclick="detail('${c.call_id}')"><td>${escapeHtml(c.business_name)}</td><td>${escapeHtml(c.phone)}</td><td>${escapeHtml(c.category)}</td><td><span class="badge">${escapeHtml(c.call_status)}</span></td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td><td>${c.duration || 0}s</td><td>${escapeHtml(c.timestamp)}</td></tr>`).join('')}</tbody></table>`; }
 $('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls; $('interestFilter').onchange = renderCalls;

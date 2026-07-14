@@ -82,6 +82,28 @@ class JsonCallStore:
         except json.JSONDecodeError:
             return []
 
+
+    def get_lead(self, lead_id: str) -> dict[str, Any] | None:
+        for lead in self.list_leads():
+            if lead.get("lead_id") == lead_id:
+                return lead
+        return None
+
+    def update_lead(self, lead_id: str, **updates: Any) -> dict[str, Any] | None:
+        leads = self.list_leads()
+        updated: dict[str, Any] | None = None
+        for lead in leads:
+            if lead.get("lead_id") == lead_id:
+                lead.update({key: value for key, value in updates.items() if value is not None})
+                lead["updated_at"] = datetime.now(timezone.utc).isoformat()
+                updated = lead
+                break
+        if updated is None:
+            return None
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.leads_path.write_text(json.dumps(leads, ensure_ascii=False, indent=2), encoding="utf-8")
+        return updated
+
     def import_leads(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         """Validate and import normalized lead rows.
 

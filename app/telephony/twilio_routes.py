@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
+from app.services.call_status_tracker import call_status_tracker
 from app.storage.json_store import JsonCallStore
 from app.core.settings import DATA_DIR, PUBLIC_BASE_URL
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
@@ -66,18 +67,36 @@ async def start_outbound_call(request: OutboundCallRequest):
             "phone_number": request.phone_number,
         },
     )
+    call_status_tracker.upsert(
+        session.call_id,
+        "created",
+        lead_id=request.lead_id,
+        business_name=request.business_name,
+        phone_number=request.phone_number,
+        category=request.category,
+    )
     bridge = AudioBridge(session, call_result_service)
     adapter = TwilioAdapter(audio_bridge=bridge)
     adapter.attach(session)
 
     try:
+        logger.info(
+            "dashboard_twilio_outbound_start",
+            extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
+        )
         await adapter.connect()
+        call_status_tracker.upsert(session.call_id, "dialing", call_sid=adapter.call_sid)
     except Exception as exc:
+        logger.exception(
+            "dashboard_twilio_outbound_failed",
+            extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
+        )
+        call_status_tracker.upsert(session.call_id, "failed", error=str(exc))
         call_manager.mark_failed(session, str(exc))
         call_manager.destroy_session(session.call_id)
         raise
 
-    return {"call_id": session.call_id, "call_sid": adapter.call_sid}
+    return {"call_id": session.call_id, "call_sid": adapter.call_sid, "status": "dialing"}
 
 
 @router.post("/twiml")
@@ -96,13 +115,21 @@ async def twiml_webhook(request: Request):
 
 
 @router.post("/status")
-async def status_webhook():
+async def status_webhook(request: Request):
     """Acknowledge Twilio status callbacks without doing work inline.
 
     Twilio treats status callbacks as time-sensitive webhooks too. Return 200
     first; any durable status processing should be moved to a queue or
     background task that is not on Twilio's request/response path.
     """
+    try:
+        form = await request.form()
+        call_sid = form.get("CallSid")
+        call_status = form.get("CallStatus")
+        if call_sid or call_status:
+            logger.info("twilio_status_callback", extra={"call_sid": call_sid, "call_status": call_status})
+    except Exception:
+        logger.exception("twilio_status_callback_parse_failed")
     return Response(status_code=200)
 
 
@@ -139,11 +166,19 @@ async def media_stream(websocket: WebSocket):
 
     adapter.websocket = websocket
     adapter.stream_sid = stream_sid
+    adapter.session.metadata["call_sid"] = call_sid
+    call_status_tracker.upsert(adapter.session.call_id, "media_connected", call_sid=call_sid, stream_sid=stream_sid)
     call_manager.mark_connected(adapter.session)
 
     try:
+        call_status_tracker.upsert(adapter.session.call_id, "ai_active")
         await adapter.start()
+    except Exception as exc:
+        logger.exception("twilio_media_stream_failed", extra={"call_id": adapter.session.call_id, "call_sid": call_sid})
+        call_status_tracker.upsert(adapter.session.call_id, "failed", error=str(exc))
+        raise
     finally:
+        call_status_tracker.upsert(adapter.session.call_id, "finished")
         call_manager.destroy_session(adapter.session.call_id)
         logger.info("Twilio call %s finished", adapter.session.call_id)
 

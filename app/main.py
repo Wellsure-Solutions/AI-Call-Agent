@@ -1,4 +1,5 @@
 import json
+import logging
 from collections import Counter
 
 import uvicorn
@@ -8,12 +9,15 @@ from fastapi.responses import FileResponse, Response
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
+from app.services.call_status_tracker import call_status_tracker
 from app.storage.json_store import JsonCallStore
 from app.core.settings import DATA_DIR, HOST, INDEX_HTML, PORT
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
-from app.telephony.twilio_routes import media_router, router as twilio_router
+from app.telephony.twilio_routes import OutboundCallRequest, media_router, router as twilio_router, start_outbound_call
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Autonomous Calling Agent")
 answer_extractor = AnswerExtractor()
@@ -36,13 +40,19 @@ async def list_leads():
 
 @app.post("/api/leads/preview")
 async def preview_leads(file: UploadFile | None = File(default=None), pasted_data: str = Form(default="")):
-    if file is not None:
-        content = await file.read()
-        headers, rows = answer_store.parse_upload(content, file.filename or "leads.csv")
-    elif pasted_data.strip():
-        headers, rows = answer_store.parse_upload(pasted_data.encode("utf-8"), "pasted.csv")
-    else:
-        raise HTTPException(status_code=400, detail="Upload a CSV/Excel file or paste tabular data.")
+    try:
+        if file is not None:
+            content = await file.read()
+            headers, rows = answer_store.parse_upload(content, file.filename or "leads.csv")
+        elif pasted_data.strip():
+            headers, rows = answer_store.parse_upload(pasted_data.encode("utf-8"), "pasted.csv")
+        else:
+            raise HTTPException(status_code=400, detail="Upload a CSV/Excel file or paste tabular data.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("lead_preview_failed")
+        raise HTTPException(status_code=400, detail=f"Unable to parse leads: {exc}") from exc
     if not headers and rows:
         headers = list(rows[0].keys())
     return {"headers": headers, "rows": rows, "preview_rows": rows[:25], "total_rows": len(rows)}
@@ -60,7 +70,9 @@ async def import_leads(payload: dict):
             "category": row.get(mapping.get("category", ""), ""),
             "notes": row.get(mapping.get("notes", ""), ""),
         })
-    return answer_store.import_leads(normalized)
+    result = answer_store.import_leads(normalized)
+    logger.info("lead_import_completed", extra={"submitted": len(rows), "imported": result["imported"], "rejected": len(result["rejected"])})
+    return result
 
 
 @app.post("/api/leads/manual")
@@ -75,6 +87,35 @@ async def manual_lead(payload: dict):
     if result["imported"] != 1:
         raise HTTPException(status_code=422, detail=result)
     return result
+
+
+@app.post("/api/leads/{lead_id}/call")
+async def call_lead(lead_id: str):
+    lead = answer_store.get_lead(lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    payload = OutboundCallRequest(
+        phone_number=lead["phone_number"],
+        campaign_name="dashboard_lead",
+        lead_id=lead_id,
+        business_name=lead.get("business_name"),
+        category=lead.get("category"),
+        notes=lead.get("notes"),
+    )
+    try:
+        logger.info("dashboard_lead_call_requested", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
+        result = await start_outbound_call(payload)
+        answer_store.update_lead(lead_id, status="calling", last_call_id=result.get("call_id"), last_call_sid=result.get("call_sid"))
+        return result
+    except Exception as exc:
+        logger.exception("dashboard_lead_call_failed", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
+        answer_store.update_lead(lead_id, status="call_failed", last_error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Unable to start Twilio call: {exc}") from exc
+
+
+@app.get("/api/live-calls")
+async def live_calls():
+    return {"calls": call_status_tracker.list()}
 
 
 @app.get("/api/calls")

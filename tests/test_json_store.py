@@ -47,3 +47,17 @@ def test_import_leads_reports_duplicates_and_missing_required_fields(tmp_path):
     assert second["rejected"][0]["errors"] == ["Duplicate phone number"]
     assert second["rejected"][1]["errors"] == ["Missing category"]
     assert len(store.list_leads()) == 1
+
+
+def test_update_lead_tracks_call_metadata(tmp_path):
+    store = JsonCallStore(tmp_path)
+    result = store.import_leads([
+        {"business_name": "Sharma Electronics", "phone_number": "9876543210", "category": "Mobile Accessories"}
+    ])
+    lead_id = result["leads"][0]["lead_id"]
+
+    updated = store.update_lead(lead_id, status="calling", last_call_id="call-123", last_call_sid="sid-123")
+
+    assert updated is not None
+    assert updated["status"] == "calling"
+    assert store.get_lead(lead_id)["last_call_id"] == "call-123"
