@@ -78,7 +78,10 @@ class ConversationEngine:
         if self.connection is None or self.closing_requested or not pcm_frame:
             return False
         try:
-            self.connection.send_media(pcm_frame)
+            # Offload per-frame Deepgram media sends so one active call cannot
+            # block Uvicorn's single event loop and delay unrelated coroutines
+            # like new WebSocket handshakes.
+            await asyncio.to_thread(self.connection.send_media, pcm_frame)
             return True
         except Exception as exc:
             self.closing_requested = True

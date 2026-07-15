@@ -29,6 +29,21 @@ DEEPGRAM_OUTPUT_SAMPLE_RATE = 24000  # linear16, what Deepgram sends back to us
 PCM_SAMPLE_WIDTH = 2  # linear16 = 2 bytes/sample, same on every leg (Twilio included)
 
 
+def _convert_deepgram_pcm_to_twilio_mulaw(pcm_frame: bytes) -> bytes:
+    resampled, _ = audioop.ratecv(
+        pcm_frame, PCM_SAMPLE_WIDTH, 1, DEEPGRAM_OUTPUT_SAMPLE_RATE, TWILIO_SAMPLE_RATE, None
+    )
+    return audioop.lin2ulaw(resampled, PCM_SAMPLE_WIDTH)
+
+
+def _convert_twilio_mulaw_to_deepgram_pcm(mulaw_bytes: bytes) -> bytes:
+    linear = audioop.ulaw2lin(mulaw_bytes, PCM_SAMPLE_WIDTH)
+    pcm_frame, _ = audioop.ratecv(
+        linear, PCM_SAMPLE_WIDTH, 1, TWILIO_SAMPLE_RATE, DEEPGRAM_INPUT_SAMPLE_RATE, None
+    )
+    return pcm_frame
+
+
 class TwilioAdapter(BaseTelephonyAdapter):
     """
     Adapter for Twilio Voice + Media Streams, mirroring BrowserAdapter's
@@ -120,10 +135,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
         if self.websocket is None or self.stream_sid is None:
             logger.warning("send_audio called before Twilio WebSocket is bound; dropping frame")
             return
-        resampled, _ = audioop.ratecv(
-            pcm_frame, PCM_SAMPLE_WIDTH, 1, DEEPGRAM_OUTPUT_SAMPLE_RATE, TWILIO_SAMPLE_RATE, None
+        loop = asyncio.get_running_loop()
+        # Offload per-frame audio conversion so one active call cannot block
+        # Uvicorn's single event loop and delay unrelated coroutines like new
+        # WebSocket handshakes.
+        mulaw_bytes = await loop.run_in_executor(
+            None, _convert_deepgram_pcm_to_twilio_mulaw, pcm_frame
         )
-        mulaw_bytes = audioop.lin2ulaw(resampled, PCM_SAMPLE_WIDTH)
         payload_b64 = base64.b64encode(mulaw_bytes).decode("ascii")
         await self.websocket.send_text(json.dumps({
             "event": "media",
@@ -144,11 +162,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
             if event == "media":
                 mulaw_bytes = base64.b64decode(msg["media"]["payload"])
-                linear = audioop.ulaw2lin(mulaw_bytes, PCM_SAMPLE_WIDTH)
-                pcm_frame, _ = audioop.ratecv(
-                    linear, PCM_SAMPLE_WIDTH, 1, TWILIO_SAMPLE_RATE, DEEPGRAM_INPUT_SAMPLE_RATE, None
+                loop = asyncio.get_running_loop()
+                # Offload per-frame audio conversion so one active call cannot block
+                # Uvicorn's single event loop and delay unrelated coroutines like new
+                # WebSocket handshakes.
+                return await loop.run_in_executor(
+                    None, _convert_twilio_mulaw_to_deepgram_pcm, mulaw_bytes
                 )
-                return pcm_frame
 
             elif event == "stop":
                 return None
