@@ -53,8 +53,11 @@ class OutboundCallRequest(BaseModel):
 
 @router.post("/outbound")
 async def start_outbound_call(request: OutboundCallRequest):
-    """Trigger an outbound sales call. The actual audio/AI loop only starts
-    once Twilio's WebSocket connects (see /media-stream below)."""
+    """Trigger an outbound sales call.
+
+    The realtime AI is pre-warmed before dialing; Twilio audio still starts
+    once the answered call opens /media-stream.
+    """
     session = call_manager.create_session(
         campaign_name=request.campaign_name,
         phone_number=request.phone_number,
@@ -80,6 +83,13 @@ async def start_outbound_call(request: OutboundCallRequest):
     adapter.attach(session)
 
     try:
+        # Pre-warm the realtime AI connection while Twilio is still dialing so
+        # the greeting audio is already queued when the recipient answers and
+        # Twilio opens the media stream. This removes the several-second
+        # answer-to-first-audio delay caused by starting Deepgram only after
+        # pickup.
+        await bridge.start()
+        call_status_tracker.upsert(session.call_id, "ai_ready")
         logger.info(
             "dashboard_twilio_outbound_start",
             extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
@@ -92,6 +102,7 @@ async def start_outbound_call(request: OutboundCallRequest):
             extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
         )
         call_status_tracker.upsert(session.call_id, "failed", error=str(exc))
+        await bridge.close_ai()
         call_manager.mark_failed(session, str(exc))
         call_manager.destroy_session(session.call_id)
         raise

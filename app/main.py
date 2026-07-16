@@ -1,9 +1,10 @@
+import asyncio
 import json
 import logging
 from collections import Counter
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, WebSocket
 from fastapi.responses import FileResponse, Response
 
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY
@@ -26,6 +27,57 @@ call_result_service = CallResultService(answer_extractor, answer_store)
 call_manager = CallManager()
 app.include_router(twilio_router)
 app.include_router(media_router)
+
+BATCH_CONCURRENCY_LIMIT = 5
+BATCH_TERMINAL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled", "finished", "result_save_failed", "call_failed"}
+
+
+async def _run_batch_calls(leads: list[dict]) -> None:
+    """Run dashboard batch calls with at most five live calls at a time.
+
+    The runner starts a replacement only after one of the active leads leaves
+    the calling state, so large uploads are drained without exposing lead data
+    in the API response.
+    """
+    queue = list(leads)
+    active: dict[str, dict] = {}
+
+    async def start_next() -> None:
+        while queue and len(active) < BATCH_CONCURRENCY_LIMIT:
+            lead = queue.pop(0)
+            lead_id = lead.get("lead_id")
+            outbound = OutboundCallRequest(
+                phone_number=lead["phone_number"],
+                campaign_name="dashboard_batch",
+                lead_id=lead_id,
+                business_name=lead.get("business_name"),
+                category=lead.get("category"),
+                notes=lead.get("notes"),
+            )
+            try:
+                logger.info("dashboard_batch_call_requested", extra={"lead_id": lead_id})
+                result = await start_outbound_call(outbound)
+                answer_store.update_lead(lead_id, status="calling", last_call_id=result.get("call_id"), last_call_sid=result.get("call_sid"))
+                active[lead_id] = {"call_id": result.get("call_id")}
+            except Exception as exc:
+                logger.exception("dashboard_batch_call_failed", extra={"lead_id": lead_id})
+                answer_store.update_lead(lead_id, status="call_failed", last_error=str(exc))
+
+    await start_next()
+    while active or queue:
+        await asyncio.sleep(5)
+        completed: list[str] = []
+        for lead_id, metadata in active.items():
+            lead = answer_store.get_lead(lead_id)
+            status = (lead or {}).get("status")
+            call_id = metadata.get("call_id")
+            live_status = (call_status_tracker.get(call_id) or {}).get("status") if call_id else None
+            if status and status != "calling" or live_status in BATCH_TERMINAL_STATUSES:
+                completed.append(lead_id)
+        for lead_id in completed:
+            active.pop(lead_id, None)
+        await start_next()
+
 
 @app.get("/")
 async def get_ui():
@@ -114,35 +166,19 @@ async def call_lead(lead_id: str):
 
 
 @app.post("/api/leads/call-batch")
-async def call_lead_batch(payload: dict):
+async def call_lead_batch(payload: dict, background_tasks: BackgroundTasks):
     requested_ids = set(payload.get("lead_ids") or [])
     max_calls = int(payload.get("max_calls") or 50)
     leads = answer_store.list_leads()
     if requested_ids:
         leads = [lead for lead in leads if lead.get("lead_id") in requested_ids]
     leads = [lead for lead in leads if lead.get("phone_number") and lead.get("status") not in {"calling"}][:max_calls]
-    started: list[dict] = []
-    failed: list[dict] = []
+    if not leads:
+        return {"requested": 0, "queued": 0, "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
     for lead in leads:
-        lead_id = lead.get("lead_id")
-        outbound = OutboundCallRequest(
-            phone_number=lead["phone_number"],
-            campaign_name="dashboard_batch",
-            lead_id=lead_id,
-            business_name=lead.get("business_name"),
-            category=lead.get("category"),
-            notes=lead.get("notes"),
-        )
-        try:
-            logger.info("dashboard_batch_call_requested", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
-            result = await start_outbound_call(outbound)
-            answer_store.update_lead(lead_id, status="calling", last_call_id=result.get("call_id"), last_call_sid=result.get("call_sid"))
-            started.append({"lead_id": lead_id, **result})
-        except Exception as exc:
-            logger.exception("dashboard_batch_call_failed", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
-            answer_store.update_lead(lead_id, status="call_failed", last_error=str(exc))
-            failed.append({"lead_id": lead_id, "error": str(exc)})
-    return {"requested": len(leads), "started": started, "failed": failed}
+        answer_store.update_lead(lead.get("lead_id"), status="queued")
+    background_tasks.add_task(_run_batch_calls, leads)
+    return {"requested": len(leads), "queued": len(leads), "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
 
 
 @app.get("/api/live-calls")
