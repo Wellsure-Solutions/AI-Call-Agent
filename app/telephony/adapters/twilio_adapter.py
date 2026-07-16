@@ -170,6 +170,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
             event = msg.get("event")
 
             if event == "media":
+                if self.session is not None and not self.session.metadata.get("first_media_frame_received"):
+                    self.session.metadata["first_media_frame_received"] = True
+                    logger.info(
+                        "twilio_first_media_frame_received",
+                        extra={"call_id": self.session.call_id, "call_sid": self.call_sid, "stream_sid": self.stream_sid},
+                    )
                 mulaw_bytes = base64.b64decode(msg["media"]["payload"])
                 loop = asyncio.get_running_loop()
                 # Offload per-frame audio conversion so one active call cannot block
@@ -287,9 +293,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
     # TwiML builder -- used by the /twilio/twiml webhook route
     # ------------------------------------------------------------------
     @staticmethod
-    def build_twiml(stream_ws_url: str) -> str:
+    def build_twiml(stream_ws_url: str, parameters: dict[str, str] | None = None) -> str:
         response = VoiceResponse()
         connect = Connect()
-        connect.stream(url=stream_ws_url)
+        stream = connect.stream(url=stream_ws_url)
+        for name, value in (parameters or {}).items():
+            if value:
+                stream.parameter(name=name, value=value)
         response.append(connect)
         return str(response)
