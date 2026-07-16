@@ -99,7 +99,6 @@ class TwilioAdapter(BaseTelephonyAdapter):
             url=f"{self.public_base_url}/twilio/twiml",
             status_callback=f"{self.public_base_url}/twilio/status",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
-            machine_detection="DetectMessageEnd",
             trim="trim-silence",
         )
         self.call_sid = call.sid

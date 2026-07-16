@@ -53,8 +53,11 @@ class OutboundCallRequest(BaseModel):
 
 @router.post("/outbound")
 async def start_outbound_call(request: OutboundCallRequest):
-    """Trigger an outbound sales call. The actual audio/AI loop only starts
-    once Twilio's WebSocket connects (see /media-stream below)."""
+    """Trigger an outbound sales call.
+
+    The realtime AI is warmed only after Twilio reports the call as answered;
+    Twilio audio still starts once the answered call opens /media-stream.
+    """
     session = call_manager.create_session(
         campaign_name=request.campaign_name,
         phone_number=request.phone_number,
@@ -116,11 +119,11 @@ async def twiml_webhook(request: Request):
 
 @router.post("/status")
 async def status_webhook(request: Request):
-    """Acknowledge Twilio status callbacks without doing work inline.
+    """Acknowledge Twilio status callbacks without doing slow work inline.
 
-    Twilio treats status callbacks as time-sensitive webhooks too. Return 200
-    first; any durable status processing should be moved to a queue or
-    background task that is not on Twilio's request/response path.
+    The answered/in-progress callback is the first Twilio signal that the call
+    has actually been picked up. Only then do we warm the AI connection, so no
+    greeting audio is generated before pickup.
     """
     try:
         form = await request.form()
@@ -128,9 +131,23 @@ async def status_webhook(request: Request):
         call_status = form.get("CallStatus")
         if call_sid or call_status:
             logger.info("twilio_status_callback", extra={"call_sid": call_sid, "call_status": call_status})
+        if call_sid and call_status in {"answered", "in-progress"}:
+            asyncio.create_task(_warm_answered_call(str(call_sid)))
     except Exception:
         logger.exception("twilio_status_callback_parse_failed")
     return Response(status_code=200)
+
+
+async def _warm_answered_call(call_sid: str) -> None:
+    adapter = TwilioAdapter._pending.get(call_sid)
+    if adapter is None or adapter.audio_bridge is None or adapter.session is None:
+        return
+    try:
+        await adapter.audio_bridge.start()
+        call_status_tracker.upsert(adapter.session.call_id, "ai_ready", call_sid=call_sid)
+    except Exception as exc:
+        logger.exception("answered_call_ai_warm_failed", extra={"call_sid": call_sid})
+        call_status_tracker.upsert(adapter.session.call_id, "ai_warm_failed", error=str(exc), call_sid=call_sid)
 
 
 @media_router.websocket("/media-stream")
