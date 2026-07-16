@@ -75,6 +75,14 @@ class JsonCallStore:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def delete_call(self, call_id: str) -> dict[str, Any] | None:
+        path = self.results_dir / f"{call_id}.json"
+        if not path.exists():
+            return None
+        deleted = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink()
+        return deleted
+
     def list_leads(self) -> list[dict[str, Any]]:
         if not self.leads_path.exists():
             return []
@@ -104,6 +112,21 @@ class JsonCallStore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.leads_path.write_text(json.dumps(leads, ensure_ascii=False, indent=2), encoding="utf-8")
         return updated
+
+    def delete_lead(self, lead_id: str) -> dict[str, Any] | None:
+        leads = self.list_leads()
+        deleted: dict[str, Any] | None = None
+        remaining: list[dict[str, Any]] = []
+        for lead in leads:
+            if lead.get("lead_id") == lead_id:
+                deleted = lead
+            else:
+                remaining.append(lead)
+        if deleted is None:
+            return None
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.leads_path.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding="utf-8")
+        return deleted
 
     def import_leads(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         """Validate and import normalized lead rows.
