@@ -55,8 +55,8 @@ class OutboundCallRequest(BaseModel):
 async def start_outbound_call(request: OutboundCallRequest):
     """Trigger an outbound sales call.
 
-    The realtime AI is warmed only after Twilio reports the call as answered;
-    Twilio audio still starts once the answered call opens /media-stream.
+    The realtime AI starts only after Twilio delivers media from the answered
+    call, preventing idle AI websocket timeouts before caller audio arrives.
     """
     session = call_manager.create_session(
         campaign_name=request.campaign_name,
@@ -127,12 +127,7 @@ async def twiml_webhook(request: Request):
 
 @router.post("/status")
 async def status_webhook(request: Request):
-    """Acknowledge Twilio status callbacks without doing slow work inline.
-
-    The answered/in-progress callback is the first Twilio signal that the call
-    has actually been picked up. Only then do we warm the AI connection, so no
-    greeting audio is generated before pickup.
-    """
+    """Acknowledge Twilio status callbacks without starting AI work inline."""
     try:
         form = await request.form()
         call_sid = form.get("CallSid")
@@ -196,7 +191,7 @@ async def media_stream(websocket: WebSocket):
     call_manager.mark_connected(adapter.session)
 
     try:
-        call_status_tracker.upsert(adapter.session.call_id, "ai_active")
+        call_status_tracker.upsert(adapter.session.call_id, "media_stream_active")
         await adapter.start()
     except Exception as exc:
         logger.exception("twilio_media_stream_failed", extra={"call_id": adapter.session.call_id, "call_sid": call_sid})

@@ -28,12 +28,13 @@ call_manager = CallManager()
 app.include_router(twilio_router)
 app.include_router(media_router)
 
-BATCH_CONCURRENCY_LIMIT = 5
+BATCH_CONCURRENCY_LIMIT = 3
+BATCH_START_DELAY_SECONDS = 2
 BATCH_TERMINAL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled", "finished", "result_save_failed", "call_failed"}
 
 
 async def _run_batch_calls(leads: list[dict]) -> None:
-    """Run dashboard batch calls with at most five live calls at a time.
+    """Run dashboard batch calls with a conservative live-call limit.
 
     The runner starts a replacement only after one of the active leads leaves
     the calling state, so large uploads are drained without exposing lead data
@@ -59,6 +60,7 @@ async def _run_batch_calls(leads: list[dict]) -> None:
                 result = await start_outbound_call(outbound)
                 answer_store.update_lead(lead_id, status="calling", last_call_id=result.get("call_id"), last_call_sid=result.get("call_sid"))
                 active[lead_id] = {"call_id": result.get("call_id")}
+                await asyncio.sleep(BATCH_START_DELAY_SECONDS)
             except Exception as exc:
                 logger.exception("dashboard_batch_call_failed", extra={"lead_id": lead_id})
                 answer_store.update_lead(lead_id, status="call_failed", last_error=str(exc))
@@ -172,7 +174,7 @@ async def call_lead_batch(payload: dict, background_tasks: BackgroundTasks):
     leads = answer_store.list_leads()
     if requested_ids:
         leads = [lead for lead in leads if lead.get("lead_id") in requested_ids]
-    leads = [lead for lead in leads if lead.get("phone_number") and lead.get("status") not in {"calling"}][:max_calls]
+    leads = [lead for lead in leads if lead.get("phone_number") and lead.get("status") not in {"calling", "queued"}][:max_calls]
     if not leads:
         return {"requested": 0, "queued": 0, "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
     for lead in leads:

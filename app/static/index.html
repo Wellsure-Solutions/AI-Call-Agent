@@ -215,7 +215,7 @@ async function callBatch() {
         const response = await fetch('/api/leads/call-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ lead_ids:selected.map(lead => lead.lead_id), max_calls:selected.length }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || 'Unable to start batch');
-        showLeadMessage(`Batch queued: ${result.queued || 0} leads. Up to ${result.concurrency_limit || 5} calls will run at a time until the batch completes.`, 'ok');
+        showLeadMessage(`Batch queued: ${result.queued || 0} leads. Up to ${result.concurrency_limit || 3} calls will run at a time until the batch completes.`, 'ok');
         setPage('calls');
         await refresh();
     } catch (error) {
