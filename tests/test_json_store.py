@@ -30,7 +30,7 @@ def test_parse_pasted_tab_separated_leads_and_import_summary(tmp_path):
     assert result["rejected"][0]["errors"] == ["Phone number is too short"]
 
 
-def test_import_leads_reports_duplicates_and_missing_required_fields(tmp_path):
+def test_import_leads_reports_duplicates_and_allows_missing_optional_category(tmp_path):
     store = JsonCallStore(tmp_path)
 
     first = store.import_leads([
@@ -42,11 +42,11 @@ def test_import_leads_reports_duplicates_and_missing_required_fields(tmp_path):
     ])
 
     assert first["imported"] == 1
-    assert second["imported"] == 0
+    assert second["imported"] == 1
     assert second["duplicates"] == 1
     assert second["rejected"][0]["errors"] == ["Duplicate phone number"]
-    assert second["rejected"][1]["errors"] == ["Missing category"]
-    assert len(store.list_leads()) == 1
+    assert second["leads"][0]["category"] == ""
+    assert len(store.list_leads()) == 2
 
 
 def test_update_lead_tracks_call_metadata(tmp_path):
