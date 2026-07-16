@@ -83,6 +83,13 @@ async def start_outbound_call(request: OutboundCallRequest):
     adapter.attach(session)
 
     try:
+        # Pre-warm the realtime AI connection while Twilio is still dialing so
+        # the greeting audio is already queued when the recipient answers and
+        # Twilio opens the media stream. This removes the several-second
+        # answer-to-first-audio delay caused by starting Deepgram only after
+        # pickup.
+        await bridge.start()
+        call_status_tracker.upsert(session.call_id, "ai_ready")
         logger.info(
             "dashboard_twilio_outbound_start",
             extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
@@ -112,14 +119,9 @@ async def twiml_webhook(request: Request):
     has a short webhook budget here; the only job is to produce valid TwiML
     that tells Twilio where to open the independent secure WebSocket stream.
     """
-    form = await request.form()
-    call_sid = str(form.get("CallSid") or "")
-    logger.info(
-        "twilio_twiml_requested",
-        extra={"call_sid": call_sid, "remote_addr": request.client.host if request.client else "unknown"},
-    )
+    logger.info("TwiML requested from %s", request.client.host if request.client else "unknown")
     ws_url = router_ws_url(request)
-    twiml = TwilioAdapter.build_twiml(stream_ws_url=ws_url, parameters={"callSid": call_sid})
+    twiml = TwilioAdapter.build_twiml(stream_ws_url=ws_url)
     return PlainTextResponse(content=twiml, media_type="application/xml")
 
 
@@ -132,30 +134,23 @@ async def status_webhook(request: Request):
         call_status = form.get("CallStatus")
         if call_sid or call_status:
             logger.info("twilio_status_callback", extra={"call_sid": call_sid, "call_status": call_status})
-        if call_sid and call_status:
-            await _record_twilio_status(str(call_sid), str(call_status))
+        if call_sid and call_status in {"answered", "in-progress"}:
+            asyncio.create_task(_warm_answered_call(str(call_sid)))
     except Exception:
         logger.exception("twilio_status_callback_parse_failed")
     return Response(status_code=200)
 
 
-async def _record_twilio_status(call_sid: str, call_status: str) -> None:
+async def _warm_answered_call(call_sid: str) -> None:
     adapter = TwilioAdapter._pending.get(call_sid)
-    if adapter is None or adapter.session is None:
+    if adapter is None or adapter.audio_bridge is None or adapter.session is None:
         return
-
-    normalized_status = "answered" if call_status == "in-progress" else call_status
-    call_status_tracker.upsert(adapter.session.call_id, normalized_status, call_sid=call_sid)
-
-    # If Twilio ends a call before it ever opens Media Streams, no websocket
-    # route will run. Finalize and remove the pending adapter here so dashboard
-    # batches can drain instead of getting stuck behind no-answer/busy calls.
-    terminal = {"completed", "busy", "failed", "no-answer", "canceled"}
-    if call_status in terminal and adapter.websocket is None:
-        TwilioAdapter._pending.pop(call_sid, None)
-        if adapter.audio_bridge is not None:
-            await adapter.audio_bridge.stop(call_status)
-        call_manager.destroy_session(adapter.session.call_id)
+    try:
+        await adapter.audio_bridge.start()
+        call_status_tracker.upsert(adapter.session.call_id, "ai_ready", call_sid=call_sid)
+    except Exception as exc:
+        logger.exception("answered_call_ai_warm_failed", extra={"call_sid": call_sid})
+        call_status_tracker.upsert(adapter.session.call_id, "ai_warm_failed", error=str(exc), call_sid=call_sid)
 
 
 @media_router.websocket("/media-stream")
@@ -170,11 +165,8 @@ async def media_stream(websocket: WebSocket):
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=5)
         msg = json.loads(raw)
         if msg.get("event") == "start":
-            start = msg["start"]
-            custom_parameters = start.get("customParameters") or {}
-            call_sid = custom_parameters.get("callSid") or start.get("callSid")
-            stream_sid = start["streamSid"]
-            logger.info("twilio_media_stream_started", extra={"call_sid": call_sid, "stream_sid": stream_sid})
+            call_sid = msg["start"]["callSid"]
+            stream_sid = msg["start"]["streamSid"]
 
     adapter = TwilioAdapter._pending.pop(call_sid, None)
     if adapter is None or adapter.session is None:
@@ -196,7 +188,6 @@ async def media_stream(websocket: WebSocket):
     adapter.stream_sid = stream_sid
     adapter.session.metadata["call_sid"] = call_sid
     call_status_tracker.upsert(adapter.session.call_id, "media_connected", call_sid=call_sid, stream_sid=stream_sid)
-    adapter.session.metadata["first_media_frame_received"] = False
     call_manager.mark_connected(adapter.session)
 
     try:
