@@ -28,7 +28,7 @@ call_manager = CallManager()
 app.include_router(twilio_router)
 app.include_router(media_router)
 
-BATCH_CONCURRENCY_LIMIT = 1
+BATCH_CONCURRENCY_LIMIT = 3
 BATCH_START_DELAY_SECONDS = 2
 BATCH_TERMINAL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled", "finished", "result_save_failed", "call_failed"}
 
@@ -143,14 +143,6 @@ async def manual_lead(payload: dict):
     return result
 
 
-@app.delete("/api/leads/{lead_id}")
-async def delete_lead(lead_id: str):
-    deleted = answer_store.delete_lead(lead_id)
-    if deleted is None:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    return {"deleted": True, "lead": deleted}
-
-
 @app.post("/api/leads/{lead_id}/call")
 async def call_lead(lead_id: str):
     lead = answer_store.get_lead(lead_id)
@@ -207,14 +199,6 @@ async def get_call(call_id: str):
     if call is None:
         raise HTTPException(status_code=404, detail="Call not found")
     return call
-
-
-@app.delete("/api/calls/{call_id}")
-async def delete_call(call_id: str):
-    deleted = answer_store.delete_call(call_id)
-    if deleted is None:
-        raise HTTPException(status_code=404, detail="Call not found")
-    return {"deleted": True, "call": deleted}
 
 
 @app.get("/api/stats")
