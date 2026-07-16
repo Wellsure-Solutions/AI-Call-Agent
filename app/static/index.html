@@ -188,8 +188,18 @@ function downloadTemplate() { window.location.href = '/api/leads/template'; }
 function renderLeads() {
     const query = ($('leadSearch')?.value || '').toLowerCase();
     const rows = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query));
-    $('leadTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone','Category','Notes','Status','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(lead => `<tr><td>${escapeHtml(lead.business_name)}</td><td>${escapeHtml(lead.phone_number)}</td><td>${escapeHtml(lead.category)}</td><td>${escapeHtml(lead.notes)}</td><td><span class="badge">${escapeHtml(lead.status)}</span></td><td><button class="btn secondary" onclick="callLead('${lead.lead_id}')">Start Call</button></td></tr>`).join('')}</tbody></table>`;
+    $('leadTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone','Category','Notes','Status','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(lead => `<tr><td>${escapeHtml(lead.business_name)}</td><td>${escapeHtml(lead.phone_number)}</td><td>${escapeHtml(lead.category)}</td><td>${escapeHtml(lead.notes)}</td><td><span class="badge">${escapeHtml(lead.status)}</span></td><td><div class="actions"><button class="btn secondary" onclick="callLead('${lead.lead_id}')">Start Call</button><button class="btn danger" onclick="deleteLead('${lead.lead_id}')">Delete</button></div></td></tr>`).join('')}</tbody></table>`;
 }
+
+async function deleteLead(leadId) {
+    if (!confirm('Delete this lead?')) return;
+    const response = await fetch(`/api/leads/${leadId}`, { method:'DELETE' });
+    const result = await response.json();
+    if (!response.ok) { showLeadMessage(`Delete failed: ${escapeHtml(result.detail || 'Unable to delete lead')}`, 'bad'); return; }
+    showLeadMessage('Lead deleted.', 'ok');
+    await refresh();
+}
+
 $('leadSearch').oninput = renderLeads;
 async function callLead(leadId) {
     showLeadMessage('Starting Twilio call...');
@@ -215,7 +225,7 @@ async function callBatch() {
         const response = await fetch('/api/leads/call-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ lead_ids:selected.map(lead => lead.lead_id), max_calls:selected.length }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || 'Unable to start batch');
-        showLeadMessage(`Batch queued: ${result.queued || 0} leads. Up to ${result.concurrency_limit || 3} calls will run at a time until the batch completes.`, 'ok');
+        showLeadMessage(`Batch queued: ${result.queued || 0} leads. ${result.concurrency_limit || 1} call(s) will run at a time until the queue completes.`, 'ok');
         setPage('calls');
         await refresh();
     } catch (error) {
@@ -231,7 +241,16 @@ function renderLiveCalls() {
     $('liveCallTable').innerHTML = `<table class="table"><thead><tr>${['Business','Phone','Status','Call SID','Updated'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${liveCalls.map(call => `<tr><td>${escapeHtml(call.business_name)}</td><td>${escapeHtml(call.phone_number)}</td><td><span class="badge">${escapeHtml(call.status)}</span></td><td>${escapeHtml(call.call_sid || '')}</td><td>${escapeHtml(call.updated_at || '')}</td></tr>`).join('')}</tbody></table>`;
 }
 
-function renderCalls() { const q = ($('search')?.value || '').toLowerCase(), st = $('statusFilter')?.value || '', int = $('interestFilter')?.value || ''; const statuses = [...new Set(calls.map(c => c.call_status).filter(Boolean))]; $('statusFilter').innerHTML = '<option value="">All statuses</option>' + statuses.map(x => `<option ${x === st ? 'selected' : ''}>${escapeHtml(x)}</option>`).join(''); const rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int)); $('callTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone Number','Category','Call Status','Interested','Callback Requested','Duration','Timestamp','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(c => `<tr class="clickable" onclick="detail('${c.call_id}')"><td>${escapeHtml(c.business_name)}</td><td>${escapeHtml(c.phone)}</td><td>${escapeHtml(c.category)}</td><td><span class="badge">${escapeHtml(c.call_status)}</span></td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td><td>${c.duration || 0}s</td><td>${escapeHtml(c.timestamp)}</td><td><button class="btn secondary" onclick="event.stopPropagation(); detail('${c.call_id}')">View Conversation</button></td></tr>`).join('')}</tbody></table>`; }
+function renderCalls() { const q = ($('search')?.value || '').toLowerCase(), st = $('statusFilter')?.value || '', int = $('interestFilter')?.value || ''; const statuses = [...new Set(calls.map(c => c.call_status).filter(Boolean))]; $('statusFilter').innerHTML = '<option value="">All statuses</option>' + statuses.map(x => `<option ${x === st ? 'selected' : ''}>${escapeHtml(x)}</option>`).join(''); const rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int)); $('callTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone Number','Category','Call Status','Interested','Callback Requested','Duration','Timestamp','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(c => `<tr class="clickable" onclick="detail('${c.call_id}')"><td>${escapeHtml(c.business_name)}</td><td>${escapeHtml(c.phone)}</td><td>${escapeHtml(c.category)}</td><td><span class="badge">${escapeHtml(c.call_status)}</span></td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td><td>${c.duration || 0}s</td><td>${escapeHtml(c.timestamp)}</td><td><div class="actions"><button class="btn secondary" onclick="event.stopPropagation(); detail('${c.call_id}')">View</button><button class="btn danger" onclick="event.stopPropagation(); deleteCall('${c.call_id}')">Delete</button></div></td></tr>`).join('')}</tbody></table>`; }
+
+async function deleteCall(callId) {
+    if (!confirm('Delete this call result?')) return;
+    const response = await fetch(`/api/calls/${callId}`, { method:'DELETE' });
+    const result = await response.json();
+    if (!response.ok) { alert(`Delete failed: ${result.detail || 'Unable to delete call'}`); return; }
+    await refresh();
+}
+
 $('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls; $('interestFilter').onchange = renderCalls;
 async function detail(id) { const c = await fetch('/api/calls/' + id).then(r => r.json()); $('detail').innerHTML = `<h3>${escapeHtml(c.business_name || 'Unknown business')}</h3><p><b>Phone:</b> ${escapeHtml(c.phone)} &nbsp; <b>Category:</b> ${escapeHtml(c.category)}</p><p><b>Status:</b> ${escapeHtml(c.call_status)} &nbsp; <b>Duration:</b> ${c.duration || 0}s</p><h3>Structured AI response</h3><pre>${escapeHtml(JSON.stringify(c.structured_response || {}, null, 2))}</pre><h3>Transcript</h3><pre>${escapeHtml(c.transcript || 'No transcript saved.')}</pre>`; $('modal').classList.add('open'); }
 function table(headers, rows) { return `<table class="table"><thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table>`; }

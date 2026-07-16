@@ -15,7 +15,6 @@ to each other:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 
@@ -83,13 +82,6 @@ async def start_outbound_call(request: OutboundCallRequest):
     adapter.attach(session)
 
     try:
-        # Pre-warm the realtime AI connection while Twilio is still dialing so
-        # the greeting audio is already queued when the recipient answers and
-        # Twilio opens the media stream. This removes the several-second
-        # answer-to-first-audio delay caused by starting Deepgram only after
-        # pickup.
-        await bridge.start()
-        call_status_tracker.upsert(session.call_id, "ai_ready")
         logger.info(
             "dashboard_twilio_outbound_start",
             extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
@@ -134,23 +126,26 @@ async def status_webhook(request: Request):
         call_status = form.get("CallStatus")
         if call_sid or call_status:
             logger.info("twilio_status_callback", extra={"call_sid": call_sid, "call_status": call_status})
-        if call_sid and call_status in {"answered", "in-progress"}:
-            asyncio.create_task(_warm_answered_call(str(call_sid)))
+        if call_sid and call_status:
+            _record_twilio_status(str(call_sid), str(call_status))
     except Exception:
         logger.exception("twilio_status_callback_parse_failed")
     return Response(status_code=200)
 
 
-async def _warm_answered_call(call_sid: str) -> None:
+def _record_twilio_status(call_sid: str, call_status: str) -> None:
     adapter = TwilioAdapter._pending.get(call_sid)
-    if adapter is None or adapter.audio_bridge is None or adapter.session is None:
+    if adapter is None or adapter.session is None:
         return
-    try:
-        await adapter.audio_bridge.start()
-        call_status_tracker.upsert(adapter.session.call_id, "ai_ready", call_sid=call_sid)
-    except Exception as exc:
-        logger.exception("answered_call_ai_warm_failed", extra={"call_sid": call_sid})
-        call_status_tracker.upsert(adapter.session.call_id, "ai_warm_failed", error=str(exc), call_sid=call_sid)
+    call_status_tracker.upsert(adapter.session.call_id, call_status, call_sid=call_sid)
+    terminal_without_media = call_status in {"completed", "busy", "no-answer", "failed", "canceled"} and adapter.websocket is None
+    if terminal_without_media:
+        TwilioAdapter._pending.pop(call_sid, None)
+        lead_id = adapter.session.metadata.get("lead_id")
+        if lead_id:
+            _answer_store.update_lead(lead_id, status=call_status, last_call_id=adapter.session.call_id, last_call_sid=call_sid)
+        call_manager.destroy_session(adapter.session.call_id)
+
 
 
 @media_router.websocket("/media-stream")
