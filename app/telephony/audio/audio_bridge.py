@@ -33,6 +33,10 @@ class AudioBridge:
     async def receive_telephony_audio(self, frame: bytes) -> bool:
         return await self.engine.receive_audio(self._normalize_to_pcm(frame))
 
+    async def close_ai(self) -> None:
+        await self.engine.stop()
+        self.started = False
+
     async def next_output(self) -> tuple[str, bytes | str]:
         return await self.outbound_queue.get()
 

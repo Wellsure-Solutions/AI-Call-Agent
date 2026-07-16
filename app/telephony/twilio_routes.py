@@ -83,6 +83,13 @@ async def start_outbound_call(request: OutboundCallRequest):
     adapter.attach(session)
 
     try:
+        # Pre-warm the realtime AI connection while Twilio is still dialing so
+        # the greeting audio is already queued when the recipient answers and
+        # Twilio opens the media stream. This removes the several-second
+        # answer-to-first-audio delay caused by starting Deepgram only after
+        # pickup.
+        await bridge.start()
+        call_status_tracker.upsert(session.call_id, "ai_ready")
         logger.info(
             "dashboard_twilio_outbound_start",
             extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
@@ -95,6 +102,7 @@ async def start_outbound_call(request: OutboundCallRequest):
             extra={"call_id": session.call_id, "lead_id": request.lead_id, "phone_number": request.phone_number},
         )
         call_status_tracker.upsert(session.call_id, "failed", error=str(exc))
+        await bridge.close_ai()
         call_manager.mark_failed(session, str(exc))
         call_manager.destroy_session(session.call_id)
         raise
@@ -126,9 +134,23 @@ async def status_webhook(request: Request):
         call_status = form.get("CallStatus")
         if call_sid or call_status:
             logger.info("twilio_status_callback", extra={"call_sid": call_sid, "call_status": call_status})
+        if call_sid and call_status in {"answered", "in-progress"}:
+            asyncio.create_task(_warm_answered_call(str(call_sid)))
     except Exception:
         logger.exception("twilio_status_callback_parse_failed")
     return Response(status_code=200)
+
+
+async def _warm_answered_call(call_sid: str) -> None:
+    adapter = TwilioAdapter._pending.get(call_sid)
+    if adapter is None or adapter.audio_bridge is None or adapter.session is None:
+        return
+    try:
+        await adapter.audio_bridge.start()
+        call_status_tracker.upsert(adapter.session.call_id, "ai_ready", call_sid=call_sid)
+    except Exception as exc:
+        logger.exception("answered_call_ai_warm_failed", extra={"call_sid": call_sid})
+        call_status_tracker.upsert(adapter.session.call_id, "ai_warm_failed", error=str(exc), call_sid=call_sid)
 
 
 @media_router.websocket("/media-stream")
