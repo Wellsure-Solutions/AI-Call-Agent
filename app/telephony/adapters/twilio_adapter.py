@@ -128,12 +128,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
     # ------------------------------------------------------------------
     # Audio I/O -- mulaw/8000 (Twilio) <-> linear16/48000|24000 (Deepgram)
     # ------------------------------------------------------------------
-    async def send_audio(self, pcm_frame: bytes) -> None:
+    async def send_audio(self, pcm_frame: bytes) -> bool:
         """pcm_frame arrives here as linear16 @ DEEPGRAM_OUTPUT_SAMPLE_RATE
         (that's what AudioBridge forwards from Deepgram's TTS output)."""
         if self.websocket is None or self.stream_sid is None:
             logger.warning("send_audio called before Twilio WebSocket is bound; dropping frame")
-            return
+            return False
         loop = asyncio.get_running_loop()
         # Offload per-frame audio conversion so one active call cannot block
         # Uvicorn's single event loop and delay unrelated coroutines like new
@@ -142,11 +142,21 @@ class TwilioAdapter(BaseTelephonyAdapter):
             None, _convert_deepgram_pcm_to_twilio_mulaw, pcm_frame
         )
         payload_b64 = base64.b64encode(mulaw_bytes).decode("ascii")
-        await self.websocket.send_text(json.dumps({
-            "event": "media",
-            "streamSid": self.stream_sid,
-            "media": {"payload": payload_b64},
-        }))
+        try:
+            await self.websocket.send_text(json.dumps({
+                "event": "media",
+                "streamSid": self.stream_sid,
+                "media": {"payload": payload_b64},
+            }))
+            return True
+        except (WebSocketDisconnect, RuntimeError) as exc:
+            self.closing_requested = True
+            logger.info(
+                "Twilio stream no longer accepts outbound audio for call %s: %s",
+                self.session.call_id if self.session else "unknown",
+                exc,
+            )
+            return False
 
     async def receive_audio(self) -> bytes | None:
         """Reads Twilio protocol messages until an audio frame (or stream
@@ -211,7 +221,9 @@ class TwilioAdapter(BaseTelephonyAdapter):
                     accepted = await self.audio_bridge.receive_telephony_audio(audio)
                     if not accepted:
                         close_status = "ai_disconnected"
-                        logger.warning("AI audio bridge stopped accepting Twilio audio for call %s", self.session.call_id)
+                        logger.info("AI audio bridge finished accepting Twilio audio for call %s", self.session.call_id)
+                        self.closing_requested = True
+                        await self._complete_twilio_call()
                         break
                 else:
                     break  # Twilio sent "stop" -- call ended on the caller's side
@@ -222,6 +234,8 @@ class TwilioAdapter(BaseTelephonyAdapter):
             close_status = "error"
             logger.exception("Twilio stream error for call %s: %s", self.session.call_id, exc)
         finally:
+            if close_status in {"ai_disconnected", "error"}:
+                await self._complete_twilio_call()
             if self.client_task is not None:
                 self.client_task.cancel()
             await self.audio_bridge.stop(close_status)
@@ -237,7 +251,9 @@ class TwilioAdapter(BaseTelephonyAdapter):
             while True:
                 message_type, data = await self.audio_bridge.next_output()
                 if message_type == "audio" and isinstance(data, bytes):
-                    await self.send_audio(data)
+                    sent = await self.send_audio(data)
+                    if not sent:
+                        break
                 elif message_type == "control" and isinstance(data, str):
                     self.closing_requested = True
                     await self._complete_twilio_call()
