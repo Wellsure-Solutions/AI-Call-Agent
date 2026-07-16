@@ -28,7 +28,7 @@ call_manager = CallManager()
 app.include_router(twilio_router)
 app.include_router(media_router)
 
-BATCH_CONCURRENCY_LIMIT = 3
+BATCH_CONCURRENCY_LIMIT = 1
 BATCH_START_DELAY_SECONDS = 2
 BATCH_TERMINAL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled", "finished", "result_save_failed", "call_failed"}
 
