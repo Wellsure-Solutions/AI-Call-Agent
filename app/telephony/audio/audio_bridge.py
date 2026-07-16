@@ -16,6 +16,7 @@ class AudioBridge:
         self.result_service = result_service
         self.outbound_queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue()
         self.finished = asyncio.Event()
+        self.started = False
         self.engine = ConversationEngine(
             session=session,
             on_audio=self._queue_audio,
@@ -24,7 +25,10 @@ class AudioBridge:
         )
 
     async def start(self) -> None:
+        if self.started:
+            return
         await self.engine.start()
+        self.started = True
 
     async def receive_telephony_audio(self, frame: bytes) -> bool:
         return await self.engine.receive_audio(self._normalize_to_pcm(frame))
@@ -34,6 +38,7 @@ class AudioBridge:
 
     async def stop(self, status: str = "completed") -> None:
         await self.engine.stop()
+        self.started = False
         if self.session.ended_at is None:
             if self.session.state_machine.state == CallState.AI_ACTIVE:
                 self.session.safe_transition_to(CallState.AI_FINISHED)

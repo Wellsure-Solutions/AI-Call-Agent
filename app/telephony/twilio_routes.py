@@ -53,8 +53,11 @@ class OutboundCallRequest(BaseModel):
 
 @router.post("/outbound")
 async def start_outbound_call(request: OutboundCallRequest):
-    """Trigger an outbound sales call. The actual audio/AI loop only starts
-    once Twilio's WebSocket connects (see /media-stream below)."""
+    """Trigger an outbound sales call.
+
+    The realtime AI starts only after Twilio delivers media from the answered
+    call, preventing idle AI websocket timeouts before caller audio arrives.
+    """
     session = call_manager.create_session(
         campaign_name=request.campaign_name,
         phone_number=request.phone_number,
@@ -116,12 +119,7 @@ async def twiml_webhook(request: Request):
 
 @router.post("/status")
 async def status_webhook(request: Request):
-    """Acknowledge Twilio status callbacks without doing work inline.
-
-    Twilio treats status callbacks as time-sensitive webhooks too. Return 200
-    first; any durable status processing should be moved to a queue or
-    background task that is not on Twilio's request/response path.
-    """
+    """Acknowledge Twilio status callbacks without starting AI work inline."""
     try:
         form = await request.form()
         call_sid = form.get("CallSid")
@@ -171,7 +169,7 @@ async def media_stream(websocket: WebSocket):
     call_manager.mark_connected(adapter.session)
 
     try:
-        call_status_tracker.upsert(adapter.session.call_id, "ai_active")
+        call_status_tracker.upsert(adapter.session.call_id, "media_stream_active")
         await adapter.start()
     except Exception as exc:
         logger.exception("twilio_media_stream_failed", extra={"call_id": adapter.session.call_id, "call_sid": call_sid})

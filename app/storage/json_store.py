@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
 
 from app.core.models import CallSession
 
-REQUIRED_LEAD_FIELDS = ("business_name", "phone_number", "category")
+REQUIRED_LEAD_FIELDS = ("business_name", "phone_number")
 EXPORT_HEADERS = [
     "call_id",
     "lead_id",

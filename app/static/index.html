@@ -105,7 +105,7 @@
                     <form id="pasteForm"><label>Paste copied spreadsheet rows</label><textarea name="pasted_data" placeholder="Business Name&#9;Phone Number&#9;Category&#9;Notes&#10;Sharma Electronics&#9;9876543210&#9;Mobile Accessories&#9;Owner prefers evenings"></textarea><br><br><button class="btn" type="submit">Preview & Validate Pasted Rows</button></form>
                 </div>
                 <div id="manualPane" class="leadPane hidden" style="margin-top:16px">
-                    <form id="manualForm" class="formgrid"><div><label>Business Name *</label><input name="business_name" placeholder="Sharma Electronics" required></div><div><label>Phone Number *</label><input name="phone_number" placeholder="+919876543210" required></div><div><label>Category *</label><input name="category" placeholder="Mobile Accessories" required></div><div><label>Notes</label><input name="notes" placeholder="Owner prefers evening callback"></div><div><button class="btn" type="submit">Add Lead</button></div></form>
+                    <form id="manualForm" class="formgrid"><div><label>Business Name *</label><input name="business_name" placeholder="Sharma Electronics" required></div><div><label>Phone Number *</label><input name="phone_number" placeholder="+919876543210" required></div><div><label>Category</label><input name="category" placeholder="Mobile Accessories (optional)"></div><div><label>Notes</label><input name="notes" placeholder="Owner prefers evening callback"></div><div><button class="btn" type="submit">Add Lead</button></div></form>
                 </div>
             </div>
             <div id="mappingCard" class="card hidden" style="margin-top:16px"><h3>Map columns & import</h3><div id="mappingSummary" class="notice"></div><div id="mappingBox"></div><div id="previewTable" class="tablewrap" style="margin-top:14px"></div></div>
@@ -163,20 +163,20 @@ async function previewLeads(formData) {
     if (!response.ok) { showLeadMessage(escapeHtml(data.detail || 'Unable to preview leads.'), 'bad'); return; }
     headers = data.headers || []; previewRows = data.rows || [];
     $('mappingCard').classList.remove('hidden');
-    $('mappingSummary').innerText = `${data.total_rows || 0} rows detected. Map your source columns to the required fields, then import.`;
+    $('mappingSummary').innerText = `${data.total_rows || 0} rows detected. Map Business Name and Phone Number, then optionally map Category/Notes before importing.`;
     renderMapping(); renderPreviewTable(previewRows.slice(0, 25));
 }
 function renderMapping() {
     const aliases = { business_name:['business','business name','company','name','store'], phone_number:['phone','phone number','mobile','contact','number'], category:['category','type','industry','segment'], notes:['notes','note','remarks','comment'] };
     const guess = field => headers.find(header => aliases[field].some(alias => header.toLowerCase().includes(alias))) || '';
     const select = field => `<select id="map_${field}"><option value="">Select column</option>${headers.map(header => `<option value="${escapeHtml(header)}" ${guess(field) === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}</select>`;
-    $('mappingBox').innerHTML = `<div class="formgrid"><div><label>Business Name *</label>${select('business_name')}</div><div><label>Phone Number *</label>${select('phone_number')}</div><div><label>Category *</label>${select('category')}</div><div><label>Notes</label>${select('notes')}</div></div><br><div class="actions"><button class="btn" onclick="importMappedLeads()">Import ${previewRows.length} rows</button><button class="btn ghost" onclick="clearMapping()">Clear Preview</button></div>`;
+    $('mappingBox').innerHTML = `<div class="formgrid"><div><label>Business Name *</label>${select('business_name')}</div><div><label>Phone Number *</label>${select('phone_number')}</div><div><label>Category</label>${select('category')}</div><div><label>Notes</label>${select('notes')}</div></div><br><div class="actions"><button class="btn" onclick="importMappedLeads()">Import ${previewRows.length} rows</button><button class="btn ghost" onclick="clearMapping()">Clear Preview</button></div>`;
 }
 function renderPreviewTable(rows) { $('previewTable').innerHTML = table(headers, rows.map(row => headers.map(header => row[header]))); }
 function clearMapping() { previewRows = []; headers = []; $('mappingCard').classList.add('hidden'); }
 async function importMappedLeads() {
     const mapping = { business_name:$('map_business_name').value, phone_number:$('map_phone_number').value, category:$('map_category').value, notes:$('map_notes').value };
-    if (!mapping.business_name || !mapping.phone_number || !mapping.category) { showLeadMessage('Map Business Name, Phone Number, and Category before importing.', 'bad'); return; }
+    if (!mapping.business_name || !mapping.phone_number) { showLeadMessage('Map Business Name and Phone Number before importing. Category is optional.', 'bad'); return; }
     const response = await fetch('/api/leads/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ rows:previewRows, mapping }) });
     const result = await response.json();
     const type = result.rejected?.length ? 'warn' : 'ok';
@@ -215,7 +215,7 @@ async function callBatch() {
         const response = await fetch('/api/leads/call-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ lead_ids:selected.map(lead => lead.lead_id), max_calls:selected.length }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || 'Unable to start batch');
-        showLeadMessage(`Batch started: ${result.started.length} calls started, ${result.failed.length} failed.`, result.failed.length ? 'warn' : 'ok');
+        showLeadMessage(`Batch queued: ${result.queued || 0} leads. Up to ${result.concurrency_limit || 3} calls will run at a time until the batch completes.`, 'ok');
         setPage('calls');
         await refresh();
     } catch (error) {
