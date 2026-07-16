@@ -191,6 +191,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
             raise RuntimeError("TwilioAdapter.start() called before the Twilio stream was bound.")
 
         await self.answer()
+        # Start the outbound pump as soon as the Twilio stream is bound. The AI
+        # still starts only after inbound media arrives, but this task must be
+        # waiting before Deepgram can emit the greeting/audio; otherwise early
+        # audio can sit unsent while the receive loop is busy forwarding caller
+        # media.
+        self.client_task = asyncio.create_task(self._send_to_twilio())
         close_status = "completed"
         try:
             while not self.closing_requested:
@@ -202,7 +208,6 @@ class TwilioAdapter(BaseTelephonyAdapter):
                         # Deepgram close with CLIENT_MESSAGE_TIMEOUT before any
                         # caller audio arrives during high-volume batches.
                         await self.audio_bridge.start()
-                        self.client_task = asyncio.create_task(self._send_to_twilio())
                     accepted = await self.audio_bridge.receive_telephony_audio(audio)
                     if not accepted:
                         close_status = "ai_disconnected"
