@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import threading
+from contextlib import suppress
 from dataclasses import asdict, is_dataclass
 from typing import Callable
 
@@ -60,6 +61,8 @@ class ConversationEngine:
         self._connection_context = None
         self.closing_requested = False
         self._close_after_audio_done = False
+        self._send_lock = asyncio.Lock()
+        self._deepgram_closed = False
 
     async def start(self) -> None:
         if not DEEPGRAM_API_KEY:
@@ -68,6 +71,7 @@ class ConversationEngine:
         client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
         self._connection_context = client.agent.v1.connect()
         self.connection = self._connection_context.__enter__()
+        self._deepgram_closed = False
         self.session.deepgram_connection = self.connection
         self._register_handlers(self.connection)
         self.connection.send_settings(get_agent_settings(self.session.metadata))
@@ -75,31 +79,44 @@ class ConversationEngine:
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
 
     async def receive_audio(self, pcm_frame: bytes) -> bool:
-        if self.connection is None or self.closing_requested or not pcm_frame:
+        if self.connection is None or self.closing_requested or self._deepgram_closed or not pcm_frame:
             return False
         try:
-            # Offload per-frame Deepgram media sends so one active call cannot
-            # block Uvicorn's single event loop and delay unrelated coroutines
-            # like new WebSocket handshakes.
-            await asyncio.to_thread(self.connection.send_media, pcm_frame)
+            # The Deepgram SDK wraps a synchronous websocket. Serialize writes
+            # per call and move the blocking send off the event loop so batch
+            # calls cannot stall unrelated Twilio handshakes.
+            async with self._send_lock:
+                if self.connection is None or self.closing_requested or self._deepgram_closed:
+                    return False
+                await asyncio.to_thread(self.connection.send_media, pcm_frame)
             return True
         except Exception as exc:
             self.closing_requested = True
+            self._deepgram_closed = True
             self.session.metadata["deepgram_send_error"] = str(exc)
-            logger.exception("deepgram_send_media_failed", extra={"call_id": self.session.call_id})
+            if self._is_normal_deepgram_close(exc):
+                logger.info(
+                    "deepgram_send_media_closed",
+                    extra={"call_id": self.session.call_id, "details": str(exc)},
+                )
+            else:
+                logger.exception("deepgram_send_media_failed", extra={"call_id": self.session.call_id})
             self._call_threadsafe(self.on_finished)
             return False
 
     async def stop(self) -> None:
+        self.closing_requested = True
+        self._deepgram_closed = True
         if self._connection_context is not None:
-            self._connection_context.__exit__(None, None, None)
+            with suppress(Exception):
+                self._connection_context.__exit__(None, None, None)
             self._connection_context = None
             self.connection = None
 
     def _register_handlers(self, connection) -> None:
         connection.on(EventType.OPEN, lambda _event: print(f"[deepgram] opened call {self.session.call_id}"))
         connection.on(EventType.MESSAGE, self._on_message)
-        connection.on(EventType.CLOSE, lambda _event: print(f"[deepgram] closed call {self.session.call_id}"))
+        connection.on(EventType.CLOSE, self._on_close)
         connection.on(EventType.ERROR, self._on_error)
 
     def _on_message(self, message) -> None:
@@ -137,9 +154,18 @@ class ConversationEngine:
         except Exception as exc:
             print(f"[deepgram] handler error for call {self.session.call_id}: {exc}")
 
+    def _on_close(self, event) -> None:
+        self._deepgram_closed = True
+        print(f"[deepgram] closed call {self.session.call_id} payload={safe_event_payload(event)}")
+
+    def _is_normal_deepgram_close(self, exc: Exception) -> bool:
+        text = f"{type(exc).__name__}: {exc}"
+        return "ConnectionClosedOK" in text or "received 1000" in text or "received 1005" in text
+
     def _on_error(self, error) -> None:
         error_payload = safe_event_payload(error)
         self.closing_requested = True
+        self._deepgram_closed = True
         self.session.metadata["deepgram_error"] = error_payload
         logger.error("deepgram_agent_error", extra={"call_id": self.session.call_id, "details": error_payload})
         print(f"[deepgram] call={self.session.call_id} error: {error_payload}")
