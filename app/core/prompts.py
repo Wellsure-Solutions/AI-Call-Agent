@@ -3,22 +3,17 @@ from app.core.models import AnswerField
 ANSWER_FIELDS = [
     AnswerField(
         name="owner_confirmed",
-        question="Did the caller reach the business owner or decision maker?",
+        question="Did the caller reach the business owner?",
         allowed_values=("yes", "no", "unknown"),
     ),
     AnswerField(
-        name="interested",
-        question="Is the business interested in learning more about selling on Amazon?",
-        allowed_values=("yes", "no", "unknown"),
+        name="interest_level",
+        question="How interested does the business sound in selling on Amazon?",
+        allowed_values=("hot", "warm", "cold", "unknown"),
     ),
     AnswerField(
         name="already_selling_online",
         question="Is the business already selling on an online marketplace/platform?",
-        allowed_values=("yes", "no", "unknown"),
-    ),
-    AnswerField(
-        name="gst_available",
-        question="Does the business have GST registration available?",
         allowed_values=("yes", "no", "unknown"),
     ),
     AnswerField(
