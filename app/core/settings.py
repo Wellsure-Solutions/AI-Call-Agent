@@ -30,6 +30,9 @@ DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "zT03pEAEi0VHKciJ
 # IpXGk4Ks434Jj33XXcNh"
 # Ms9OTvWb99V6DwRHZn6q
 # k2intd1ORm0YUH8etnXg
-DEEPGRAM_GREETING = os.getenv("DEEPGRAM_GREETING", "Namaste sir, main vaibhav baat kar raha hoon Amazon se. Agar aapko aapke he price pe Amazon se order aaye toh kya aap selling ke liye interested hounge?")
+DEEPGRAM_GREETING = os.getenv(
+    "DEEPGRAM_GREETING",
+    "नमस्ते जी, मैं वैभव बोल रहा हूँ WellSure से. हम Amazon Seller Onboarding Program के registered Seller Affiliate हैं. क्या मैं आपके business के owner से बात कर रहा हूँ?",
+)
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.5"))
 DEEPGRAM_EAGER_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EAGER_EOT_THRESHOLD", "0.5"))
