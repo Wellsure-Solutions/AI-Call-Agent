@@ -254,6 +254,8 @@ class TwilioAdapter(BaseTelephonyAdapter):
                     sent = await self.send_audio(data)
                     if not sent:
                         break
+                elif message_type == "interrupt":
+                    await self.clear_playback()
                 elif message_type == "control" and isinstance(data, str):
                     self.closing_requested = True
                     await self._complete_twilio_call()

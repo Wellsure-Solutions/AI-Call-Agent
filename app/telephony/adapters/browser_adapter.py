@@ -81,6 +81,8 @@ class BrowserAdapter(BaseTelephonyAdapter):
                     await self.send_audio(data)
                 elif message_type == "text" and isinstance(data, str):
                     await self.websocket.send_text(data)
+                elif message_type == "interrupt" and isinstance(data, str):
+                    await self.websocket.send_text(data)
                 elif message_type == "control" and isinstance(data, str):
                     await self.websocket.send_text(data)
                     self.closing_requested = True

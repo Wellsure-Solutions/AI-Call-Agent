@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 AudioCallback = Callable[[bytes], None]
 TextCallback = Callable[[str], None]
 FinishedCallback = Callable[[], None]
+InterruptedCallback = Callable[[], None]
 
 # Deepgram's Agent API closes an idle WebSocket ~10 seconds after it last
 # received audio or a KeepAlive message (see
@@ -59,11 +60,13 @@ class ConversationEngine:
         on_audio: AudioCallback,
         on_text: TextCallback,
         on_finished: FinishedCallback,
+        on_interrupted: InterruptedCallback | None = None,
     ) -> None:
         self.session = session
         self.on_audio = on_audio
         self.on_text = on_text
         self.on_finished = on_finished
+        self.on_interrupted = on_interrupted
         self.loop: asyncio.AbstractEventLoop | None = None
         self.connection = None
         self._connection_context = None
@@ -175,6 +178,11 @@ class ConversationEngine:
             content = getattr(message, "content", None)
             msg_type = getattr(message, "type", "Unknown")
             print(f"[deepgram] call={self.session.call_id} message type={msg_type} payload={safe_event_payload(message)}")
+
+            if msg_type == "UserStartedSpeaking":
+                if self.on_interrupted is not None:
+                    self._call_threadsafe(self.on_interrupted)
+                return
 
             if is_closing_call_message(message, content):
                 self.closing_requested = True

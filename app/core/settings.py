@@ -2,6 +2,15 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+
+def _optional_float(name: str) -> float | None:
+    """Read an optional float, treating an unset or blank value as disabled."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return float(value)
+
+
 load_dotenv()
 ROOT_DIR = Path(__file__).resolve().parents[2]
 APP_DIR = ROOT_DIR / "app"
@@ -34,5 +43,8 @@ DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
     "नमस्ते जी, मैं वैभव बोल रहा हूँ WellSure से. हम Amazon Seller Onboarding Program के registered Seller Affiliate हैं. क्या मैं आपके business के owner से बात कर रहा हूँ?",
 )
-DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.5"))
-DEEPGRAM_EAGER_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EAGER_EOT_THRESHOLD", "0.5"))
+DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
+# Eager end-of-turn starts the LLM before the user's turn is final. It can
+# reduce latency, but it also makes short pauses sound like interruptions.
+# Keep it opt-in so normal EndOfTurn detection is the safe default.
+DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD")

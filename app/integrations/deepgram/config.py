@@ -18,8 +18,21 @@ from app.core.settings import (
     DEEPGRAM_THINK_PROVIDER,
     DEEPGRAM_THINK_TEMPERATURE,
     DEEPGRAM_EAGER_EOT_THRESHOLD,
-    DEEPGRAM_EOT_THRESHOLD
+    DEEPGRAM_EOT_THRESHOLD,
 )
+
+
+def _listen_provider_settings() -> dict[str, object]:
+    provider: dict[str, object] = {
+        "type": "deepgram",
+        "version": "v2",
+        "model": DEEPGRAM_LISTEN_MODEL,
+        "language_hints": ["hi", "en"],
+        "eot_threshold": DEEPGRAM_EOT_THRESHOLD,
+    }
+    if DEEPGRAM_EAGER_EOT_THRESHOLD is not None:
+        provider["eager_eot_threshold"] = DEEPGRAM_EAGER_EOT_THRESHOLD
+    return provider
 
 
 def _lead_context_prompt(context: dict | None = None) -> str:
@@ -60,14 +73,7 @@ def get_agent_settings(context: dict | None = None) -> AgentV1Settings:
         ),
         agent=AgentV1SettingsAgent(
             listen={
-                "provider": {
-                    "type": "deepgram",
-                    "version": "v2",
-                    "model": DEEPGRAM_LISTEN_MODEL,
-                    "language_hints": ["hi", "en"],
-                    "eot_threshold": DEEPGRAM_EOT_THRESHOLD,
-                    "eager_eot_threshold": DEEPGRAM_EAGER_EOT_THRESHOLD
-                }
+                "provider": _listen_provider_settings()
             },
             think={
                 "provider": {

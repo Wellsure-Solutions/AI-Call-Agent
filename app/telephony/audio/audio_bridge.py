@@ -22,6 +22,7 @@ class AudioBridge:
             on_audio=self._queue_audio,
             on_text=self._queue_text,
             on_finished=self._mark_finished,
+            on_interrupted=self._handle_interruption,
         )
 
     async def start(self) -> None:
@@ -62,6 +63,21 @@ class AudioBridge:
 
     def _queue_text(self, payload: str) -> None:
         self.outbound_queue.put_nowait(("text", payload))
+
+    def _handle_interruption(self) -> None:
+        """Discard queued agent speech and tell the adapter to stop playback."""
+        retained: list[tuple[str, bytes | str]] = []
+        while True:
+            try:
+                message = self.outbound_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if message[0] not in {"audio", "interrupt"}:
+                retained.append(message)
+
+        self.outbound_queue.put_nowait(("interrupt", '{"event": "user_started_speaking"}'))
+        for message in retained:
+            self.outbound_queue.put_nowait(message)
 
     def _mark_finished(self) -> None:
         self.outbound_queue.put_nowait(("control", '{"event": "closing_call"}'))
