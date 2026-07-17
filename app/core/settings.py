@@ -26,9 +26,10 @@ DEEPGRAM_THINK_MODEL = os.getenv("DEEPGRAM_THINK_MODEL", "gpt-5.4-mini")
 DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.7"))
 DEEPGRAM_SPEAK_PROVIDER = os.getenv("DEEPGRAM_SPEAK_PROVIDER", "eleven_labs")
 DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_flash_v2_5")
-DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "IpXGk4Ks434Jj33XXcNh")
+DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "zT03pEAEi0VHKciJODfn")
+# IpXGk4Ks434Jj33XXcNh"
 # Ms9OTvWb99V6DwRHZn6q
 # k2intd1ORm0YUH8etnXg
-DEEPGRAM_GREETING = os.getenv("DEEPGRAM_GREETING", "Namaste sir, main amazon se Priya bol rahi hoon. Kya ye baat karne ka sahi samay hai?")
+DEEPGRAM_GREETING = os.getenv("DEEPGRAM_GREETING", "Namaste sir, main vaibhav baat kar raha hoon Amazon se. Agar aapko aapke he price pe Amazon se order aaye toh kya aap selling ke liye interested hounge?")
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.5"))
 DEEPGRAM_EAGER_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EAGER_EOT_THRESHOLD", "0.5"))

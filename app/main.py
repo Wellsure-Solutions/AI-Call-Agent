@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections import Counter
 
 import uvicorn
@@ -32,6 +33,13 @@ BATCH_CONCURRENCY_LIMIT = 1
 BATCH_START_DELAY_SECONDS = 2
 BATCH_TERMINAL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled", "finished", "result_save_failed", "call_failed"}
 
+# Safety net: if a lead's status callback (from /twilio/status or
+# media_stream's own cleanup) never arrives -- dropped webhook, Twilio
+# outage, unhandled exception somewhere in the pipeline -- this guarantees
+# the batch runner still moves on instead of stalling forever on a single
+# lead. Generous enough to cover full ring time + a real conversation.
+BATCH_MAX_WAIT_SECONDS = 90
+
 
 async def _run_batch_calls(leads: list[dict]) -> None:
     """Run dashboard batch calls with a conservative live-call limit.
@@ -39,6 +47,13 @@ async def _run_batch_calls(leads: list[dict]) -> None:
     The runner starts a replacement only after one of the active leads leaves
     the calling state, so large uploads are drained without exposing lead data
     in the API response.
+
+    A lead is considered "done" (and replaced by the next queued lead) when
+    ANY of the following is true:
+      - its stored status has moved away from "calling"
+      - call_status_tracker reports a terminal status for its call
+      - BATCH_MAX_WAIT_SECONDS has elapsed since the call was placed
+        (defensive timeout -- see note above)
     """
     queue = list(leads)
     active: dict[str, dict] = {}
@@ -59,7 +74,7 @@ async def _run_batch_calls(leads: list[dict]) -> None:
                 logger.info("dashboard_batch_call_requested", extra={"lead_id": lead_id})
                 result = await start_outbound_call(outbound)
                 answer_store.update_lead(lead_id, status="calling", last_call_id=result.get("call_id"), last_call_sid=result.get("call_sid"))
-                active[lead_id] = {"call_id": result.get("call_id")}
+                active[lead_id] = {"call_id": result.get("call_id"), "started_at": time.monotonic()}
                 await asyncio.sleep(BATCH_START_DELAY_SECONDS)
             except Exception as exc:
                 logger.exception("dashboard_batch_call_failed", extra={"lead_id": lead_id})
@@ -74,7 +89,16 @@ async def _run_batch_calls(leads: list[dict]) -> None:
             status = (lead or {}).get("status")
             call_id = metadata.get("call_id")
             live_status = (call_status_tracker.get(call_id) or {}).get("status") if call_id else None
-            if status and status != "calling" or live_status in BATCH_TERMINAL_STATUSES:
+            elapsed = time.monotonic() - metadata.get("started_at", time.monotonic())
+            timed_out = elapsed > BATCH_MAX_WAIT_SECONDS
+
+            if (status and status != "calling") or live_status in BATCH_TERMINAL_STATUSES or timed_out:
+                if timed_out and not (status and status != "calling") and live_status not in BATCH_TERMINAL_STATUSES:
+                    logger.warning(
+                        "dashboard_batch_call_timed_out",
+                        extra={"lead_id": lead_id, "call_id": call_id, "elapsed_seconds": round(elapsed, 1)},
+                    )
+                    answer_store.update_lead(lead_id, status="call_failed", last_error="timed out waiting for call status to resolve")
                 completed.append(lead_id)
         for lead_id in completed:
             active.pop(lead_id, None)

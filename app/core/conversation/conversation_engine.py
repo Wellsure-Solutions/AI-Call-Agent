@@ -23,6 +23,14 @@ AudioCallback = Callable[[bytes], None]
 TextCallback = Callable[[str], None]
 FinishedCallback = Callable[[], None]
 
+# Deepgram's Agent API closes an idle WebSocket ~10 seconds after it last
+# received audio or a KeepAlive message (see
+# https://developers.deepgram.com/docs/agent-keep-alive). This engine's
+# connection is opened *before* the phone is answered (pre-warmed for a fast
+# greeting), so it can sit idle for the entire ring duration -- which is
+# almost always longer than 10 seconds -- unless kept alive explicitly.
+DEEPGRAM_KEEPALIVE_INTERVAL_SECONDS = 5
+
 
 def safe_event_payload(event) -> dict[str, object]:
     """Return a serializable event payload for Deepgram diagnostics."""
@@ -63,6 +71,7 @@ class ConversationEngine:
         self._close_after_audio_done = False
         self._send_lock = asyncio.Lock()
         self._deepgram_closed = False
+        self._keepalive_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         if not DEEPGRAM_API_KEY:
@@ -77,6 +86,11 @@ class ConversationEngine:
         self.connection.send_settings(get_agent_settings(self.session.metadata))
         self.session.safe_transition_to(CallState.AI_ACTIVE)
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
+        # The call may sit ringing for well over Deepgram's ~10s idle
+        # timeout before Twilio answers and real audio starts flowing.
+        # Without this, the pre-warmed connection (and the greeting audio
+        # already generated on it) is dead by the time anyone picks up.
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
     async def receive_audio(self, pcm_frame: bytes) -> bool:
         if self.connection is None or self.closing_requested or self._deepgram_closed or not pcm_frame:
@@ -104,9 +118,41 @@ class ConversationEngine:
             self._call_threadsafe(self.on_finished)
             return False
 
+    async def _keepalive_loop(self) -> None:
+        """Sends periodic KeepAlive control messages so Deepgram's idle
+        timeout never fires while we're waiting for the call to be answered
+        (or, generally, whenever real audio momentarily stops flowing).
+        Safe to run concurrently with real audio -- sending both is fine per
+        Deepgram's docs; this simply guarantees the gap between audio frames
+        never exceeds the 10s window.
+        """
+        try:
+            while True:
+                await asyncio.sleep(DEEPGRAM_KEEPALIVE_INTERVAL_SECONDS)
+                if self.connection is None or self._deepgram_closed or self.closing_requested:
+                    return
+                try:
+                    async with self._send_lock:
+                        if self.connection is None or self._deepgram_closed or self.closing_requested:
+                            return
+                        await asyncio.to_thread(self.connection.send_keep_alive)
+                except Exception as exc:
+                    logger.warning(
+                        "deepgram_keepalive_send_failed",
+                        extra={"call_id": self.session.call_id, "error": str(exc)},
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+
     async def stop(self) -> None:
         self.closing_requested = True
         self._deepgram_closed = True
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._keepalive_task
+            self._keepalive_task = None
         if self._connection_context is not None:
             with suppress(Exception):
                 self._connection_context.__exit__(None, None, None)
