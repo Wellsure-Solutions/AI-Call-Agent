@@ -9,7 +9,7 @@ from app.telephony.state_machine import CallState
 
 
 class AudioBridge:
-    """Normalizes adapter audio into PCM for the conversation engine and back."""
+    """Passes adapter-formatted audio between telephony and Deepgram."""
 
     def __init__(self, session: CallSession, result_service: CallResultService | None = None) -> None:
         self.session = session
@@ -32,7 +32,7 @@ class AudioBridge:
         self.started = True
 
     async def receive_telephony_audio(self, frame: bytes) -> bool:
-        return await self.engine.receive_audio(self._normalize_to_pcm(frame))
+        return await self.engine.receive_audio(frame)
 
     async def close_ai(self) -> None:
         await self.engine.stop()
@@ -52,11 +52,6 @@ class AudioBridge:
                 self.result_service.finalize(self.session, status)
             else:
                 self.session.finish(status)
-
-    def _normalize_to_pcm(self, frame: bytes) -> bytes:
-        # Browser and Deepgram already exchange compatible PCM bytes today.
-        # Future adapters can subclass/compose codecs here without touching AI logic.
-        return frame
 
     def _queue_audio(self, frame: bytes) -> None:
         self.outbound_queue.put_nowait(("audio", frame))

@@ -6,6 +6,7 @@ from deepgram.agent.v1.types import (
     AgentV1SettingsAudioOutput,
 )
 from app.core.prompts import PROMPT
+from app.integrations.audio_profiles import get_audio_profile
 
 from app.core.settings import (
     DEEPGRAM_API_KEY,
@@ -56,19 +57,23 @@ def _lead_context_prompt(context: dict | None = None) -> str:
     )
 
 
-def get_agent_settings(context: dict | None = None) -> AgentV1Settings:
-    """Return Deepgram Agent settings for the current campaign prompt."""
+def get_agent_settings(
+    context: dict | None = None,
+    transport: str = "browser",
+) -> AgentV1Settings:
+    """Return campaign and adapter-specific Deepgram Agent settings."""
     prompt = _lead_context_prompt(context)
+    audio_profile = get_audio_profile(transport)
     return AgentV1Settings(
         audio=AgentV1SettingsAudio(
             input=AgentV1SettingsAudioInput(
-                encoding="linear16",
-                sample_rate=48000,
+                encoding=audio_profile.encoding,
+                sample_rate=audio_profile.input_sample_rate,
             ),
             output=AgentV1SettingsAudioOutput(
-                encoding="linear16",
-                sample_rate=24000,
-                container="none",
+                encoding=audio_profile.encoding,
+                sample_rate=audio_profile.output_sample_rate,
+                container=audio_profile.container,
             ),
         ),
         agent=AgentV1SettingsAgent(
