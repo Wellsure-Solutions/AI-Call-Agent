@@ -41,7 +41,7 @@ DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "zT03pEAEi0VHKciJ
 # k2intd1ORm0YUH8etnXg
 DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
-    "नमस्ते जी, मैं वैभव बोल रहा हूँ WellSure से. हम Amazon Seller Onboarding Program के registered Seller Affiliate हैं. क्या मैं आपके business के owner से बात कर रहा हूँ?",
+    "नमस्ते जी, मैं वैभव बोल रहा हूँ Amazon से. क्या मैं आपके business के owner से बात कर रहा हूँ?",
 )
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # Eager end-of-turn starts the LLM before the user's turn is final. It can
