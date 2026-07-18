@@ -31,8 +31,8 @@ class BrowserAdapter(BaseTelephonyAdapter):
     async def disconnect(self) -> None:
         await self.websocket.close()
 
-    async def send_audio(self, pcm_frame: bytes) -> None:
-        await self.websocket.send_bytes(pcm_frame)
+    async def send_audio(self, audio_frame: bytes) -> None:
+        await self.websocket.send_bytes(audio_frame)
 
     async def receive_audio(self) -> bytes | None:
         return await self.websocket.receive_bytes()

@@ -52,7 +52,7 @@ def safe_event_payload(event) -> dict[str, object]:
 
 
 class ConversationEngine:
-    """Deepgram-backed PCM conversation engine with no telephony dependencies."""
+    """Deepgram-backed conversation engine with adapter-specific audio."""
 
     def __init__(
         self,
@@ -86,7 +86,12 @@ class ConversationEngine:
         self._deepgram_closed = False
         self.session.deepgram_connection = self.connection
         self._register_handlers(self.connection)
-        self.connection.send_settings(get_agent_settings(self.session.metadata))
+        self.connection.send_settings(
+            get_agent_settings(
+                self.session.metadata,
+                transport=self.session.direction,
+            )
+        )
         self.session.safe_transition_to(CallState.AI_ACTIVE)
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
         # The call may sit ringing for well over Deepgram's ~10s idle
@@ -95,8 +100,8 @@ class ConversationEngine:
         # already generated on it) is dead by the time anyone picks up.
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
-    async def receive_audio(self, pcm_frame: bytes) -> bool:
-        if self.connection is None or self.closing_requested or self._deepgram_closed or not pcm_frame:
+    async def receive_audio(self, audio_frame: bytes) -> bool:
+        if self.connection is None or self.closing_requested or self._deepgram_closed or not audio_frame:
             return False
         try:
             # The Deepgram SDK wraps a synchronous websocket. Serialize writes
@@ -105,7 +110,7 @@ class ConversationEngine:
             async with self._send_lock:
                 if self.connection is None or self.closing_requested or self._deepgram_closed:
                     return False
-                await asyncio.to_thread(self.connection.send_media, pcm_frame)
+                await asyncio.to_thread(self.connection.send_media, audio_frame)
             return True
         except Exception as exc:
             self.closing_requested = True
