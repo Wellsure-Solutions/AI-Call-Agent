@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import audioop
-import base64
 import json
 import logging
 from typing import ClassVar
@@ -12,37 +10,12 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.core.settings import PUBLIC_BASE_URL, TWILIO_FROM_NUMBER
+from app.integrations.twilio_media import decode_media_payload, encode_media_payload
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_session import CallSession
 
 logger = logging.getLogger(__name__)
-
-# Twilio's Media Streams format is fixed by Twilio, not configurable.
-TWILIO_SAMPLE_RATE = 8000
-
-# NOTE: these match app/integrations/deepgram/config.py's AgentV1Settings.
-# Deepgram's input and output rates are DIFFERENT from each other -- input
-# is what the agent listens on, output is what its TTS produces.
-DEEPGRAM_INPUT_SAMPLE_RATE = 48000   # linear16, what we must send TO Deepgram
-DEEPGRAM_OUTPUT_SAMPLE_RATE = 24000  # linear16, what Deepgram sends back to us
-PCM_SAMPLE_WIDTH = 2  # linear16 = 2 bytes/sample, same on every leg (Twilio included)
-
-
-def _convert_deepgram_pcm_to_twilio_mulaw(pcm_frame: bytes) -> bytes:
-    resampled, _ = audioop.ratecv(
-        pcm_frame, PCM_SAMPLE_WIDTH, 1, DEEPGRAM_OUTPUT_SAMPLE_RATE, TWILIO_SAMPLE_RATE, None
-    )
-    return audioop.lin2ulaw(resampled, PCM_SAMPLE_WIDTH)
-
-
-def _convert_twilio_mulaw_to_deepgram_pcm(mulaw_bytes: bytes) -> bytes:
-    linear = audioop.ulaw2lin(mulaw_bytes, PCM_SAMPLE_WIDTH)
-    pcm_frame, _ = audioop.ratecv(
-        linear, PCM_SAMPLE_WIDTH, 1, TWILIO_SAMPLE_RATE, DEEPGRAM_INPUT_SAMPLE_RATE, None
-    )
-    return pcm_frame
-
 
 class TwilioAdapter(BaseTelephonyAdapter):
     """
@@ -126,22 +99,14 @@ class TwilioAdapter(BaseTelephonyAdapter):
         return
 
     # ------------------------------------------------------------------
-    # Audio I/O -- mulaw/8000 (Twilio) <-> linear16/48000|24000 (Deepgram)
+    # Audio I/O -- native mu-law/8000 on both Twilio and Deepgram
     # ------------------------------------------------------------------
-    async def send_audio(self, pcm_frame: bytes) -> bool:
-        """pcm_frame arrives here as linear16 @ DEEPGRAM_OUTPUT_SAMPLE_RATE
-        (that's what AudioBridge forwards from Deepgram's TTS output)."""
+    async def send_audio(self, mulaw_frame: bytes) -> bool:
+        """Forward Deepgram's native 8 kHz mu-law output to Twilio unchanged."""
         if self.websocket is None or self.stream_sid is None:
             logger.warning("send_audio called before Twilio WebSocket is bound; dropping frame")
             return False
-        loop = asyncio.get_running_loop()
-        # Offload per-frame audio conversion so one active call cannot block
-        # Uvicorn's single event loop and delay unrelated coroutines like new
-        # WebSocket handshakes.
-        mulaw_bytes = await loop.run_in_executor(
-            None, _convert_deepgram_pcm_to_twilio_mulaw, pcm_frame
-        )
-        payload_b64 = base64.b64encode(mulaw_bytes).decode("ascii")
+        payload_b64 = encode_media_payload(mulaw_frame)
         try:
             await self.websocket.send_text(json.dumps({
                 "event": "media",
@@ -160,9 +125,8 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
     async def receive_audio(self) -> bytes | None:
         """Reads Twilio protocol messages until an audio frame (or stream
-        end) shows up. Returns linear16 @ DEEPGRAM_INPUT_SAMPLE_RATE, since
-        that's what ConversationEngine.receive_audio() feeds straight to
-        Deepgram via connection.send_media()."""
+        end) shows up. The returned 8 kHz mu-law bytes are forwarded to
+        Deepgram unchanged."""
         assert self.websocket is not None
         while True:
             raw = await self.websocket.receive_text()
@@ -170,14 +134,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
             event = msg.get("event")
 
             if event == "media":
-                mulaw_bytes = base64.b64decode(msg["media"]["payload"])
-                loop = asyncio.get_running_loop()
-                # Offload per-frame audio conversion so one active call cannot block
-                # Uvicorn's single event loop and delay unrelated coroutines like new
-                # WebSocket handshakes.
-                return await loop.run_in_executor(
-                    None, _convert_twilio_mulaw_to_deepgram_pcm, mulaw_bytes
-                )
+                return decode_media_payload(msg["media"]["payload"])
 
             elif event == "stop":
                 return None
