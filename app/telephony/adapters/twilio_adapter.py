@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import ClassVar
 
 from fastapi import WebSocket, WebSocketDisconnect
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
-from app.core.settings import PUBLIC_BASE_URL, TWILIO_FROM_NUMBER
+from app.core.settings import PUBLIC_BASE_URL, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
 from app.integrations.twilio_media import decode_media_payload, encode_media_payload
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
@@ -29,19 +28,16 @@ class TwilioAdapter(BaseTelephonyAdapter):
     WebSocket doesn't exist yet when connect() is called (connect() only
     places the outbound call via REST). Twilio opens its WebSocket to your
     server later, on a separate route, and identifies itself only by
-    call_sid inside the stream's "start" event. TwilioAdapter._pending
-    bridges that gap -- see app/telephony/twilio_routes.py for the routes
-    that use it.
+    call_sid inside the stream's "start" event. Durable database correlation
+    bridges that gap without retaining provider objects in process memory.
     """
 
-    _pending: ClassVar[dict[str, "TwilioAdapter"]] = {}
-
-    def __init__(self, audio_bridge: AudioBridge | None = None) -> None:
+    def __init__(self, audio_bridge: AudioBridge | None = None, client=None) -> None:
         super().__init__()
         self.from_number = TWILIO_FROM_NUMBER
         self.public_base_url = PUBLIC_BASE_URL
 
-        self._client = Client()
+        self._client = client or Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         self.call_sid: str | None = None
         self.stream_sid: str | None = None
         self.websocket: WebSocket | None = None  # set once Twilio's stream connects
@@ -69,14 +65,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
             self._client.calls.create,
             to=to_number,
             from_=self.from_number,
-            url=f"{self.public_base_url}/twilio/twiml",
-            status_callback=f"{self.public_base_url}/twilio/status",
+            url=f"{self.public_base_url}/twilio/twiml/{self.session.call_id}",
+            status_callback=f"{self.public_base_url}/twilio/status/{self.session.call_id}",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             trim="trim-silence",
         )
         self.call_sid = call.sid
         self.session.metadata["call_sid"] = self.call_sid
-        TwilioAdapter._pending[self.call_sid] = self
         logger.info("Twilio call placed: call_id=%s call_sid=%s", self.session.call_id, self.call_sid)
 
     async def disconnect(self) -> None:
@@ -246,9 +241,11 @@ class TwilioAdapter(BaseTelephonyAdapter):
     # TwiML builder -- used by the /twilio/twiml webhook route
     # ------------------------------------------------------------------
     @staticmethod
-    def build_twiml(stream_ws_url: str) -> str:
+    def build_twiml(stream_ws_url: str, parameters: dict[str, str] | None = None) -> str:
         response = VoiceResponse()
         connect = Connect()
-        connect.stream(url=stream_ws_url)
+        stream = connect.stream(url=stream_ws_url)
+        for name, value in (parameters or {}).items():
+            stream.parameter(name=name, value=value)
         response.append(connect)
         return str(response)

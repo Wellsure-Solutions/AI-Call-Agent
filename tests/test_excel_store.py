@@ -11,12 +11,10 @@ from app.core.models import CallSession
 class FakeExtractor:
     def extract(self, session):
         return {
-            "owner_confirmed": "yes",
-            "interested": "no",
-            "already_selling_online": "unknown",
-            "gst_available": "unknown",
+            "amazon_business_account": "yes",
+            "account_creation_interest": "no",
             "callback_approved": "unknown",
-            "callback_time": "unknown",
+            "do_not_call_requested": "no",
         }
 
 

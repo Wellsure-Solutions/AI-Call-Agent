@@ -82,11 +82,11 @@ class ConversationEngine:
         self.loop = asyncio.get_running_loop()
         client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
         self._connection_context = client.agent.v1.connect()
-        self.connection = self._connection_context.__enter__()
+        self.connection = await asyncio.to_thread(self._connection_context.__enter__)
         self._deepgram_closed = False
         self.session.deepgram_connection = self.connection
         self._register_handlers(self.connection)
-        self.connection.send_settings(
+        await asyncio.to_thread(self.connection.send_settings,
             get_agent_settings(
                 self.session.metadata,
                 transport=self.session.direction,
@@ -145,10 +145,13 @@ class ConversationEngine:
                             return
                         await asyncio.to_thread(self.connection.send_keep_alive)
                 except Exception as exc:
+                    self._deepgram_closed = True
+                    self.closing_requested = True
                     logger.warning(
                         "deepgram_keepalive_send_failed",
                         extra={"call_id": self.session.call_id, "error": str(exc)},
                     )
+                    self._call_threadsafe(self.on_finished)
                     return
         except asyncio.CancelledError:
             raise
@@ -163,7 +166,7 @@ class ConversationEngine:
             self._keepalive_task = None
         if self._connection_context is not None:
             with suppress(Exception):
-                self._connection_context.__exit__(None, None, None)
+                await asyncio.to_thread(self._connection_context.__exit__, None, None, None)
             self._connection_context = None
             self.connection = None
 
@@ -215,7 +218,15 @@ class ConversationEngine:
 
     def _on_close(self, event) -> None:
         self._deepgram_closed = True
+        if not self.closing_requested:
+            self.closing_requested = True
+            self.session.metadata["deepgram_closed"] = True
+            self._call_threadsafe(self.on_finished)
         print(f"[deepgram] closed call {self.session.call_id} payload={safe_event_payload(event)}")
+
+    @property
+    def healthy(self) -> bool:
+        return self.connection is not None and not self._deepgram_closed and not self.closing_requested
 
     def _is_normal_deepgram_close(self, exc: Exception) -> bool:
         text = f"{type(exc).__name__}: {exc}"

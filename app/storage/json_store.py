@@ -221,7 +221,7 @@ class JsonCallStore:
     def _session_to_record(self, session: CallSession) -> dict[str, Any]:
         meta = session.metadata or {}
         answers = session.answers or {}
-        interest = answers.get("interested", answers.get("interest_level", "unknown"))
+        interest = answers.get("account_creation_interest", "unknown")
         callback = answers.get("callback_approved", "unknown")
         return {
             "call_id": session.call_id,
@@ -231,8 +231,8 @@ class JsonCallStore:
             "category": meta.get("category", ""),
             "notes": meta.get("notes", ""),
             "call_status": session.status,
-            "interested": interest in {"hot", "warm", "yes", True},
-            "callback_requested": callback in {"yes", True},
+            "interested": interest == "yes",
+            "callback_requested": callback == "yes",
             "summary": self._summary(answers),
             "transcript": session.transcript_text,
             "structured_response": answers,

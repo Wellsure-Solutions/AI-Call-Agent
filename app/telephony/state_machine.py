@@ -6,6 +6,7 @@ from enum import Enum
 
 class CallState(str, Enum):
     CREATED = "CREATED"
+    QUEUED = "QUEUED"
     CONNECTING = "CONNECTING"
     CONNECTED = "CONNECTED"
     AI_ACTIVE = "AI_ACTIVE"
@@ -18,7 +19,8 @@ class CallState(str, Enum):
 
 _TERMINAL_STATES = {CallState.COMPLETED, CallState.FAILED, CallState.HUNG_UP}
 _ALLOWED_TRANSITIONS: dict[CallState, set[CallState]] = {
-    CallState.CREATED: {CallState.CONNECTING, CallState.FAILED, CallState.HUNG_UP},
+    CallState.CREATED: {CallState.QUEUED, CallState.CONNECTING, CallState.FAILED, CallState.HUNG_UP},
+    CallState.QUEUED: {CallState.CONNECTING, CallState.FAILED, CallState.HUNG_UP},
     CallState.CONNECTING: {CallState.CONNECTED, CallState.FAILED, CallState.HUNG_UP},
     CallState.CONNECTED: {CallState.AI_ACTIVE, CallState.FAILED, CallState.HUNG_UP},
     CallState.AI_ACTIVE: {CallState.AI_FINISHED, CallState.FAILED, CallState.HUNG_UP},
