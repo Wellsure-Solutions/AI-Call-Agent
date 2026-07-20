@@ -12,7 +12,7 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from twilio.request_validator import RequestValidator
 
-from app.core.settings import PUBLIC_BASE_URL, STREAM_SECRET, TWILIO_AUTH_TOKEN
+from app.core.settings import MAX_CALL_SECONDS, PUBLIC_BASE_URL, RING_TIMEOUT_SECONDS, STREAM_SECRET, TWILIO_AUTH_TOKEN
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
@@ -70,7 +70,7 @@ async def twiml_webhook(call_id: str, request: Request):
     form = dict(await request.form())
     if not await _valid_signature(request, form): raise HTTPException(403, "Invalid Twilio signature")
     call = await _repo().aget_call(call_id); sid = str(form.get("CallSid") or "")
-    if not call or not sid or not await asyncio.to_thread(_repo().bind_call_sid, call_id, sid): raise HTTPException(409, "Call correlation failed")
+    if not call or not sid or not await asyncio.to_thread(_repo().bind_call_sid, call_id, sid, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS): raise HTTPException(409, "Call correlation failed")
     expiry = int(time.time()) + 300
     ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     xml = TwilioAdapter.build_twiml(f"{ws_base}/media-stream", {"call_id":call_id,"expiry":str(expiry),"token":stream_token(call_id,sid,expiry)})

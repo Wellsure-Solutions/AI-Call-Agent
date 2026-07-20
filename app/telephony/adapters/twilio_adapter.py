@@ -45,6 +45,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         self.audio_bridge = audio_bridge
         self.client_task: asyncio.Task | None = None
         self.closing_requested = False
+        self.ring_timeout = 45
 
     def attach(self, session: CallSession) -> None:
         super().attach(session)
@@ -68,6 +69,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
             url=f"{self.public_base_url}/twilio/twiml/{self.session.call_id}",
             status_callback=f"{self.public_base_url}/twilio/status/{self.session.call_id}",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
+            timeout=self.ring_timeout,
             trim="trim-silence",
         )
         self.call_sid = call.sid
@@ -236,6 +238,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
             await asyncio.to_thread(self._client.calls(self.call_sid).update, status="completed")
         except Exception as exc:
             logger.warning("Unable to complete Twilio call %s: %s", self.call_sid, exc)
+
+    async def fetch_status(self, call_sid: str) -> str:
+        call = await asyncio.to_thread(self._client.calls(call_sid).fetch)
+        return str(call.status).lower()
+
+    async def update_status(self, call_sid: str, status: str) -> None:
+        await asyncio.to_thread(self._client.calls(call_sid).update, status=status)
 
     # ------------------------------------------------------------------
     # TwiML builder -- used by the /twilio/twiml webhook route

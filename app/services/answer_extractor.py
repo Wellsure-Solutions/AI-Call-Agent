@@ -21,6 +21,25 @@ class AnswerExtractor:
     def __init__(self, api_key: str | None = OPENAI_API_KEY, model: str = OPENAI_MODEL) -> None:
         self.api_key = api_key
         self.model = model
+        self._async_client = None
+
+    async def extract_async(self, session: CallSession, timeout: float) -> dict[str, str]:
+        """Extract using the SDK's real network timeout, not an abandoned thread."""
+        if not self.api_key:
+            raise AnswerExtractionError("OPENAI_API_KEY is required for AI answer extraction.")
+        if self._async_client is None:
+            from openai import AsyncOpenAI
+            self._async_client = AsyncOpenAI(api_key=self.api_key, timeout=timeout, max_retries=0)
+        response = await self._async_client.responses.create(
+            model=self.model,
+            input=[
+                {"role": "system", "content": "You are a strict post-call QA analyst. Return only schema-valid values supported by the transcript."},
+                {"role": "user", "content": self._build_user_prompt(session)},
+            ],
+            text={"format": {"type": "json_schema", "name": "call_answer_extraction", "schema": self._json_schema(), "strict": True}},
+            timeout=timeout,
+        )
+        return self._normalize_answers(self._parse_response(response))
 
     def extract(self, session: CallSession) -> dict[str, str]:
         if not self.api_key:

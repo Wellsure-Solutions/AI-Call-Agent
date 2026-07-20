@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime, timezone
-from threading import Lock
 from typing import Any
 
 
@@ -10,34 +10,32 @@ def _now() -> str:
 
 
 class CallStatusTracker:
-    """Small in-memory status feed for dashboard call progress.
+    """Strictly bounded legacy compatibility cache; never authoritative."""
 
-    This is intentionally isolated from persistence so it can be replaced by a
-    database/queue later without touching Twilio call control.
-    """
-
-    def __init__(self) -> None:
-        self._lock = Lock()
-        self._statuses: dict[str, dict[str, Any]] = {}
+    def __init__(self, max_calls: int = 256, max_events_per_call: int = 20) -> None:
+        self.max_calls = max_calls
+        self.max_events_per_call = max_events_per_call
+        self._statuses: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def upsert(self, call_id: str, status: str, **metadata: Any) -> dict[str, Any]:
-        with self._lock:
-            current = self._statuses.get(call_id, {"call_id": call_id, "created_at": _now(), "events": []})
-            current.update({key: value for key, value in metadata.items() if value is not None})
-            current["status"] = status
-            current["updated_at"] = _now()
-            current.setdefault("events", []).append({"status": status, "timestamp": current["updated_at"]})
-            self._statuses[call_id] = current
-            return dict(current)
+        current = self._statuses.pop(call_id, {"call_id": call_id, "created_at": _now(), "events": []})
+        current.update({key: value for key, value in metadata.items() if value is not None})
+        current["status"] = status
+        current["updated_at"] = _now()
+        events = current.setdefault("events", [])
+        events.append({"status": status, "timestamp": current["updated_at"]})
+        del events[:-self.max_events_per_call]
+        self._statuses[call_id] = current
+        while len(self._statuses) > self.max_calls:
+            self._statuses.popitem(last=False)
+        return dict(current)
 
     def list(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return sorted((dict(value) for value in self._statuses.values()), key=lambda item: item.get("updated_at", ""), reverse=True)
+        return sorted((dict(value) for value in self._statuses.values()), key=lambda item: item["updated_at"], reverse=True)
 
     def get(self, call_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            current = self._statuses.get(call_id)
-            return dict(current) if current else None
+        current = self._statuses.get(call_id)
+        return dict(current) if current else None
 
 
 call_status_tracker = CallStatusTracker()

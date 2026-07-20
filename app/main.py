@@ -1,11 +1,9 @@
 import asyncio
 import json
 import logging
-import time
 import base64
 import hmac
 from contextlib import asynccontextmanager
-from collections import Counter
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
@@ -15,7 +13,7 @@ from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
-from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS
+from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS
 from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
@@ -29,7 +27,13 @@ answer_store = SQLiteCallStore(DATABASE_PATH, DATA_DIR)
 call_result_service = CallResultService(answer_extractor, answer_store, timeout=EXTRACTION_TIMEOUT_SECONDS, max_attempts=EXTRACTION_MAX_ATTEMPTS)
 call_manager = CallManager()
 configure_twilio(answer_store, call_result_service)
-coordinator = DurableCallCoordinator(answer_store, MAX_CONCURRENT_CALLS, START_INTERVAL_SECONDS)
+coordinator = DurableCallCoordinator(
+    answer_store, MAX_CONCURRENT_CALLS, START_INTERVAL_SECONDS,
+    ring_timeout=RING_TIMEOUT_SECONDS, max_call_seconds=MAX_CALL_SECONDS,
+    extraction_timeout=EXTRACTION_TIMEOUT_SECONDS,
+    extraction_retry_delay=EXTRACTION_RETRY_DELAY_SECONDS,
+    extractor=answer_extractor,
+)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -133,13 +137,15 @@ async def call_lead(lead_id: str):
         notes=lead.get("notes"),
     )
     try:
-        logger.info("dashboard_lead_call_requested", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
+        logger.info("dashboard_lead_call_requested", extra={"lead_id": lead_id})
         result = await start_outbound_call(payload, idempotency_key=None)
         return result
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.exception("dashboard_lead_call_failed", extra={"lead_id": lead_id, "phone_number": lead.get("phone_number")})
+        logger.exception("dashboard_lead_call_failed", extra={"lead_id": lead_id})
         await asyncio.to_thread(answer_store.update_lead, lead_id, status="call_failed", last_error=type(exc).__name__)
-        raise HTTPException(status_code=502, detail=f"Unable to start Twilio call: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Unable to queue Twilio call") from exc
 
 
 @app.post("/api/leads/call-batch")
@@ -167,8 +173,8 @@ async def live_calls():
 
 
 @app.get("/api/calls")
-async def list_calls():
-    return {"calls": await asyncio.to_thread(answer_store.list_calls, 200, 0)}
+async def list_calls(limit: int = 200, offset: int = 0):
+    return {"calls": await asyncio.to_thread(answer_store.list_calls, limit, offset)}
 
 
 @app.get("/api/calls/{call_id}")
@@ -181,28 +187,14 @@ async def get_call(call_id: str):
 
 @app.get("/api/stats")
 async def stats():
-    calls = await asyncio.to_thread(answer_store.list_calls, 500, 0)
-    leads = await asyncio.to_thread(answer_store.list_leads)
-    total = len(calls)
-    answered = sum(1 for c in calls if c.get("duration", 0) > 0 and c.get("call_status") not in {"failed", "busy", "no-answer"})
-    busy_failed = sum(1 for c in calls if c.get("call_status") in {"failed", "busy"})
-    interested = sum(1 for c in calls if c.get("interested"))
-    callbacks = sum(1 for c in calls if c.get("callback_requested"))
-    outcomes = Counter(c.get("call_status", "unknown") for c in calls)
-    by_day = Counter(str(c.get("timestamp", ""))[:10] for c in calls if c.get("timestamp"))
-    avg_duration = round(sum(int(c.get("duration") or 0) for c in calls) / total, 1) if total else 0
+    return await asyncio.to_thread(answer_store.statistics)
+
+
+@app.get("/api/operations")
+async def operations():
     return {
-        "total_leads": len(leads),
-        "total_calls": total,
-        "calls_answered": answered,
-        "calls_not_answered": max(total - answered - busy_failed, 0),
-        "busy_failed_calls": busy_failed,
-        "average_call_duration": avg_duration,
-        "interested_responses": interested,
-        "callback_requested": callbacks,
-        "success_rate": round((interested / total) * 100, 1) if total else 0,
-        "outcomes": dict(outcomes),
-        "calls_over_time": dict(sorted(by_day.items())),
+        "coordinator": coordinator.health(),
+        "reconciliation": await asyncio.to_thread(answer_store.list_reconciliation, 100),
     }
 
 
@@ -220,12 +212,12 @@ async def lead_template():
 async def export_calls(fmt: str):
     if fmt not in {"xlsx", "csv", "json"}:
         raise HTTPException(status_code=400, detail="Format must be xlsx, csv, or json")
-    filename, content, media_type = answer_store.export_calls(fmt)
+    filename, content, media_type = await asyncio.to_thread(answer_store.export_calls, fmt)
     return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "data_dir": str(DATA_DIR)}
+    return {"status": "ok", "data_dir": str(DATA_DIR), "coordinator": coordinator.health()}
 
 
 @app.websocket("/ws")

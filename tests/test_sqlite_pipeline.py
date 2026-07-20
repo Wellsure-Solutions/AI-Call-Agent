@@ -33,7 +33,7 @@ def test_raw_survives_extraction_failure_and_lead_leaves_calling(tmp_path):
     session=CallSession(call_id=call['call_id'],phone_number=item['phone_number'],metadata={'lead_id':item['lead_id'],'media_connected':True}); session.add_turn('user','partial words')
     asyncio.run(CallResultService(Broken(),repo,timeout=.1,max_attempts=1).afinalize(session))
     saved=repo.get_call(call['call_id'])
-    assert 'partial words' in saved['transcript'] and saved['extraction_status']=='failed'
+    assert 'partial words' in saved['transcript'] and saved['extraction_status']=='pending'
     assert repo.get_lead(item['lead_id'])['status']!='calling'
 
 def test_current_mapping_and_dnd_suppresses_future_calls(tmp_path):
