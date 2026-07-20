@@ -32,17 +32,17 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://zh5th3zd-8000.inc1.devtu
 DEEPGRAM_LISTEN_MODEL = os.getenv("DEEPGRAM_LISTEN_MODEL", "flux-general-multi")
 DEEPGRAM_THINK_PROVIDER = os.getenv("DEEPGRAM_THINK_PROVIDER", "open_ai")
 DEEPGRAM_THINK_MODEL = os.getenv("DEEPGRAM_THINK_MODEL", "gpt-5.4-mini")
-DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.7"))
+DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.4"))
 DEEPGRAM_SPEAK_PROVIDER = os.getenv("DEEPGRAM_SPEAK_PROVIDER", "eleven_labs")
 DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_flash_v2_5")
-DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "JNaMjd7t4u3EhgkVknn3")
+DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "IpXGk4Ks434Jj33XXcNh")
 # zT03pEAEi0VHKciJODfn
 # IpXGk4Ks434Jj33XXcNh"
 # Ms9OTvWb99V6DwRHZn6q
 # k2intd1ORm0YUH8etnXg
 DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
-    "नमस्ते जी, मैं Janvi बोल रही हूँ Amazon Business Team से, सर एक छोटा सा सवाल था"
+    "Hello Sir, i am Jaanvi from अमेज़ॉन Business Team. सर एक छोटा सा सवाल था"
 )
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # Eager end-of-turn starts the LLM before the user's turn is final. It can
