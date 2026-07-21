@@ -2,4 +2,4 @@
 __pycache__/
 *.py[cod]
 data/
-app/core/settings.py
+call_answers.xlsx

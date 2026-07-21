@@ -1,27 +1,64 @@
 import asyncio
 import json
-import threading
-from dataclasses import asdict, is_dataclass
+import logging
+import base64
+import hmac
+from contextlib import asynccontextmanager
 
 import uvicorn
-from deepgram import DeepgramClient
-from deepgram.core.events import EventType
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
+from fastapi.responses import FileResponse, Response
 
+from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
-from app.services.call_control import is_closing_call_message
 from app.services.call_service import CallResultService
-from app.services.transcript_sanitizer import strip_spoken_internal_commands
-from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
-from app.storage.excel_store import ExcelAnswerStore
-from app.core.models import CallSession
-from app.core.settings import ANSWERS_WORKBOOK, HOST, INDEX_HTML, PORT
+from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
+from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS
+from app.services.call_coordinator import DurableCallCoordinator
+from app.telephony.adapters.browser_adapter import BrowserAdapter
+from app.telephony.audio.audio_bridge import AudioBridge
+from app.telephony.call_manager import CallManager
+from app.telephony.twilio_routes import OutboundCallRequest, configure as configure_twilio, media_router, router as twilio_router, start_outbound_call
 
-app = FastAPI(title="Autonomous Calling Agent")
+logger = logging.getLogger(__name__)
+
 answer_extractor = AnswerExtractor()
-answer_store = ExcelAnswerStore(ANSWERS_WORKBOOK)
-call_result_service = CallResultService(answer_extractor, answer_store)
+answer_store = SQLiteCallStore(DATABASE_PATH, DATA_DIR)
+call_result_service = CallResultService(answer_extractor, answer_store, timeout=EXTRACTION_TIMEOUT_SECONDS, max_attempts=EXTRACTION_MAX_ATTEMPTS)
+call_manager = CallManager()
+configure_twilio(answer_store, call_result_service)
+coordinator = DurableCallCoordinator(
+    answer_store, MAX_CONCURRENT_CALLS, START_INTERVAL_SECONDS,
+    ring_timeout=RING_TIMEOUT_SECONDS, max_call_seconds=MAX_CALL_SECONDS,
+    extraction_timeout=EXTRACTION_TIMEOUT_SECONDS,
+    extraction_retry_delay=EXTRACTION_RETRY_DELAY_SECONDS,
+    extractor=answer_extractor,
+)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    task=asyncio.create_task(coordinator.run())
+    yield
+    coordinator.stop(); await task
+
+app = FastAPI(title="Autonomous Calling Agent", lifespan=lifespan)
+app.include_router(twilio_router)
+app.include_router(media_router)
+
+BATCH_CONCURRENCY_LIMIT = MAX_CONCURRENT_CALLS
+
+def _authorized(value: str | None) -> bool:
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD or not value or not value.startswith("Basic "): return False
+    try: user,password=base64.b64decode(value[6:]).decode().split(":",1)
+    except Exception: return False
+    return hmac.compare_digest(user,ADMIN_USERNAME) and hmac.compare_digest(password,ADMIN_PASSWORD)
+
+@app.middleware("http")
+async def operator_auth(request: Request, call_next):
+    protected=request.url.path=="/" or request.url.path.startswith("/api/") or request.url.path=="/twilio/outbound"
+    if protected and not _authorized(request.headers.get("authorization")):
+        return Response("Authentication required",401,{"WWW-Authenticate":"Basic"})
+    return await call_next(request)
 
 
 @app.get("/")
@@ -29,139 +66,218 @@ async def get_ui():
     return FileResponse(INDEX_HTML)
 
 
+
+@app.get("/api/leads")
+async def list_leads():
+    return {"leads": await asyncio.to_thread(answer_store.list_leads)}
+
+
+@app.post("/api/leads/preview")
+async def preview_leads(file: UploadFile | None = File(default=None), pasted_data: str = Form(default="")):
+    try:
+        if file is not None:
+            content = await file.read()
+            headers, rows = answer_store.parse_upload(content, file.filename or "leads.csv")
+        elif pasted_data.strip():
+            headers, rows = answer_store.parse_upload(pasted_data.encode("utf-8"), "pasted.csv")
+        else:
+            raise HTTPException(status_code=400, detail="Upload a CSV/Excel file or paste tabular data.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("lead_preview_failed")
+        raise HTTPException(status_code=400, detail=f"Unable to parse leads: {exc}") from exc
+    if not headers and rows:
+        headers = list(rows[0].keys())
+    return {"headers": headers, "rows": rows, "preview_rows": rows[:25], "total_rows": len(rows)}
+
+
+@app.post("/api/leads/import")
+async def import_leads(payload: dict):
+    rows = payload.get("rows", [])
+    mapping = payload.get("mapping", {})
+    normalized = []
+    for row in rows:
+        normalized.append({
+            "business_name": row.get(mapping.get("business_name", ""), ""),
+            "phone_number": row.get(mapping.get("phone_number", ""), ""),
+            "category": row.get(mapping.get("category", ""), ""),
+            "notes": row.get(mapping.get("notes", ""), ""),
+        })
+    result = await asyncio.to_thread(answer_store.import_leads, normalized)
+    logger.info("lead_import_completed", extra={"submitted": len(rows), "imported": result["imported"], "rejected": len(result["rejected"])})
+    return result
+
+
+@app.post("/api/leads/manual")
+async def manual_lead(payload: dict):
+    row = {
+        "business_name": payload.get("business_name", ""),
+        "phone_number": payload.get("phone_number", ""),
+        "category": payload.get("category", ""),
+        "notes": payload.get("notes", ""),
+    }
+    result = await asyncio.to_thread(answer_store.import_leads, [row])
+    if result["imported"] != 1:
+        raise HTTPException(status_code=422, detail=result)
+    return result
+
+
+@app.post("/api/leads/{lead_id}/call")
+async def call_lead(lead_id: str):
+    lead = await asyncio.to_thread(answer_store.get_lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    payload = OutboundCallRequest(
+        phone_number=lead["phone_number"],
+        campaign_name="dashboard_lead",
+        lead_id=lead_id,
+        business_name=lead.get("business_name"),
+        category=lead.get("category"),
+        notes=lead.get("notes"),
+    )
+    try:
+        logger.info("dashboard_lead_call_requested", extra={"lead_id": lead_id})
+        result = await start_outbound_call(payload, idempotency_key=None)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("dashboard_lead_call_failed", extra={"lead_id": lead_id})
+        await asyncio.to_thread(answer_store.update_lead, lead_id, status="call_failed", last_error=type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Unable to queue Twilio call") from exc
+
+
+@app.delete("/api/leads/{lead_id}")
+async def delete_lead(lead_id: str):
+    deleted = await asyncio.to_thread(answer_store.delete_lead, lead_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    logger.info("lead_deleted", extra={"lead_id": lead_id})
+    return {"deleted": True, "lead_id": lead_id}
+
+
+@app.post("/api/leads/call-batch")
+async def call_lead_batch(payload: dict):
+    requested_ids = set(payload.get("lead_ids") or [])
+    max_calls = int(payload.get("max_calls") or 50)
+    leads = await asyncio.to_thread(answer_store.list_leads)
+    if requested_ids:
+        leads = [lead for lead in leads if lead.get("lead_id") in requested_ids]
+    leads = [lead for lead in leads if lead.get("phone_number") and lead.get("status") not in {"calling", "queued"}][:max_calls]
+    if not leads:
+        return {"requested": 0, "queued": 0, "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
+    queued=[]
+    for lead in leads:
+        try:
+            call=await answer_store.aenqueue_call(phone_number=lead["phone_number"],lead_id=lead["lead_id"],business_name=lead.get("business_name", ""),category=lead.get("category", ""),notes=lead.get("notes", ""))
+            queued.append(call["call_id"])
+        except SuppressedError: continue
+    return {"requested": len(leads), "queued": len(queued), "call_ids": queued, "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
+
+
+@app.get("/api/live-calls")
+async def live_calls():
+    return {"calls": await asyncio.to_thread(answer_store.list_live_calls, 100)}
+
+
+@app.get("/api/calls")
+async def list_calls(limit: int = 200, offset: int = 0):
+    return {"calls": await asyncio.to_thread(answer_store.list_calls, limit, offset)}
+
+
+@app.get("/api/calls/{call_id}")
+async def get_call(call_id: str):
+    call = await answer_store.aget_call(call_id)
+    if call is None:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return call
+
+
+@app.delete("/api/calls/{call_id}")
+async def delete_call(call_id: str):
+    try:
+        deleted = await asyncio.to_thread(answer_store.delete_call, call_id)
+    except ActiveDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Call not found")
+    logger.info("call_deleted", extra={"call_id": call_id})
+    return {"deleted": True, "call_id": call_id}
+
+
+@app.delete("/api/data")
+async def clear_data(payload: dict):
+    scope = payload.get("scope", "")
+    if payload.get("confirmation") != f"DELETE {str(scope).upper()}":
+        raise HTTPException(status_code=400, detail="Confirmation phrase does not match the requested deletion")
+    try:
+        deleted = await asyncio.to_thread(answer_store.clear_data, scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ActiveDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.warning("operator_data_cleared", extra={"scope": scope, **deleted})
+    return {"deleted": deleted, "scope": scope}
+
+
+@app.get("/api/stats")
+async def stats():
+    return await asyncio.to_thread(answer_store.statistics)
+
+
+@app.get("/api/operations")
+async def operations():
+    return {
+        "coordinator": coordinator.health(),
+        "reconciliation": await asyncio.to_thread(answer_store.list_reconciliation, 100),
+    }
+
+
+@app.get("/api/leads/template")
+async def lead_template():
+    try:
+        filename, content, media_type = answer_store.export_lead_template()
+    except Exception as exc:
+        logger.exception("lead_template_failed")
+        raise HTTPException(status_code=500, detail=f"Unable to generate lead template: {exc}") from exc
+    return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/export/{fmt}")
+async def export_calls(fmt: str):
+    if fmt not in {"xlsx", "csv", "json"}:
+        raise HTTPException(status_code=400, detail="Format must be xlsx, csv, or json")
+    filename, content, media_type = await asyncio.to_thread(answer_store.export_calls, fmt)
+    return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "answers_workbook": str(ANSWERS_WORKBOOK)}
-
-
-def _safe_event_payload(event) -> dict[str, object]:
-    """Return a serializable event payload for Deepgram diagnostics."""
-    if event is None:
-        return {}
-    if is_dataclass(event):
-        return asdict(event)
-    if isinstance(event, dict):
-        return event
-    payload: dict[str, object] = {}
-    for name in ("type", "description", "message", "code", "variant", "role", "content"):
-        value = getattr(event, name, None)
-        if value is not None:
-            payload[name] = value
-    if not payload:
-        payload["repr"] = repr(event)
-    return payload
-
-
-class DeepgramCallBridge:
-    """Bridges browser/Asterisk audio to Deepgram and persists temporary call answers."""
-
-    def __init__(self, websocket: WebSocket):
-        self.websocket = websocket
-        self.session = CallSession()
-        self.loop: asyncio.AbstractEventLoop | None = None
-        self.message_queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue()
-        self.client_task: asyncio.Task | None = None
-        self.closing_requested = False
-
-    async def run(self) -> None:
-        await self.websocket.accept()
-        if not DEEPGRAM_API_KEY:
-            await self.websocket.send_text(json.dumps({"error": "DEEPGRAM_API_KEY is not set on the server."}))
-            await self.websocket.close()
-            return
-
-        self.loop = asyncio.get_running_loop()
-        client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
-        close_status = "completed"
-
-        try:
-            with client.agent.v1.connect() as connection:
-                self._register_handlers(connection)
-                connection.send_settings(get_agent_settings())
-
-                threading.Thread(target=connection.start_listening, daemon=True).start()
-                self.client_task = asyncio.create_task(self._send_to_client())
-
-                while not self.closing_requested:
-                    client_audio_data = await self.websocket.receive_bytes()
-                    if client_audio_data:
-                        connection.send_media(client_audio_data)
-        except WebSocketDisconnect:
-            close_status = "client_disconnected"
-            print(f"Client disconnected for call {self.session.call_id}.")
-        except Exception as exc:
-            close_status = "error"
-            print(f"Connection error for call {self.session.call_id}: {exc}")
-        finally:
-            if self.client_task is not None:
-                self.client_task.cancel()
-            self._persist_call(close_status)
-
-    def _register_handlers(self, connection) -> None:
-        connection.on(EventType.OPEN, lambda _event: print(f"[deepgram] opened call {self.session.call_id}"))
-        connection.on(EventType.MESSAGE, self._on_message)
-        connection.on(EventType.CLOSE, lambda _event: print(f"[deepgram] closed call {self.session.call_id}"))
-        connection.on(EventType.ERROR, self._on_error)
-
-    def _on_message(self, message) -> None:
-        try:
-            if isinstance(message, bytes):
-                self._queue_threadsafe("audio", message)
-                return
-
-            role = getattr(message, "role", None)
-            content = getattr(message, "content", None)
-            msg_type = getattr(message, "type", "Unknown")
-            print(f"[deepgram] call={self.session.call_id} message type={msg_type} payload={_safe_event_payload(message)}")
-
-            if is_closing_call_message(message, content):
-                self.closing_requested = True
-                self._queue_threadsafe("control", json.dumps({"event": "closing_call"}))
-                return
-
-            if msg_type == "ConversationText" or (role and content):
-                cleaned_content = strip_spoken_internal_commands(content) if role == "assistant" else (content or "")
-                if not cleaned_content:
-                    return
-                self.session.add_turn(role, cleaned_content)
-                payload = json.dumps({"role": role or "agent", "content": cleaned_content})
-                self._queue_threadsafe("text", payload)
-        except Exception as exc:
-            print(f"[deepgram] handler error for call {self.session.call_id}: {exc}")
-
-    def _on_error(self, error) -> None:
-        error_payload = _safe_event_payload(error)
-        print(f"[deepgram] call={self.session.call_id} error: {error_payload}")
-        self._queue_threadsafe("text", json.dumps({"error": "Deepgram agent error", "details": error_payload}))
-
-    def _queue_threadsafe(self, message_type: str, data: bytes | str) -> None:
-        if self.loop is not None:
-            asyncio.run_coroutine_threadsafe(self.message_queue.put((message_type, data)), self.loop)
-
-    async def _send_to_client(self) -> None:
-        try:
-            while True:
-                message_type, data = await self.message_queue.get()
-                if message_type == "audio" and isinstance(data, bytes):
-                    await self.websocket.send_bytes(data)
-                elif message_type == "text" and isinstance(data, str):
-                    await self.websocket.send_text(data)
-                elif message_type == "control" and isinstance(data, str):
-                    await self.websocket.send_text(data)
-                    await self.websocket.close(code=1000, reason="agent_closing_call")
-                    self.closing_requested = True
-                    break
-        except asyncio.CancelledError:
-            pass
-
-    def _persist_call(self, status: str) -> None:
-        call_result_service.finalize(self.session, status)
-        print(f"Saved call {self.session.call_id} answers to {ANSWERS_WORKBOOK}")
+    return {"status": "ok", "data_dir": str(DATA_DIR), "coordinator": coordinator.health()}
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await DeepgramCallBridge(websocket).run()
+    if not _authorized(websocket.headers.get("authorization")):
+        await websocket.close(code=1008); return
+    adapter = BrowserAdapter(websocket)
+    session = call_manager.create_session(campaign_name="browser", direction="browser")
+    bridge = AudioBridge(session, call_result_service)
+    adapter.audio_bridge = bridge
+    adapter.attach(session)
+
+    if not DEEPGRAM_API_KEY:
+        await websocket.accept()
+        await websocket.send_text(json.dumps({"error": "DEEPGRAM_API_KEY is not set on the server."}))
+        await websocket.close()
+        call_manager.destroy_session(session.call_id)
+        return
+
+    try:
+        await adapter.start()
+    finally:
+        call_manager.destroy_session(session.call_id)
+        print(f"Saved call {session.call_id} answers to {DATA_DIR}")
 
 
 if __name__ == "__main__":
