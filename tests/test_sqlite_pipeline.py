@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from app.core.models import CallSession
 from app.services.call_service import CallResultService
-from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
+from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
 
 
 def store(tmp_path): return SQLiteCallStore(tmp_path/'calls.db', tmp_path)
@@ -51,3 +51,25 @@ def test_legacy_migration_is_idempotent_and_source_untouched(tmp_path):
     store(tmp_path); store(tmp_path)
     assert path.read_bytes()==before
     assert len(SQLiteCallStore(tmp_path/'calls.db',tmp_path).list_leads())==1
+
+
+def test_delete_lead_preserves_call_history_and_terminal_call_can_be_deleted(tmp_path):
+    repo=store(tmp_path); item=lead(repo); call=repo.enqueue_call(phone_number=item['phone_number'],lead_id=item['lead_id'])
+    assert repo.delete_lead(item['lead_id']) is True
+    assert repo.get_lead(item['lead_id']) is None and repo.get_call(call['call_id'])['lead_id'] is None
+    try: repo.delete_call(call['call_id'])
+    except ActiveDataError: pass
+    else: raise AssertionError('active call was deleted')
+    repo.mark_dial_rejected(call['call_id'],'test')
+    assert repo.delete_call(call['call_id']) is True and repo.get_call(call['call_id']) is None
+
+
+def test_clear_data_is_scoped_and_refuses_active_calls(tmp_path):
+    repo=store(tmp_path); item=lead(repo); call=repo.enqueue_call(phone_number=item['phone_number'],lead_id=item['lead_id'])
+    deleted=repo.clear_data('leads')
+    assert deleted['leads']==1 and repo.get_call(call['call_id']) is not None
+    try: repo.clear_data('calls')
+    except ActiveDataError: pass
+    else: raise AssertionError('active call history was cleared')
+    repo.mark_dial_rejected(call['call_id'],'test')
+    assert repo.clear_data('all')['calls']==1

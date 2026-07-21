@@ -32,6 +32,10 @@ class SuppressedError(RuntimeError):
     pass
 
 
+class ActiveDataError(RuntimeError):
+    """Raised when an operator tries to delete an in-progress call."""
+
+
 class SQLiteCallStore(JsonCallStore):
     """Multi-process SQLite repository using one connection per operation."""
 
@@ -189,6 +193,58 @@ class SQLiteCallStore(JsonCallStore):
         with self.transaction(immediate=True) as db:
             db.execute(f"UPDATE leads SET {assignments} WHERE lead_id=:lead_id", values)
         return self.get_lead(lead_id)
+
+    def delete_lead(self, lead_id: str) -> bool:
+        """Delete a lead while retaining its calls as standalone history."""
+        with self.transaction(immediate=True) as db:
+            if not db.execute("SELECT 1 FROM leads WHERE lead_id=?", (lead_id,)).fetchone():
+                return False
+            db.execute("UPDATE calls SET lead_id=NULL WHERE lead_id=?", (lead_id,))
+            return db.execute("DELETE FROM leads WHERE lead_id=?", (lead_id,)).rowcount == 1
+
+    @staticmethod
+    def _delete_call_db(db: sqlite3.Connection, call_id: str) -> None:
+        db.execute("UPDATE suppression_list SET source_call_id=NULL WHERE source_call_id=?", (call_id,))
+        db.execute("DELETE FROM extraction_jobs WHERE call_id=?", (call_id,))
+        db.execute("DELETE FROM call_events WHERE call_id=?", (call_id,))
+        db.execute("DELETE FROM call_jobs WHERE call_id=?", (call_id,))
+        db.execute("DELETE FROM calls WHERE call_id=?", (call_id,))
+
+    def delete_call(self, call_id: str) -> bool:
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT lifecycle_state FROM calls WHERE call_id=?", (call_id,)).fetchone()
+            if not row:
+                return False
+            if row[0] not in LIFECYCLE_TERMINAL:
+                raise ActiveDataError("Active or unresolved calls cannot be deleted")
+            self._delete_call_db(db, call_id)
+            return True
+
+    def clear_data(self, scope: str) -> dict[str, int]:
+        """Delete operator data atomically; active calls are always protected."""
+        if scope not in {"leads", "calls", "all"}:
+            raise ValueError("scope must be leads, calls, or all")
+        with self.transaction(immediate=True) as db:
+            deleted = {"leads": 0, "calls": 0, "suppression_entries": 0}
+            if scope in {"calls", "all"}:
+                active = db.execute(
+                    f"SELECT COUNT(*) FROM calls WHERE lifecycle_state NOT IN ({','.join('?' for _ in LIFECYCLE_TERMINAL)})",
+                    tuple(LIFECYCLE_TERMINAL),
+                ).fetchone()[0]
+                if active:
+                    raise ActiveDataError(f"End or resolve {active} active call(s) before deleting call data")
+                call_ids = [row[0] for row in db.execute("SELECT call_id FROM calls").fetchall()]
+                for call_id in call_ids:
+                    self._delete_call_db(db, call_id)
+                deleted["calls"] = len(call_ids)
+            if scope in {"leads", "all"}:
+                deleted["leads"] = db.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+                db.execute("UPDATE calls SET lead_id=NULL")
+                db.execute("DELETE FROM leads")
+            if scope == "all":
+                deleted["suppression_entries"] = db.execute("SELECT COUNT(*) FROM suppression_list").fetchone()[0]
+                db.execute("DELETE FROM suppression_list")
+            return deleted
 
     def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", notes: str = "", idempotency_key: str | None = None) -> dict[str, Any]:
         phone = self.normalize_phone(phone_number)
