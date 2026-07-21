@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
-from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
+from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
 from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS
 from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
@@ -148,6 +148,15 @@ async def call_lead(lead_id: str):
         raise HTTPException(status_code=502, detail="Unable to queue Twilio call") from exc
 
 
+@app.delete("/api/leads/{lead_id}")
+async def delete_lead(lead_id: str):
+    deleted = await asyncio.to_thread(answer_store.delete_lead, lead_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    logger.info("lead_deleted", extra={"lead_id": lead_id})
+    return {"deleted": True, "lead_id": lead_id}
+
+
 @app.post("/api/leads/call-batch")
 async def call_lead_batch(payload: dict):
     requested_ids = set(payload.get("lead_ids") or [])
@@ -183,6 +192,33 @@ async def get_call(call_id: str):
     if call is None:
         raise HTTPException(status_code=404, detail="Call not found")
     return call
+
+
+@app.delete("/api/calls/{call_id}")
+async def delete_call(call_id: str):
+    try:
+        deleted = await asyncio.to_thread(answer_store.delete_call, call_id)
+    except ActiveDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Call not found")
+    logger.info("call_deleted", extra={"call_id": call_id})
+    return {"deleted": True, "call_id": call_id}
+
+
+@app.delete("/api/data")
+async def clear_data(payload: dict):
+    scope = payload.get("scope", "")
+    if payload.get("confirmation") != f"DELETE {str(scope).upper()}":
+        raise HTTPException(status_code=400, detail="Confirmation phrase does not match the requested deletion")
+    try:
+        deleted = await asyncio.to_thread(answer_store.clear_data, scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ActiveDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.warning("operator_data_cleared", extra={"scope": scope, **deleted})
+    return {"deleted": deleted, "scope": scope}
 
 
 @app.get("/api/stats")
