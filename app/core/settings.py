@@ -48,17 +48,20 @@ DEEPGRAM_THINK_MODEL = os.getenv("DEEPGRAM_THINK_MODEL", "gpt-5.4-mini")
 DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.7"))
 DEEPGRAM_SPEAK_PROVIDER = os.getenv("DEEPGRAM_SPEAK_PROVIDER", "eleven_labs")
 DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_multilingual_v2")
-DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "JNaMjd7t4u3EhgkVknn3")
-# zT03pEAEi0VHKciJODfn
-# IpXGk4Ks434Jj33XXcNh"
+DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "k2intd1ORm0YUH8etnXg")
+# zT03pEAEi0VHKciJODfn RAJU
+# JNaMjd7t4u3EhgkVknn3 JANVI
+# IpXGk4Ks434Jj33XXcNh ANJURA
 # Ms9OTvWb99V6DwRHZn6q
-# k2intd1ORm0YUH8etnXg
+# k2intd1ORm0YUH8etnXg ZARA
 DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
-    "नमस्ते जी, मैं Janvi बोल रही हूँ Amazon Business Team से, सर एक छोटा सा सवाल था"
+    "Hello Sir, मैं Shruti बोल रही हूँ Amazon Business Team से,"
 )
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # Eager end-of-turn starts the LLM before the user's turn is final. It can
 # reduce latency, but it also makes short pauses sound like interruptions.
 # Keep it opt-in so normal EndOfTurn detection is the safe default.
 DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD")
+# Fix interruption handling it should stop only when good amount of noice is coming not on background voices or simple words like ha okay etc
+# implement so it knows how to cut callsi
