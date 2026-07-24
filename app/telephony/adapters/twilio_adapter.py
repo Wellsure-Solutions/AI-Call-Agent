@@ -3,18 +3,36 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from contextlib import suppress
 
 from fastapi import WebSocket, WebSocketDisconnect
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
-from app.core.settings import PUBLIC_BASE_URL, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
+from app.core.settings import (
+    BARGE_IN_CONFIRM_MS,
+    BARGE_IN_MAX_PAUSE_MS,
+    BARGE_IN_VOICE_ENERGY_THRESHOLD,
+    PUBLIC_BASE_URL,
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_FRAME_MS,
+    TWILIO_FROM_NUMBER,
+)
 from app.integrations.twilio_media import decode_media_payload, encode_media_payload
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
+from app.telephony.audio.local_vad import VoicedDurationTracker
+from app.telephony.audio.paced_sender import PacedSender
 from app.telephony.call_session import CallSession
 
 logger = logging.getLogger(__name__)
+
+# Send a mark roughly this often while agent audio is playing, so Twilio's
+# echoed-back "mark" events give a ground-truth read on whether audio is
+# genuinely still playing -- not just "how much did we hand to the socket".
+_MARK_EVERY_N_FRAMES = 5  # 5 * 20ms = ~100ms
 
 class TwilioAdapter(BaseTelephonyAdapter):
     """
@@ -47,10 +65,27 @@ class TwilioAdapter(BaseTelephonyAdapter):
         self.closing_requested = False
         self.ring_timeout = 45
 
+        # -- Soft barge-in state -------------------------------------------------
+        # Twilio's own buffer-then-clear semantics (unlike a browser socket)
+        # are exactly why this lives here rather than in the shared
+        # AudioBridge. See AudioBridge.hard_interrupt and PacedSender.
+        self._paced_sender: PacedSender | None = None
+        self._vad_tracker = VoicedDurationTracker(
+            energy_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD,
+            frame_ms=TWILIO_FRAME_MS,
+        )
+        self._pause_started_at: float | None = None
+        self._frames_since_pause = 0
+        self._pending_marks: set[str] = set()
+        self._next_mark_id = 0
+        self._frames_since_mark = 0
+
     def attach(self, session: CallSession) -> None:
         super().attach(session)
         if self.audio_bridge is None:
-            self.audio_bridge = AudioBridge(session)
+            # hard_interrupt=False: Twilio pauses and confirms via local VAD
+            # instead of hard-cutting on Deepgram's first UserStartedSpeaking.
+            self.audio_bridge = AudioBridge(session, hard_interrupt=False)
 
     # ------------------------------------------------------------------
     # Outbound call placement (REST) -- audio isn't live yet after this
@@ -136,14 +171,58 @@ class TwilioAdapter(BaseTelephonyAdapter):
             elif event == "stop":
                 return None
 
+            elif event == "mark":
+                # Twilio echoes a mark back once it has actually *played*
+                # the audio that preceded it -- ground truth for "is agent
+                # audio genuinely still playing", not just "did we send
+                # bytes to the socket". Resolve it and keep looping; this
+                # isn't a caller audio frame.
+                name = (msg.get("mark") or {}).get("name")
+                if name is not None:
+                    self._pending_marks.discard(name)
+                continue
+
             # "connected"/"start" (already consumed by the route before
-            # start() is called) and "mark"/"dtmf" need no action here.
+            # start() is called) and "dtmf" need no action here.
 
     async def clear_playback(self) -> None:
         """Not part of the base interface, but useful for barge-in: stops
         any buffered outbound audio Twilio hasn't played yet."""
         if self.websocket is not None and self.stream_sid is not None:
             await self.websocket.send_text(json.dumps({"event": "clear", "streamSid": self.stream_sid}))
+            self._pending_marks.clear()
+
+    async def _send_mark(self) -> None:
+        """Sent right after handing audio to the paced sender's output so
+        the ack tells us Twilio actually played roughly up to this point."""
+        if self.websocket is None or self.stream_sid is None:
+            return
+        self._next_mark_id += 1
+        name = f"m{self._next_mark_id}"
+        self._pending_marks.add(name)
+        try:
+            await self.websocket.send_text(json.dumps({
+                "event": "mark",
+                "streamSid": self.stream_sid,
+                "mark": {"name": name},
+            }))
+        except (WebSocketDisconnect, RuntimeError):
+            self._pending_marks.discard(name)
+
+    async def _on_frame_sent(self) -> None:
+        self._frames_since_mark += 1
+        if self._frames_since_mark >= _MARK_EVERY_N_FRAMES:
+            self._frames_since_mark = 0
+            await self._send_mark()
+
+    @property
+    def audio_currently_playing(self) -> bool:
+        """True if Twilio still has agent audio queued or (per unresolved
+        marks) actually playing -- confirmed via mark round-trips rather
+        than assumed from what we've handed to the socket."""
+        return bool(self._pending_marks) or (
+            self._paced_sender is not None and self._paced_sender.has_buffered_audio
+        )
 
     # ------------------------------------------------------------------
     # Call loop -- mirrors BrowserAdapter.start() exactly
@@ -166,6 +245,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
             while not self.closing_requested:
                 audio = await self.receive_audio()
                 if audio:
+                    self._process_barge_in_signal(audio)
                     if not self.audio_bridge.started:
                         # Start Deepgram only after Twilio has delivered actual
                         # media from an answered call. Starting earlier can make
@@ -201,14 +281,26 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
     async def _send_to_twilio(self) -> None:
         assert self.audio_bridge is not None
+        self._paced_sender = PacedSender(self.send_audio, on_frame_sent=self._on_frame_sent)
+        sender_task = asyncio.create_task(self._paced_sender.run())
         try:
             while True:
                 message_type, data = await self.audio_bridge.next_output()
                 if message_type == "audio" and isinstance(data, bytes):
-                    sent = await self.send_audio(data)
-                    if not sent:
-                        break
+                    # Feed the paced sender rather than sending straight to
+                    # Twilio -- it re-slices this into fixed 20ms frames and
+                    # drains them at real-time rate.
+                    self._paced_sender.feed(data)
+                elif message_type == "pause":
+                    self._begin_soft_pause()
                 elif message_type == "interrupt":
+                    # Either AudioBridge is in hard_interrupt mode, or our
+                    # own local VAD just confirmed a genuine barge-in via
+                    # commit_interruption(). Either way: drop whatever
+                    # hasn't been sent yet and clear whatever Twilio has
+                    # already buffered.
+                    self._paced_sender.discard()
+                    self._end_soft_pause()
                     await self.clear_playback()
                 elif message_type == "control" and isinstance(data, str):
                     self.closing_requested = True
@@ -229,6 +321,71 @@ class TwilioAdapter(BaseTelephonyAdapter):
         except Exception as exc:
             self.closing_requested = True
             logger.exception("Twilio outbound audio pump failed for call %s: %s", self.session.call_id if self.session else "unknown", exc)
+        finally:
+            if self._paced_sender is not None:
+                self._paced_sender.close()
+            sender_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sender_task
+
+    # ------------------------------------------------------------------
+    # Soft barge-in: pace, pause, decide (via local VAD on caller audio),
+    # then act. Deepgram's UserStartedSpeaking only ever *pauses* playback
+    # here; committing to a real interruption is decided purely from how
+    # long the caller has sustained voiced audio -- never from what
+    # Deepgram thinks was said, so Hindi/Hinglish STT variance never
+    # enters the decision.
+    # ------------------------------------------------------------------
+    def _begin_soft_pause(self) -> None:
+        if self._paced_sender is None:
+            return
+        self._paced_sender.pause()
+        self._vad_tracker.reset()
+        self._pause_started_at = time.monotonic()
+        self._frames_since_pause = 0
+
+    def _end_soft_pause(self) -> None:
+        self._pause_started_at = None
+        self._frames_since_pause = 0
+        self._vad_tracker.reset()
+
+    def _process_barge_in_signal(self, caller_frame: bytes) -> None:
+        """Called for every caller frame while a soft pause is active, to
+        decide whether to resume the agent (backchannel/noise) or commit to
+        a real interruption (sustained voice)."""
+        if self._pause_started_at is None or self._paced_sender is None:
+            return
+
+        self._frames_since_pause += 1
+        self._vad_tracker.observe(caller_frame)
+
+        if self._vad_tracker.voiced_ms >= BARGE_IN_CONFIRM_MS:
+            # Sustained voice long enough: this is a genuine interruption.
+            self._end_soft_pause()
+            self.audio_bridge.commit_interruption()
+            return
+
+        # Give the tracker's own hangover window a real chance to run
+        # before treating voiced_ms == 0 as "this run of sound already
+        # ended" -- otherwise a single silent frame right after the pause
+        # began (before we've even had a chance to observe the caller
+        # speech that triggered it) would resume instantly.
+        if (
+            self._vad_tracker.voiced_ms == 0
+            and self._frames_since_pause >= self._vad_tracker.hangover_frames
+        ):
+            # Backchannel, cough, or noise: resume from exactly where the
+            # ticker paused. Nothing was lost.
+            self._end_soft_pause()
+            self._paced_sender.resume()
+            return
+
+        elapsed_ms = (time.monotonic() - self._pause_started_at) * 1000
+        if elapsed_ms >= BARGE_IN_MAX_PAUSE_MS:
+            # Safety net: the signal has stayed ambiguous too long. Fail
+            # open rather than leave the line silently paused.
+            self._end_soft_pause()
+            self._paced_sender.resume()
 
 
     async def _complete_twilio_call(self) -> None:

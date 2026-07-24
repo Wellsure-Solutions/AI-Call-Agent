@@ -9,11 +9,33 @@ from app.telephony.state_machine import CallState
 
 
 class AudioBridge:
-    """Passes adapter-formatted audio between telephony and Deepgram."""
+    """Passes adapter-formatted audio between telephony and Deepgram.
 
-    def __init__(self, session: CallSession, result_service: CallResultService | None = None) -> None:
+    `hard_interrupt` controls what happens the instant Deepgram reports
+    UserStartedSpeaking:
+
+    * True (default, used by BrowserAdapter) -- the original hard-cut
+      behavior. Buffered agent audio is discarded and playback is cleared
+      immediately. Fine for a browser test call, which has none of
+      Twilio's buffer-then-clear semantics to worry about.
+    * False (used by TwilioAdapter) -- nothing is discarded yet. A "pause"
+      message is queued instead, and it's up to the adapter to actually
+      commit (via `commit_interruption`) once it has confirmed, using its
+      own local VAD, that this is a real interruption and not a
+      backchannel/cough/noise. That confirmation logic belongs in the
+      adapter, not here, since it depends on Twilio-specific transport
+      semantics (buffer-then-clear) a browser socket doesn't have.
+    """
+
+    def __init__(
+        self,
+        session: CallSession,
+        result_service: CallResultService | None = None,
+        hard_interrupt: bool = True,
+    ) -> None:
         self.session = session
         self.result_service = result_service
+        self.hard_interrupt = hard_interrupt
         self.outbound_queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue()
         self.finished = asyncio.Event()
         self._started = False
@@ -64,6 +86,24 @@ class AudioBridge:
         self.outbound_queue.put_nowait(("text", payload))
 
     def _handle_interruption(self) -> None:
+        """Fired the instant Deepgram reports UserStartedSpeaking."""
+        if self.hard_interrupt:
+            self._discard_and_clear()
+            return
+        # Soft mode: don't touch buffered/queued agent audio yet. Just tell
+        # the adapter a candidate interruption has begun so it can pause
+        # playback while its own local VAD confirms this is a real
+        # interruption rather than a backchannel/cough/noise.
+        self.outbound_queue.put_nowait(("pause", '{"event": "user_started_speaking"}'))
+
+    def commit_interruption(self) -> None:
+        """For soft-interrupt adapters: call this once local VAD confirms
+        sustained caller speech, to actually discard buffered agent audio
+        and tell the adapter to clear whatever the transport has already
+        buffered."""
+        self._discard_and_clear()
+
+    def _discard_and_clear(self) -> None:
         """Discard queued agent speech and tell the adapter to stop playback."""
         retained: list[tuple[str, bytes | str]] = []
         while True:
@@ -71,7 +111,7 @@ class AudioBridge:
                 message = self.outbound_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if message[0] not in {"audio", "interrupt"}:
+            if message[0] not in {"audio", "interrupt", "pause"}:
                 retained.append(message)
 
         self.outbound_queue.put_nowait(("interrupt", '{"event": "user_started_speaking"}'))

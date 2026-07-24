@@ -63,5 +63,10 @@ DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # reduce latency, but it also makes short pauses sound like interruptions.
 # Keep it opt-in so normal EndOfTurn detection is the safe default.
 DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD")
-# Fix interruption handling it should stop only when good amount of noice is coming not on background voices or simple words like ha okay etc
-# implement so it knows how to cut callsi
+# ---------------------------------------------------------------------------
+
+TWILIO_FRAME_MS = 20  
+TWILIO_FRAME_BYTES = 160 
+BARGE_IN_VOICE_ENERGY_THRESHOLD = float(os.getenv("CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD", "400"))
+BARGE_IN_CONFIRM_MS = int(os.getenv("CALL_AGENT_BARGE_IN_CONFIRM_MS", "550"))
+BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "4000"))
