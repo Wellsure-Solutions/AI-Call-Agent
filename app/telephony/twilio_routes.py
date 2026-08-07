@@ -208,7 +208,14 @@ async def media_stream(websocket: WebSocket):
     if metrics is not None:
         metrics.bind()
 
-    bridge=AudioBridge(session,_result_service,metrics=metrics,greeting_already_played=bool(greeting)); adapter=TwilioAdapter(bridge,metrics=metrics,media_dump=dump); adapter.pending_greeting=greeting; adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
+    # hard_interrupt=False is required, not optional. TwilioAdapter only
+    # applies it when it has to build the bridge itself, and this route always
+    # supplies one -- so the default (True) silently won, and every real call
+    # ran in hard-cut mode: soft barge-in never executed once. Two symptoms
+    # came from that. Barge-in decisions were never recorded because the pause
+    # they measure was never begun, and any sound from the customer during the
+    # agent's closing line discarded the queued goodbye outright.
+    bridge=AudioBridge(session,_result_service,hard_interrupt=False,metrics=metrics,greeting_already_played=bool(greeting)); adapter=TwilioAdapter(bridge,metrics=metrics,media_dump=dump); adapter.pending_greeting=greeting; adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
     close_reason = "completed"
     try:
         await adapter.start()

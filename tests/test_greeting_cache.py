@@ -205,3 +205,4 @@ def test_the_drain_is_bounded_when_the_customer_already_hung_up():
 
     asyncio.run(scenario())
     assert adapter.audio_currently_playing is True, "still unplayed, but we stopped waiting"
+

@@ -229,3 +229,55 @@ def test_barge_in_events_record_the_live_adaptive_threshold():
     decisions = [p for name, p in metrics.drain() if name == "metrics_barge_in"]
     assert decisions
     assert decisions[0]["threshold"] == pytest.approx(adapter._noise_floor.threshold, rel=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Soft mode must actually be in force on the Twilio path
+# ---------------------------------------------------------------------------
+def test_a_caller_supplied_bridge_is_forced_into_soft_mode():
+    """The bug that made every other test in this file irrelevant in production.
+
+    AudioBridge defaults to hard_interrupt=True, the media-stream route
+    supplied its own bridge, and TwilioAdapter only set soft mode when it had
+    to build one itself. So real calls hard-cut on Deepgram's first
+    UserStartedSpeaking: no pause was ever begun, no barge-in decision was
+    ever recorded, and any customer sound during the closing line discarded
+    the queued goodbye outright.
+    """
+    from app.telephony.audio.audio_bridge import AudioBridge
+    from app.telephony.call_session import CallSession
+
+    session = CallSession(call_id="call-soft", direction="twilio")
+    bridge = AudioBridge(session)  # the permissive default
+    assert bridge.hard_interrupt is True
+
+    TwilioAdapter(audio_bridge=bridge, client=object()).attach(session)
+
+    assert bridge.hard_interrupt is False
+
+
+def test_a_bridge_built_by_the_adapter_is_soft_too():
+    from app.telephony.call_session import CallSession
+
+    session = CallSession(call_id="call-soft-2", direction="twilio")
+    adapter = TwilioAdapter(client=object())
+    adapter.attach(session)
+    assert adapter.audio_bridge.hard_interrupt is False
+
+
+def test_soft_mode_queues_a_pause_instead_of_discarding_agent_audio():
+    """The behavioural difference that saves the closing line."""
+    from app.telephony.audio.audio_bridge import AudioBridge
+    from app.telephony.call_session import CallSession
+
+    session = CallSession(call_id="call-soft-3", direction="twilio")
+    bridge = AudioBridge(session, hard_interrupt=False)
+    bridge.outbound_queue.put_nowait(("audio", b"\xff" * 160))
+    bridge._handle_interruption()
+
+    kinds = []
+    while not bridge.outbound_queue.empty():
+        kinds.append(bridge.outbound_queue.get_nowait()[0])
+    assert "audio" in kinds, "queued agent audio must survive an unconfirmed interruption"
+    assert "pause" in kinds
+    assert "interrupt" not in kinds

@@ -133,6 +133,19 @@ class TwilioAdapter(BaseTelephonyAdapter):
             # hard_interrupt=False: Twilio pauses and confirms via local VAD
             # instead of hard-cutting on Deepgram's first UserStartedSpeaking.
             self.audio_bridge = AudioBridge(session, hard_interrupt=False)
+        elif getattr(self.audio_bridge, "hard_interrupt", False):
+            # A caller-supplied bridge used to be able to leave the default
+            # (hard) mode in place, and one did: every real Twilio call ran
+            # in hard-cut mode, so the soft barge-in path below never
+            # executed and any customer sound during the closing line
+            # discarded the queued goodbye. This adapter is what implements
+            # the soft path, so it owns the invariant rather than trusting
+            # whoever constructed the bridge to remember.
+            logger.warning(
+                "forcing_soft_interrupt_for_twilio",
+                extra={"call_id": session.call_id},
+            )
+            self.audio_bridge.hard_interrupt = False
 
     # ------------------------------------------------------------------
     # Outbound call placement (REST) -- audio isn't live yet after this
