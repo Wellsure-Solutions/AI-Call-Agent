@@ -200,14 +200,14 @@ async def media_stream(websocket: WebSocket):
     # Instrumentation is built before the bridge so the clock is anchored at
     # the earliest instant this process controls, and torn down last so the
     # final flush still happens on an errored or hung-up call.
-    metrics, writer = _build_metrics(call_id)
+    # A cache hit removes the provider round-trip from the start of the call
+    # entirely; a miss silently falls back to Deepgram synthesising it.
+    greeting = cached_greeting_audio()
+    metrics, writer = _build_metrics(call_id, "cached" if greeting else "provider")
     dump = MediaDump.create(MEDIA_DUMP_DIR, call_id)
     if metrics is not None:
         metrics.bind()
 
-    # A cache hit removes the provider round-trip from the start of the call
-    # entirely; a miss silently falls back to Deepgram synthesising it.
-    greeting = cached_greeting_audio()
     bridge=AudioBridge(session,_result_service,metrics=metrics,greeting_already_played=bool(greeting)); adapter=TwilioAdapter(bridge,metrics=metrics,media_dump=dump); adapter.pending_greeting=greeting; adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
     close_reason = "completed"
     try:
@@ -223,7 +223,7 @@ async def media_stream(websocket: WebSocket):
             await writer.stop()
 
 
-def _build_metrics(call_id: str) -> tuple[CallMetrics | None, MetricsWriter | None]:
+def _build_metrics(call_id: str, greeting_source: str = "provider") -> tuple[CallMetrics | None, MetricsWriter | None]:
     if not METRICS_ENABLED:
         return None, None
     writer = MetricsWriter(_repo(), call_id, flush_interval=METRICS_FLUSH_SECONDS)
@@ -233,5 +233,6 @@ def _build_metrics(call_id: str) -> tuple[CallMetrics | None, MetricsWriter | No
         writer.sink,
         voice_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD,
         silence_gap_ms=METRICS_SILENCE_GAP_MS,
+        greeting_source=greeting_source,
     )
     return metrics, writer

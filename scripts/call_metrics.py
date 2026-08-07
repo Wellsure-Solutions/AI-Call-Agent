@@ -37,7 +37,7 @@ LATENCY_METRICS: list[tuple[str, str, str]] = [
     ("metrics_turn", "provider_signal_to_first_audio_ms", "  of which: our transport + pacing"),
     ("metrics_greeting", "bind_to_first_audio_ms", "Stream bind -> greeting audio"),
     ("metrics_answer", "answer_to_greeting_ms", "Answer -> greeting audio (what the caller hears)"),
-    ("metrics_provider_latency", "stt_ms", "Deepgram STT"),
+    ("metrics_provider_latency", "stt_ms", "Deepgram STT (per partial, see note)"),
     ("metrics_provider_latency", "llm_first_token_ms", "LLM first token (any)"),
     ("metrics_provider_latency", "llm_first_text_ms", "LLM first text token"),
     ("metrics_provider_latency", "tts_ttfb_ms", "TTS time to first byte"),
@@ -203,6 +203,11 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             report["diagnostics"][kind.replace("metrics_provider_", "")] = dict(found)
 
     report["acoustics"] = merge_histograms(events.get("metrics_acoustics", []))
+    # Mixing a pre-rendered greeting with a live-synthesised one averages two
+    # different systems into one meaningless number, so say which ran.
+    sources = Counter(p.get("source", "unknown") for p in events.get("metrics_greeting", []))
+    if sources:
+        report["greeting_sources"] = dict(sources)
     return report
 
 
@@ -233,6 +238,24 @@ def _bucket_sort(item: tuple[str, int]) -> float:
 
 
 def print_report(report: dict[str, Any]) -> None:
+    attention: list[str] = []
+    for kind, codes in (report.get("diagnostics") or {}).items():
+        for code, count in codes.items():
+            attention.append(f"provider {kind}: {code} x{count}")
+    share = (report.get("silence") or {}).get("share_of_call_pct") or {}
+    if share.get("p50") is not None and share["p50"] >= 25:
+        attention.append(f"dead air is {share['p50']:.0f}% of the median call")
+    greeting = report.get("greeting_sources") or {}
+    if greeting.get("provider"):
+        attention.append(
+            f"{greeting['provider']} call(s) synthesised the greeting live -- "
+            "run scripts/prerender_greeting.py"
+        )
+    if attention:
+        print("\n=== Needs attention ===")
+        for line in attention:
+            print(f"  ! {line}")
+
     if report.get("missing"):
         print("\n=== Missing measurements ===")
         for label in report["missing"]:
@@ -249,6 +272,17 @@ def print_report(report: dict[str, Any]) -> None:
             ok = stats["p50"] <= target[0] and stats["p90"] <= target[1]
             line += f"   target p50<={target[0]:.0f} p90<={target[1]:.0f}  [{'OK' if ok else 'MISS'}]"
         print(line)
+
+    turns = (report["latency"].get("EOT -> first agent audio (perceived)") or {}).get("n") or 0
+    partials = (report["latency"].get("Deepgram STT (per partial, see note)") or {}).get("n") or 0
+    if partials > turns * 3 and turns:
+        print(f"\n  note: STT is reported per partial transcript ({partials} reports across")
+        print(f"        {turns} turns), so its tail reflects streaming jitter, not per-turn cost.")
+        print("        Per-turn speech-to-audio cost is the Deepgram end-to-end line.")
+
+    if report.get("greeting_sources"):
+        print("\n=== Greeting path ===")
+        print(f"  {report['greeting_sources']}   (cached = pre-rendered, provider = synthesised live)")
 
     print("\n=== Barge-in ===")
     decisions = report["barge_in"].get("decisions")
@@ -292,6 +326,10 @@ def print_report(report: dict[str, Any]) -> None:
         print("\n=== Provider diagnostics ===")
         for kind, codes in report["diagnostics"].items():
             print(f"  {kind}: {codes}")
+        if any("SLOW_THINK" in str(code) for codes in report["diagnostics"].values() for code in codes):
+            print("    SLOW_THINK_REQUEST: the LLM call itself was slow. Usually prompt")
+            print("    length -- every turn re-reads the whole prompt. Check its size before")
+            print("    blaming the model.")
 
     acoustics = report.get("acoustics") or {}
     if acoustics:

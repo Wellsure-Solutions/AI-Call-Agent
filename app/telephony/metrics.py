@@ -94,11 +94,16 @@ class CallMetrics:
         voice_threshold: float = 400.0,
         silence_gap_ms: int = 1500,
         flush_every: int = 32,
+        greeting_source: str = "provider",
     ) -> None:
         self.call_id = call_id
         self._sink = sink
         self._voice_threshold = voice_threshold
         self._silence_gap_ms = silence_gap_ms
+        # "cached" or "provider". Without it, a batch mixing both paths
+        # averages a 2-second provider synthesis into the same figure as a
+        # pre-rendered greeting and neither number means anything.
+        self._greeting_source = greeting_source
         self._flush_every = max(1, flush_every)
 
         self._lock = threading.Lock()
@@ -223,7 +228,10 @@ class CallMetrics:
 
             if self._first_audio_at is None:
                 self._first_audio_at = now
-                self._append_locked("metrics_greeting", {"bind_to_first_audio_ms": self._elapsed_ms_locked(now)})
+                self._append_locked("metrics_greeting", {
+                    "bind_to_first_audio_ms": self._elapsed_ms_locked(now),
+                    "source": self._greeting_source,
+                })
             else:
                 self._turn_index += 1
                 payload: dict[str, Any] = {

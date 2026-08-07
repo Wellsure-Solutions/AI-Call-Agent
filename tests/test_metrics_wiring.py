@@ -217,7 +217,7 @@ def test_metrics_reach_call_events_and_the_analysis_pass_reads_them(tmp_path):
     }
 
     report = build_report(load_events(tmp_path / "calls.sqlite3", [call_id], None, 10))
-    assert report["latency"]["Deepgram STT"]["p50"] == 100.0
+    assert report["latency"]["Deepgram STT (per partial, see note)"]["p50"] == 100.0
     assert report["latency"]["TTS time to first byte"]["p50"] == 90.0
     assert report["barge_in"]["decisions"] == {"commit": 1}
     assert report["cost"]["tts_characters_total"] == 140
