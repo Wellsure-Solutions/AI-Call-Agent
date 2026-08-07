@@ -206,3 +206,60 @@ def test_the_drain_is_bounded_when_the_customer_already_hung_up():
     asyncio.run(scenario())
     assert adapter.audio_currently_playing is True, "still unplayed, but we stopped waiting"
 
+
+def test_playback_lead_gives_twilio_jitter_headroom():
+    """Pacing exactly to real time leaves Twilio about one frame of audio, so
+    a single slow socket write starves it and the customer hears a crackle.
+    A lead lets a bounded amount sit in Twilio's buffer instead."""
+    sent: list[bytes] = []
+
+    async def send(frame: bytes) -> bool:
+        sent.append(frame)
+        return True
+
+    async def scenario(lead: float) -> int:
+        sender = PacedSender(send, lead_seconds=lead)
+        sender.feed(b"\xff" * 160 * 100)  # two seconds of audio
+        task = asyncio.create_task(sender.run())
+        await asyncio.sleep(0.25)
+        sender.close()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return len(sent)
+
+    sent.clear()
+    without_lead = asyncio.run(scenario(0.0))
+    sent.clear()
+    with_lead = asyncio.run(scenario(0.2))
+
+    assert with_lead > without_lead, "a lead must put more audio in flight, not less"
+    # Still paced, not dumped: a quarter second plus the lead is nowhere near
+    # the two seconds queued.
+    assert with_lead < 100, "the lead must bound the buffer, not remove pacing"
+
+
+def test_a_zero_lead_keeps_the_original_real_time_pacing():
+    sent: list[bytes] = []
+
+    async def send(frame: bytes) -> bool:
+        sent.append(frame)
+        return True
+
+    async def scenario() -> None:
+        sender = PacedSender(send, lead_seconds=0.0)
+        sender.feed(b"\xff" * 160 * 100)
+        task = asyncio.create_task(sender.run())
+        await asyncio.sleep(0.2)
+        sender.close()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+    # ~10 frames in 200ms at 20ms each, with scheduling slack.
+    assert 5 <= len(sent) <= 20

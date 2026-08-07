@@ -136,6 +136,18 @@ AGENT_CLOSE_GRACE_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_CLOSE_GRACE_SEC
 # this the closing line is cut off mid-word. Bounded because a customer who
 # already hung up will never acknowledge the remaining audio.
 AGENT_PLAYBACK_DRAIN_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_DRAIN_SECONDS", "8")))
+# Jitter headroom: how much agent audio Twilio is allowed to hold ahead of
+# real time. Pacing exactly to real time keeps its buffer at about one 20ms
+# frame, so any hiccup writing to the socket -- a tunnel, a congested link, a
+# busy event loop -- leaves Twilio with nothing to play and the customer hears
+# a crackle or a gap.
+#
+# Costs barge-in responsiveness in exact proportion: a soft pause cannot stop
+# audio Twilio already holds, so up to this much keeps playing after the pause
+# begins. A confirmed barge-in still cuts instantly, because it sends `clear`.
+# 200ms is roughly human reaction time, so the pause remains imperceptible
+# while covering typical link jitter.
+PLAYBACK_LEAD_MS = max(0, int(os.getenv("CALL_AGENT_PLAYBACK_LEAD_MS", "200")))
 
 # ---------------------------------------------------------------------------
 # Answering-machine detection

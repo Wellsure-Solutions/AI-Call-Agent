@@ -25,6 +25,7 @@ from app.core.settings import (
     BARGE_IN_MAX_PAUSE_MS,
     BARGE_IN_NOISE_MULTIPLIER,
     BARGE_IN_VOICE_ENERGY_THRESHOLD,
+    PLAYBACK_LEAD_MS,
     PUBLIC_BASE_URL,
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
@@ -373,7 +374,11 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
     async def _send_to_twilio(self) -> None:
         assert self.audio_bridge is not None
-        self._paced_sender = PacedSender(self.send_audio, on_frame_sent=self._on_frame_sent)
+        self._paced_sender = PacedSender(
+            self.send_audio,
+            on_frame_sent=self._on_frame_sent,
+            lead_seconds=PLAYBACK_LEAD_MS / 1000.0,
+        )
         if self.pending_greeting:
             # Queued before the sender task even starts, so the first frame
             # goes out on the next tick rather than after a websocket
