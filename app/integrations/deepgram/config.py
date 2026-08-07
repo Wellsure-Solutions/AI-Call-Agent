@@ -10,6 +10,7 @@ from deepgram.agent.v1.types import (
 )
 from app.core.prompts import PROMPT
 from app.integrations.audio_profiles import get_audio_profile
+from app.services.call_control import END_CALL_FUNCTION, END_CALL_FUNCTION_SCHEMA
 
 from app.core.settings import (
     DEEPGRAM_API_KEY,
@@ -96,6 +97,12 @@ def get_agent_settings(
                     "temperature": DEEPGRAM_THINK_TEMPERATURE,
                 },
                 "prompt": prompt,
+                # Registered with no `endpoint`, which is what makes it a
+                # client-side function: Deepgram sends a FunctionCallRequest
+                # and this process decides what to do. Until this existed the
+                # agent had no way to hang up at all, so every call ran until
+                # the customer hung up or the 900s deadline expired.
+                "functions": [END_CALL_FUNCTION_SCHEMA],
             },
             speak={
                 "provider": {

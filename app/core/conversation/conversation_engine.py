@@ -9,10 +9,17 @@ from dataclasses import asdict, is_dataclass
 from typing import Callable
 
 from deepgram import DeepgramClient
+from deepgram.agent.v1.types import AgentV1SendFunctionCallResponse
 from deepgram.core.events import EventType
 
+from app.core.settings import AGENT_CLOSE_GRACE_SECONDS
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
-from app.services.call_control import is_closing_call_message, is_terminal_assistant_text
+from app.services.call_control import (
+    END_CALL_FUNCTION,
+    is_closing_call_message,
+    is_terminal_assistant_text,
+    normalize_end_call_reason,
+)
 from app.services.transcript_sanitizer import strip_spoken_internal_commands
 from app.telephony.call_session import CallSession
 from app.telephony.metrics import CallMetrics
@@ -78,6 +85,7 @@ class ConversationEngine:
         self._send_lock = asyncio.Lock()
         self._deepgram_closed = False
         self._keepalive_task: asyncio.Task | None = None
+        self._close_deadline_task = None
 
     async def start(self) -> None:
         if not DEEPGRAM_API_KEY:
@@ -169,6 +177,9 @@ class ConversationEngine:
             with suppress(asyncio.CancelledError):
                 await self._keepalive_task
             self._keepalive_task = None
+        if self._close_deadline_task is not None:
+            self._close_deadline_task.cancel()
+            self._close_deadline_task = None
         if self._connection_context is not None:
             with suppress(Exception):
                 await asyncio.to_thread(self._connection_context.__exit__, None, None, None)
@@ -213,6 +224,10 @@ class ConversationEngine:
                         getattr(message, "description", None),
                     )
 
+            if msg_type == "FunctionCallRequest":
+                self._handle_function_calls(message)
+                return
+
             if is_closing_call_message(message, content):
                 self.closing_requested = True
                 self.session.safe_transition_to(CallState.AI_FINISHED)
@@ -243,6 +258,85 @@ class ConversationEngine:
                 self._call_threadsafe(lambda: self.on_text(payload))
         except Exception as exc:
             print(f"[deepgram] handler error for call {self.session.call_id}: {exc}")
+
+    def _handle_function_calls(self, message) -> None:
+        """Answer a Deepgram FunctionCallRequest and arm the hangup.
+
+        Only `end_call` is registered. Anything else is answered with an
+        explicit refusal rather than ignored: an unanswered client-side call
+        leaves the agent waiting on a result that never arrives, which the
+        customer hears as the line going dead mid-sentence.
+        """
+        for call in getattr(message, "functions", None) or []:
+            name = str(getattr(call, "name", "") or "")
+            call_id = getattr(call, "id", None)
+            if not getattr(call, "client_side", True):
+                # Deepgram executes it and reports back; nothing owed here.
+                continue
+            if name == END_CALL_FUNCTION:
+                reason = normalize_end_call_reason(getattr(call, "arguments", None))
+                self.session.metadata["end_call_reason"] = reason
+                logger.info(
+                    "agent_requested_end_call",
+                    extra={"call_id": self.session.call_id, "reason": reason},
+                )
+                self._send_function_result(call_id, name, "Call ending.")
+                # Do not hang up yet. The closing sentence is usually still
+                # being synthesised; cutting now truncates the goodbye. Wait
+                # for AgentAudioDone, with a bounded fallback in case the
+                # model called the tool without speaking afterwards.
+                self._close_after_audio_done = True
+                self._arm_close_deadline()
+            else:
+                self._send_function_result(call_id, name, "This function is not available.")
+
+    def _send_function_result(self, call_id: str | None, name: str, content: str) -> None:
+        if self.loop is None:
+            return
+        response = AgentV1SendFunctionCallResponse(id=call_id, name=name, content=content)
+        asyncio.run_coroutine_threadsafe(self._send_function_response(response), self.loop)
+
+    async def _send_function_response(self, response) -> None:
+        """Serialised through the same lock as every other write.
+
+        The Deepgram SDK wraps a synchronous websocket, so two concurrent
+        sends would interleave frames on one connection.
+        """
+        try:
+            async with self._send_lock:
+                if self.connection is None or self._deepgram_closed:
+                    return
+                await asyncio.to_thread(self.connection.send_function_call_response, response)
+        except Exception as exc:
+            logger.warning(
+                "deepgram_function_response_failed",
+                extra={"call_id": self.session.call_id, "error": type(exc).__name__},
+            )
+
+    def _arm_close_deadline(self) -> None:
+        """Hang up even if AgentAudioDone never arrives.
+
+        The whole point of the end-call tool is that a call cannot outlive
+        its purpose. Making the hangup depend solely on a provider event
+        would reintroduce the bug in a narrower form.
+        """
+        if self.loop is None or self._close_deadline_task is not None:
+            return
+        self._close_deadline_task = asyncio.run_coroutine_threadsafe(
+            self._close_after_grace(), self.loop
+        )
+
+    async def _close_after_grace(self) -> None:
+        await asyncio.sleep(AGENT_CLOSE_GRACE_SECONDS)
+        if self.closing_requested:
+            return
+        logger.info(
+            "agent_close_grace_expired",
+            extra={"call_id": self.session.call_id, "grace_seconds": AGENT_CLOSE_GRACE_SECONDS},
+        )
+        self.closing_requested = True
+        self.session.safe_transition_to(CallState.AI_FINISHED)
+        self.on_finished()
 
     def _on_close(self, event) -> None:
         self._deepgram_closed = True

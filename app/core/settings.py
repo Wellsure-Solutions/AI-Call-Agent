@@ -71,6 +71,11 @@ BARGE_IN_VOICE_ENERGY_THRESHOLD = float(os.getenv("CALL_AGENT_BARGE_IN_ENERGY_TH
 BARGE_IN_CONFIRM_MS = int(os.getenv("CALL_AGENT_BARGE_IN_CONFIRM_MS", "550"))
 BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "4000"))
 
+# After the agent asks to end the call, how long to let its closing sentence
+# finish before hanging up regardless. Long enough for a goodbye, far short of
+# the 900s maximum-call deadline that was previously the only way out.
+AGENT_CLOSE_GRACE_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_CLOSE_GRACE_SECONDS", "10")))
+
 # ---------------------------------------------------------------------------
 # Instrumentation. Measurement only -- nothing below changes call behaviour.
 # ---------------------------------------------------------------------------
