@@ -537,11 +537,16 @@ class SQLiteCallStore(JsonCallStore):
 
     def statistics(self) -> dict[str, Any]:
         with self._connect() as db:
+            # Every aggregate is COALESCEd. SUM() over zero rows returns NULL,
+            # not 0, so on a fresh database the arithmetic below raised a
+            # TypeError and the dashboard's stats panel 500'd on first load --
+            # before a single call had been placed.
             row = db.execute("""SELECT COUNT(*) total_calls,
-                SUM(CASE WHEN media_connected=1 THEN 1 ELSE 0 END) calls_answered,
-                SUM(CASE WHEN outcome IN ('busy','failed') THEN 1 ELSE 0 END) busy_failed_calls,
-                COALESCE(AVG(duration),0) average_call_duration,SUM(interested) interested_responses,
-                SUM(callback_requested) callback_requested FROM calls""").fetchone()
+                COALESCE(SUM(CASE WHEN media_connected=1 THEN 1 ELSE 0 END),0) calls_answered,
+                COALESCE(SUM(CASE WHEN outcome IN ('busy','failed') THEN 1 ELSE 0 END),0) busy_failed_calls,
+                COALESCE(AVG(duration),0) average_call_duration,
+                COALESCE(SUM(interested),0) interested_responses,
+                COALESCE(SUM(callback_requested),0) callback_requested FROM calls""").fetchone()
             outcomes = dict(db.execute("SELECT COALESCE(outcome,'unknown'),COUNT(*) FROM calls GROUP BY COALESCE(outcome,'unknown')"))
             days = dict(db.execute("SELECT substr(COALESCE(ended_at,started_at,created_at),1,10),COUNT(*) FROM calls GROUP BY 1"))
             leads = db.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
