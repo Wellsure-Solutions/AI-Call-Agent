@@ -33,6 +33,7 @@ from app.services.call_service import CallResultService
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
+from app.integrations.deepgram.config import cached_greeting_audio
 from app.telephony.audio.media_dump import MediaDump
 from app.telephony.call_session import CallSession
 from app.telephony.metrics import CallMetrics, MetricsWriter
@@ -204,7 +205,10 @@ async def media_stream(websocket: WebSocket):
     if metrics is not None:
         metrics.bind()
 
-    bridge=AudioBridge(session,_result_service,metrics=metrics); adapter=TwilioAdapter(bridge,metrics=metrics,media_dump=dump); adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
+    # A cache hit removes the provider round-trip from the start of the call
+    # entirely; a miss silently falls back to Deepgram synthesising it.
+    greeting = cached_greeting_audio()
+    bridge=AudioBridge(session,_result_service,metrics=metrics,greeting_already_played=bool(greeting)); adapter=TwilioAdapter(bridge,metrics=metrics,media_dump=dump); adapter.pending_greeting=greeting; adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
     close_reason = "completed"
     try:
         await adapter.start()

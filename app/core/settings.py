@@ -73,6 +73,12 @@ DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
     "Hello Sir, मैं Shruti बोल रही हूँ Amazon Business Team से,"
 )
+# Where pre-rendered greeting audio lives. The greeting is the one utterance
+# known before the call connects, so synthesising it after pickup puts ~2s of
+# avoidable dead air at the start of every call. Rendered once by
+# scripts/prerender_greeting.py; a cache miss falls back to the provider
+# synthesising it as before, so this is safe to leave unpopulated.
+GREETING_CACHE_DIR = Path(os.getenv("CALL_AGENT_GREETING_CACHE_DIR", DATA_DIR / "greetings"))
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # Eager end-of-turn starts the LLM before the user's turn is final. It can
 # reduce latency, but it also makes short pauses sound like interruptions.

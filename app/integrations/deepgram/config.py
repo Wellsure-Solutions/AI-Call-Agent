@@ -11,9 +11,11 @@ from deepgram.agent.v1.types import (
 from app.core.prompts import PROMPT
 from app.integrations.audio_profiles import get_audio_profile
 from app.services.call_control import END_CALL_FUNCTION, END_CALL_FUNCTION_SCHEMA
+from app.telephony.audio.greeting_cache import greeting_fingerprint, load_greeting
 
 from app.core.settings import (
     DEEPGRAM_API_KEY,
+    GREETING_CACHE_DIR,
     DEEPGRAM_GREETING,
     DEEPGRAM_LISTEN_MODEL,
     DEEPGRAM_SPEAK_LANGUAGE,
@@ -54,6 +56,27 @@ def _speak_provider_settings() -> dict[str, object]:
     return provider
 
 
+def greeting_fingerprint_for_current_config() -> str:
+    return greeting_fingerprint(
+        DEEPGRAM_GREETING, DEEPGRAM_SPEAK_PROVIDER, DEEPGRAM_SPEAK_MODEL_ID,
+        DEEPGRAM_SPEAK_VOICE_ID, DEEPGRAM_SPEAK_LANGUAGE,
+    )
+
+
+def cached_greeting_audio() -> bytes | None:
+    """Pre-rendered greeting for the current voice/text, if one exists."""
+    return load_greeting(GREETING_CACHE_DIR, greeting_fingerprint_for_current_config())
+
+
+_ALREADY_GREETED_NOTE = (
+    "\n\n### ALREADY SPOKEN\n"
+    "You have ALREADY said this out loud, and the customer has heard it:\n"
+    "\"{greeting}\"\n"
+    "Do not greet again, do not repeat your name, and do not re-introduce "
+    "yourself. Continue the conversation from that point.\n"
+)
+
+
 def _lead_context_prompt(context: dict | None = None) -> str:
     if not context:
         return PROMPT
@@ -84,9 +107,18 @@ def _lead_context_prompt(context: dict | None = None) -> str:
 def get_agent_settings(
     context: dict | None = None,
     transport: str = "browser",
+    greeting_already_played: bool = False,
 ) -> AgentV1Settings:
-    """Return campaign and adapter-specific Deepgram Agent settings."""
+    """Return campaign and adapter-specific Deepgram Agent settings.
+
+    `greeting_already_played` is set when the adapter is playing cached
+    greeting audio itself. The provider greeting is then suppressed -- both
+    would otherwise be spoken -- and the prompt is told what the customer has
+    already heard, so the model continues instead of introducing itself twice.
+    """
     prompt = _lead_context_prompt(context)
+    if greeting_already_played:
+        prompt += _ALREADY_GREETED_NOTE.format(greeting=DEEPGRAM_GREETING)
     audio_profile = get_audio_profile(transport)
     return AgentV1Settings(
         audio=AgentV1SettingsAudio(
@@ -119,6 +151,6 @@ def get_agent_settings(
                 "functions": [END_CALL_FUNCTION_SCHEMA],
             },
             speak={"provider": _speak_provider_settings()},
-            greeting=DEEPGRAM_GREETING,
+            greeting=None if greeting_already_played else DEEPGRAM_GREETING,
         ),
     )

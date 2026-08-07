@@ -34,6 +34,7 @@ class AudioBridge:
         result_service: CallResultService | None = None,
         hard_interrupt: bool = True,
         metrics: CallMetrics | None = None,
+        greeting_already_played: bool = False,
     ) -> None:
         self.session = session
         self.result_service = result_service
@@ -48,6 +49,7 @@ class AudioBridge:
             on_finished=self._mark_finished,
             on_interrupted=self._handle_interruption,
             metrics=metrics,
+            greeting_already_played=greeting_already_played,
         )
 
     async def start(self) -> None:

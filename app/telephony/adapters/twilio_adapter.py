@@ -80,6 +80,9 @@ class TwilioAdapter(BaseTelephonyAdapter):
         # playback, pacing, or barge-in decision anywhere in this class.
         self.metrics = metrics
         self.media_dump = media_dump
+        # Pre-rendered greeting bytes, played the instant the stream binds so
+        # the customer is not listening to silence while Deepgram connects.
+        self.pending_greeting: bytes | None = None
         self.from_number = TWILIO_FROM_NUMBER
         self.public_base_url = PUBLIC_BASE_URL
 
@@ -356,6 +359,11 @@ class TwilioAdapter(BaseTelephonyAdapter):
     async def _send_to_twilio(self) -> None:
         assert self.audio_bridge is not None
         self._paced_sender = PacedSender(self.send_audio, on_frame_sent=self._on_frame_sent)
+        if self.pending_greeting:
+            # Queued before the sender task even starts, so the first frame
+            # goes out on the next tick rather than after a websocket
+            # handshake, a settings round-trip, and speech synthesis.
+            self._paced_sender.feed(self.pending_greeting)
         sender_task = asyncio.create_task(self._paced_sender.run())
         try:
             while True:

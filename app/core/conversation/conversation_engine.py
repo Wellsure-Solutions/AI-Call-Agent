@@ -70,9 +70,11 @@ class ConversationEngine:
         on_finished: FinishedCallback,
         on_interrupted: InterruptedCallback | None = None,
         metrics: CallMetrics | None = None,
+        greeting_already_played: bool = False,
     ) -> None:
         self.session = session
         self.metrics = metrics
+        self.greeting_already_played = greeting_already_played
         self.on_audio = on_audio
         self.on_text = on_text
         self.on_finished = on_finished
@@ -101,6 +103,7 @@ class ConversationEngine:
             get_agent_settings(
                 self.session.metadata,
                 transport=self.session.direction,
+                greeting_already_played=self.greeting_already_played,
             )
         )
         self.session.safe_transition_to(CallState.AI_ACTIVE)
