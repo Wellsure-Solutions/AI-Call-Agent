@@ -37,6 +37,8 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `CALL_AGENT_EXTRACTION_TIMEOUT_SECONDS` | No | OpenAI SDK network/request timeout | `30` | No |
 | `CALL_AGENT_EXTRACTION_MAX_ATTEMPTS` | No | Durable attempt ceiling | `3` | No |
 | `CALL_AGENT_EXTRACTION_RETRY_DELAY_SECONDS` | No | Exponential-backoff base | `5` | No |
+| `CALL_AGENT_RECONCILIATION_MAX_ATTEMPTS` | No | Failed provider lookups before a call is quarantined and its slot freed | `8` | No |
+| `CALL_AGENT_ABANDONED_JOB_GRACE_SECONDS` | No | Grace past the maximum-call deadline before the sweeper quarantines a slot-holding call | `300` | No |
 | `TWILIO_ACCOUNT_SID` | Yes for phone calls | Twilio account | `AC...`; no default | Yes |
 | `TWILIO_AUTH_TOKEN` | Yes for phone calls | SDK auth and webhook validation | secret token; no default | Yes |
 | `TWILIO_FROM_NUMBER` | Yes for phone calls | Verified/capable caller number | E.164 test/example number; no default | No |
@@ -250,7 +252,14 @@ python scripts/prerender_greeting.py --check  # is the cache current? (exit 1 if
 - **Accent shifts mid-sentence:** `DEEPGRAM_SPEAK_LANGUAGE` is unset or wrong. Code-mixed Devanagari/Roman text makes the voice re-infer language per phrase unless it is pinned.
 - **Media closes with policy violation:** verify stream secret, clock synchronization, CallSid binding, and TwiML custom parameters.
 - **Calls remain reconciliation:** inspect `/api/operations`; verify Twilio credentials/network and provider state. Unknown-SID ambiguous dials require manual provider-log review.
-- **Queue does not advance:** inspect active/canceling jobs and provider terminal confirmation; capacity is intentionally not released on a timer alone.
+- **Queue does not advance / calls stuck in QUEUED:** `GET /api/operations` now reports `capacity`, including `capacity_occupied` and the oldest calls holding a slot. Something in that list is not finishing. Two safety nets clear it automatically — reconciliation gives up after `CALL_AGENT_RECONCILIATION_MAX_ATTEMPTS` failed provider lookups, and a sweep quarantines any call past its maximum-call deadline plus `CALL_AGENT_ABANDONED_JOB_GRACE_SECONDS`. Both move the call to `needs_reconciliation`: capacity is freed, but no outcome is invented, the phone stays blocked, and it is never redialed. To finish one off after checking the provider console:
+
+  ```bash
+  curl -u user:pass -X POST https://host/api/calls/<call_id>/resolve \
+       -H 'Content-Type: application/json' -d '{"status":"failed","note":"no record in Twilio"}'
+  ```
+
+  Capacity is still never released by a timer alone: automatic release requires repeated recorded failures to obtain proof, and the override requires a human.
 - **Extraction retries:** verify OpenAI key/model/quota. Raw transcripts remain durable. Permanent connected failures place leads in review.
 - **Database locked:** ensure all workers use the same supported local filesystem, directory permissions are correct, and transactions are not held by external tools.
 

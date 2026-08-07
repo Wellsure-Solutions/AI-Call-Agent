@@ -13,7 +13,7 @@ from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
-from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS
+from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
 from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
@@ -33,6 +33,8 @@ coordinator = DurableCallCoordinator(
     extraction_timeout=EXTRACTION_TIMEOUT_SECONDS,
     extraction_retry_delay=EXTRACTION_RETRY_DELAY_SECONDS,
     extractor=answer_extractor,
+    reconciliation_max_attempts=RECONCILIATION_MAX_ATTEMPTS,
+    abandoned_grace_seconds=ABANDONED_JOB_GRACE_SECONDS,
 )
 
 @asynccontextmanager
@@ -235,7 +237,31 @@ async def operations():
         # almost always a PUBLIC_BASE_URL that does not match the URL Twilio
         # signed. Nothing else in the system reports that condition.
         "twilio_signature_failures": signature_failure_health(),
+        # What is currently occupying the queue. When calls sit in QUEUED and
+        # nothing starts, this is the answer: something in capacity_occupied
+        # is not finishing.
+        "capacity": await asyncio.to_thread(answer_store.capacity_snapshot),
     }
+
+
+@app.post("/api/calls/{call_id}/resolve")
+async def resolve_call(call_id: str, payload: dict | None = None):
+    """Force a stuck call terminal after checking the provider console.
+
+    The queue deliberately refuses to guess a call's outcome from elapsed
+    time. This is the escape hatch for when a human has established what
+    actually happened and the provider will never tell us.
+    """
+    body = payload or {}
+    status = str(body.get("status") or "failed").lower()
+    try:
+        call = await asyncio.to_thread(answer_store.resolve_stuck_call, call_id, status, str(body.get("note") or "operator_resolved"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if call is None:
+        raise HTTPException(status_code=404, detail="Call not found")
+    logger.warning("call_resolved_by_operator", extra={"call_id": call_id, "status": status})
+    return {"resolved": True, "call_id": call_id, "provider_status": call.get("provider_status")}
 
 
 @app.get("/api/leads/template")

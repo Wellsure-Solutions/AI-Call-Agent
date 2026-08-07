@@ -40,6 +40,15 @@ MAX_CALL_SECONDS = max(1, int(os.getenv("CALL_AGENT_MAX_CALL_SECONDS", "900")))
 EXTRACTION_TIMEOUT_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_EXTRACTION_TIMEOUT_SECONDS", "30")))
 EXTRACTION_MAX_ATTEMPTS = max(1, int(os.getenv("CALL_AGENT_EXTRACTION_MAX_ATTEMPTS", "3")))
 EXTRACTION_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_EXTRACTION_RETRY_DELAY_SECONDS", "5")))
+# How many failed provider lookups before a call is quarantined instead of
+# retried forever. Without a bound, one call the provider cannot resolve --
+# network down, tunnel dead, credentials rotated -- occupies a capacity slot
+# indefinitely, which at the default ceiling of one concurrent call stalls the
+# entire queue. Quarantine neither invents a terminal status nor redials.
+RECONCILIATION_MAX_ATTEMPTS = max(1, int(os.getenv("CALL_AGENT_RECONCILIATION_MAX_ATTEMPTS", "8")))
+# Extra grace beyond a call's own maximum-call deadline before the sweeper
+# treats it as abandoned. Only reached by calls no deadline action can see.
+ABANDONED_JOB_GRACE_SECONDS = max(30.0, float(os.getenv("CALL_AGENT_ABANDONED_JOB_GRACE_SECONDS", "300")))
 
 
 DEEPGRAM_LISTEN_MODEL = os.getenv("DEEPGRAM_LISTEN_MODEL", "flux-general-multi")

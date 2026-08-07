@@ -493,7 +493,28 @@ class SQLiteCallStore(JsonCallStore):
             db.execute("UPDATE call_jobs SET queue_state='canceling',updated_at=? WHERE call_id=?", (now, row["call_id"]))
             return self._call_from_db(db, row["call_id"])
 
-    def reconciliation_result(self, call_id: str, owner: str, provider_status: str | None, error: str | None = None) -> None:
+    def reconciliation_result(self, call_id: str, owner: str, provider_status: str | None, error: str | None = None,
+                              max_attempts: int = 8) -> None:
+        """Record the outcome of one provider reconciliation attempt.
+
+        A proven terminal status resolves the call normally. Anything else is
+        retried with bounded backoff -- but only up to `max_attempts`, after
+        which the job is quarantined.
+
+        The bound exists because without it a call whose provider cannot be
+        reached at all (network down, tunnel dead, credentials rotated)
+        retries every 300 seconds forever while still occupying a capacity
+        slot. At the default ceiling of one concurrent call that is a total
+        outage of the queue, caused by a single call nobody can resolve.
+
+        Quarantine does not invent a terminal status and does not redial.
+        `needs_reconciliation` is the state this design already uses for an
+        expired dial claim: unresolved, operator-visible, still blocking its
+        phone number, and deliberately outside the capacity count. The
+        invariant that capacity is never released by a *timer alone* holds --
+        release here requires repeated, recorded, failed attempts to obtain
+        proof, which is evidence, not elapsed time.
+        """
         if provider_status:
             self.provider_status(call_id, provider_status)
         now = utcnow()
@@ -505,10 +526,94 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("UPDATE calls SET action_owner=NULL,action_lease_expires_at=NULL,reconciliation_status=NULL,reconciliation_error=NULL WHERE call_id=?", (call_id,))
                 return
             attempts = row["reconciliation_attempts"] + 1
+            reason = (error or "Provider remains nonterminal")[:500]
+            if attempts >= max(1, max_attempts):
+                db.execute("""UPDATE calls SET action_owner=NULL,action_lease_expires_at=NULL,
+                    lifecycle_state=CASE WHEN provider_terminal_at IS NULL THEN 'NEEDS_RECONCILIATION' ELSE lifecycle_state END,
+                    reconciliation_status='stalled',reconciliation_error=?,reconciliation_attempts=?,
+                    next_reconciliation_at=NULL,updated_at=? WHERE call_id=?""", (reason, attempts, now, call_id))
+                db.execute("UPDATE call_jobs SET queue_state='needs_reconciliation',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
+                self._event(db, call_id, "reconciliation_stalled", now, {"attempts": attempts})
+                return
             db.execute("""UPDATE calls SET action_owner=NULL,action_lease_expires_at=NULL,reconciliation_status='retry_pending',
                 reconciliation_error=?,reconciliation_attempts=?,next_reconciliation_at=?,updated_at=? WHERE call_id=?""",
-                ((error or "Provider remains nonterminal")[:500], attempts, future(min(300, 5 * 2 ** min(attempts, 6))), now, call_id))
+                (reason, attempts, future(min(300, 5 * 2 ** min(attempts, 6))), now, call_id))
             db.execute("UPDATE call_jobs SET queue_state='active',updated_at=? WHERE call_id=?", (now, call_id))
+
+    def quarantine_abandoned_jobs(self, grace_seconds: float = 300.0) -> int:
+        """Release capacity held by calls that outlived every deadline.
+
+        The deadline reconciler only picks up calls it can identify: it needs
+        a CallSid and a due deadline. A call that never got either -- a dial
+        whose webhooks never arrived, a coordinator killed between claiming
+        and submitting -- holds its slot with nothing scheduled to ever look
+        at it again.
+
+        `grace_seconds` is added on top of the call's own maximum-call
+        deadline, so this can only fire well after the call could still have
+        been live. Like every other quarantine here it neither terminalizes
+        nor redials; it makes the call an operator's problem instead of the
+        queue's.
+        """
+        now, cutoff = utcnow(), future(-grace_seconds)
+        with self.transaction(immediate=True) as db:
+            # Deliberately keyed on the call's own deadline and nothing else.
+            # An earlier version also required the row to be untouched
+            # recently, which meant a call being actively (and fruitlessly)
+            # retried refreshed `updated_at` on every attempt and was never
+            # swept -- the exact case this exists for.
+            stalled = db.execute("""SELECT c.call_id FROM calls c JOIN call_jobs j USING(call_id)
+                WHERE j.queue_state IN ('claimed','active','canceling')
+                  AND c.provider_terminal_at IS NULL
+                  AND COALESCE(c.max_call_deadline, c.ring_deadline, c.created_at) < ?""", (cutoff,)).fetchall()
+            for row in stalled:
+                db.execute("""UPDATE calls SET lifecycle_state='NEEDS_RECONCILIATION',reconciliation_status='abandoned',
+                    reconciliation_error='No provider resolution within the maximum call window',
+                    next_reconciliation_at=NULL,action_owner=NULL,action_lease_expires_at=NULL,updated_at=?
+                    WHERE call_id=? AND provider_terminal_at IS NULL""", (now, row[0]))
+                db.execute("UPDATE call_jobs SET queue_state='needs_reconciliation',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, row[0]))
+                self._event(db, row[0], "job_abandoned", now)
+            return len(stalled)
+
+    def resolve_stuck_call(self, call_id: str, status: str = "failed", note: str = "operator_resolved") -> dict[str, Any] | None:
+        """Operator override for a call the provider will never resolve.
+
+        Deliberately not automatic and deliberately not a timer. Someone has
+        checked the provider console and is asserting the outcome; that is
+        the proof the durable design requires before a call becomes terminal.
+        The phone stays suppressed from redial by the usual rules, and the
+        override is recorded as an event so the history shows a human decided
+        rather than the system guessing.
+        """
+        if status not in PROVIDER_TERMINAL:
+            raise ValueError(f"status must be one of {sorted(PROVIDER_TERMINAL)}")
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT lifecycle_state,provider_terminal_at FROM calls WHERE call_id=?", (call_id,)).fetchone()
+            if not row:
+                return None
+            if row["provider_terminal_at"]:
+                return self._call_from_db(db, call_id)
+            self._event(db, call_id, "operator_resolved", now, {"status": status, "note": note[:120]})
+        self.provider_status(call_id, status)
+        with self.transaction(immediate=True) as db:
+            db.execute("UPDATE calls SET reconciliation_status=NULL,reconciliation_error=NULL,next_reconciliation_at=NULL,action_owner=NULL,action_lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
+            db.execute("UPDATE call_jobs SET queue_state='terminal',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
+            return self._call_from_db(db, call_id)
+
+    def capacity_snapshot(self) -> dict[str, Any]:
+        """What is currently occupying the queue, and for how long."""
+        with self._connect() as db:
+            states = dict(db.execute("SELECT queue_state,COUNT(*) FROM call_jobs GROUP BY queue_state"))
+            occupied = sum(states.get(state, 0) for state in CAPACITY_STATES)
+            oldest = db.execute("""SELECT c.call_id,c.lifecycle_state,c.provider_status,c.created_at,j.queue_state
+                FROM calls c JOIN call_jobs j USING(call_id)
+                WHERE j.queue_state IN ('claimed','active','canceling') ORDER BY c.created_at LIMIT 5""").fetchall()
+        return {
+            "queue_states": states,
+            "capacity_occupied": occupied,
+            "oldest_occupying": [dict(row) for row in oldest],
+        }
 
     def list_reconciliation(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._rows("SELECT * FROM calls WHERE reconciliation_status IS NOT NULL AND provider_terminal_at IS NULL ORDER BY updated_at LIMIT ?", (min(limit, 100),))
