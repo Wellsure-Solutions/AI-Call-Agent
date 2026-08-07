@@ -103,6 +103,10 @@ class SQLiteCallStore(JsonCallStore):
             "reconciliation_status": "TEXT", "reconciliation_error": "TEXT",
             "reconciliation_attempts": "INTEGER NOT NULL DEFAULT 0", "next_reconciliation_at": "TEXT",
             "action_owner": "TEXT", "action_lease_expires_at": "TEXT",
+            # Twilio's async AMD verdict, kept separate from provider_status
+            # and outcome so a machine pickup stays distinguishable from a
+            # human who hung up early.
+            "answered_by": "TEXT", "answered_by_at": "TEXT",
         }
         existing = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
         for name, declaration in call_columns.items():
@@ -587,6 +591,30 @@ class SQLiteCallStore(JsonCallStore):
         if not row:
             raise KeyError(call_id)
         return self._decode_call(dict(row))
+
+    def record_answered_by(self, call_id: str, answered_by: str, sid: str | None = None) -> dict[str, Any] | None:
+        """Persist Twilio's async AMD verdict for a call.
+
+        Deliberately records the verdict and nothing else. It does not
+        terminalize the call, does not set an outcome, and does not release
+        the job slot: AMD is a provider opinion delivered mid-call, not a
+        proven terminal status, and capacity is only ever freed by one. The
+        caller asks Twilio to complete the call; the resulting `completed`
+        webhook frees the slot through the normal path.
+        """
+        answered_by, now = str(answered_by or "").lower()[:40], utcnow()
+        if not answered_by:
+            return None
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT call_sid,answered_by FROM calls WHERE call_id=?", (call_id,)).fetchone()
+            if not row or (sid and row["call_sid"] not in (None, sid)):
+                return None
+            if row["answered_by"]:
+                # AMD callbacks can be redelivered; the first verdict stands.
+                return self._call_from_db(db, call_id)
+            db.execute("UPDATE calls SET answered_by=?,answered_by_at=?,updated_at=? WHERE call_id=?", (answered_by, now, now, call_id))
+            self._event(db, call_id, "answered_by", now, {"answered_by": answered_by})
+            return self._call_from_db(db, call_id)
 
     def record_events(self, call_id: str, events: list[tuple[str, dict[str, Any]]]) -> int:
         """Bulk-append instrumentation events for one call.

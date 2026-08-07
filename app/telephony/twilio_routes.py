@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from twilio.request_validator import RequestValidator
 
 from app.core.settings import (
+    AMD_TERMINAL_VERDICTS,
     BARGE_IN_VOICE_ENERGY_THRESHOLD,
     MAX_CALL_SECONDS,
     MEDIA_DUMP_DIR,
@@ -137,6 +138,42 @@ async def status_webhook(call_id: str, request: Request):
     sid, status = str(form.get("CallSid") or ""), str(form.get("CallStatus") or "").lower()
     if sid and status: await _repo().aprovider_status(call_id, status, sid)
     return Response(status_code=200)
+
+@router.post("/amd/{call_id}")
+async def amd_webhook(call_id: str, request: Request):
+    """Twilio's asynchronous answering-machine verdict.
+
+    The call is already live and pitching by the time this arrives -- that is
+    the trade for not making every human answer wait on detection. Acting on
+    it here saves the rest of the call: the remaining per-minute charge, the
+    concurrency slot, and a voicemail greeting being fed into extraction as
+    if it were a customer.
+
+    On a machine, Twilio is asked to complete the call. Capacity is *not*
+    released here; the resulting terminal status webhook does that, as it
+    does for every other ending.
+    """
+    form = dict(await request.form())
+    if not await _valid_signature(request, form):
+        _record_signature_failure("amd", call_id)
+        raise HTTPException(403, "Invalid Twilio signature")
+    sid = str(form.get("CallSid") or "")
+    answered_by = str(form.get("AnsweredBy") or "").lower()
+    if not answered_by:
+        return Response(status_code=200)
+
+    call = await asyncio.to_thread(_repo().record_answered_by, call_id, answered_by, sid or None)
+    if call is None:
+        return Response(status_code=200)
+    if answered_by in AMD_TERMINAL_VERDICTS and sid:
+        try:
+            await TwilioAdapter().update_status(sid, "completed")
+        except Exception:
+            # The deadline reconciler still owns this call and will retry;
+            # failing the webhook would only make Twilio redeliver it.
+            logger.warning("amd_hangup_failed", extra={"call_id": call_id, "answered_by": answered_by})
+    return Response(status_code=200)
+
 
 @media_router.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):

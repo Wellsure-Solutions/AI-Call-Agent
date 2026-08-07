@@ -77,6 +77,30 @@ BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "4000"
 AGENT_CLOSE_GRACE_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_CLOSE_GRACE_SECONDS", "10")))
 
 # ---------------------------------------------------------------------------
+# Answering-machine detection
+# ---------------------------------------------------------------------------
+# Voicemail pickups otherwise get the full pitch, the full per-minute charge, a
+# held concurrency slot, and a recorded greeting fed into answer extraction.
+#
+# Asynchronous by necessity: Twilio blocks the call until synchronous
+# detection finishes, and its speech threshold alone defaults to 2400ms --
+# which would blow the 500ms answer-to-greeting target on every human call to
+# pay for the minority that are machines. With AsyncAmd the greeting starts
+# immediately and the verdict arrives on a callback a moment later.
+AMD_ENABLED = os.getenv("CALL_AGENT_AMD_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+# "Enable" classifies at greeting start; "DetectMessageEnd" waits for the beep,
+# which is only worth its extra seconds if you intend to leave a message.
+AMD_MODE = os.getenv("CALL_AGENT_AMD_MODE", "Enable")
+AMD_TIMEOUT_SECONDS = max(3, min(59, int(os.getenv("CALL_AGENT_AMD_TIMEOUT_SECONDS", "20"))))
+AMD_SPEECH_THRESHOLD_MS = max(1000, min(6000, int(os.getenv("CALL_AGENT_AMD_SPEECH_THRESHOLD_MS", "2400"))))
+AMD_SPEECH_END_THRESHOLD_MS = max(500, min(5000, int(os.getenv("CALL_AGENT_AMD_SPEECH_END_THRESHOLD_MS", "1200"))))
+AMD_SILENCE_TIMEOUT_MS = max(2000, min(10000, int(os.getenv("CALL_AGENT_AMD_SILENCE_TIMEOUT_MS", "5000"))))
+# Which AnsweredBy verdicts end the call. "unknown" is deliberately excluded:
+# detection failing is not evidence of a machine, and hanging up on it would
+# drop real customers.
+AMD_TERMINAL_VERDICTS = frozenset({"machine_start", "machine_end_beep", "machine_end_silence", "machine_end_other", "fax"})
+
+# ---------------------------------------------------------------------------
 # Instrumentation. Measurement only -- nothing below changes call behaviour.
 # ---------------------------------------------------------------------------
 # Per-turn latency, barge-in decisions, silence, and cost inputs are written
