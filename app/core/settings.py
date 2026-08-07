@@ -130,6 +130,12 @@ BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "2500"
 # finish before hanging up regardless. Long enough for a goodbye, far short of
 # the 900s maximum-call deadline that was previously the only way out.
 AGENT_CLOSE_GRACE_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_CLOSE_GRACE_SECONDS", "10")))
+# How long to wait for audio already handed to Twilio to finish playing before
+# hanging up. Pacing keeps several seconds in flight by design, and the
+# provider's "audio done" signal only means it stopped sending -- so without
+# this the closing line is cut off mid-word. Bounded because a customer who
+# already hung up will never acknowledge the remaining audio.
+AGENT_PLAYBACK_DRAIN_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_DRAIN_SECONDS", "8")))
 
 # ---------------------------------------------------------------------------
 # Answering-machine detection

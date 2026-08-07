@@ -13,6 +13,7 @@ from app.telephony.audio.greeting_cache import (
     save_greeting,
 )
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
+from app.telephony.audio.paced_sender import PacedSender
 
 
 def agent(settings_object) -> dict:
@@ -154,3 +155,53 @@ def test_no_greeting_configured_changes_nothing():
         return len(adapter.websocket.sent)
 
     assert asyncio.run(scenario()) == 0
+
+
+# ---------------------------------------------------------------------------
+# Letting the closing line finish
+# ---------------------------------------------------------------------------
+def test_hangup_waits_for_audio_already_handed_to_twilio():
+    """The reported bug: calls ended before the closing line finished.
+
+    The close signal is AgentAudioDone, which means the provider stopped
+    *sending*. Pacing keeps several seconds in flight after that, so hanging
+    up on the signal cut the goodbye off mid-word.
+    """
+    adapter = TwilioAdapter(audio_bridge=object(), client=object())
+    adapter.websocket = FakeWebSocket()
+    adapter.stream_sid = "MZ"
+    adapter._paced_sender = PacedSender(lambda _f: None)
+    adapter._paced_sender.feed(b"\xff" * 4000)  # half a second still queued
+
+    async def scenario() -> float:
+        started = asyncio.get_running_loop().time()
+        drain = asyncio.create_task(adapter._drain_playback(timeout=2.0))
+        await asyncio.sleep(0.2)
+        assert not drain.done(), "must still be waiting while audio is queued"
+        adapter._paced_sender.discard()
+        adapter._pending_marks.clear()
+        await drain
+        return asyncio.get_running_loop().time() - started
+
+    assert asyncio.run(scenario()) >= 0.2
+
+
+def test_hangup_is_not_delayed_when_nothing_is_playing():
+    adapter = TwilioAdapter(audio_bridge=object(), client=object())
+    adapter._paced_sender = PacedSender(lambda _f: None)
+    assert adapter.audio_currently_playing is False
+    asyncio.run(adapter._drain_playback(timeout=5.0))
+
+
+def test_the_drain_is_bounded_when_the_customer_already_hung_up():
+    """No mark ever comes back from a dead line, so an unbounded wait would
+    hold the call and its concurrency slot open indefinitely."""
+    adapter = TwilioAdapter(audio_bridge=object(), client=object())
+    adapter._paced_sender = PacedSender(lambda _f: None)
+    adapter._pending_marks.add("m1")  # never acknowledged
+
+    async def scenario() -> None:
+        await adapter._drain_playback(timeout=0.3)
+
+    asyncio.run(scenario())
+    assert adapter.audio_currently_playing is True, "still unplayed, but we stopped waiting"

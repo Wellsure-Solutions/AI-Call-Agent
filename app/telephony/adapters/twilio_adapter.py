@@ -12,6 +12,7 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.core.settings import (
+    AGENT_PLAYBACK_DRAIN_SECONDS,
     AMD_ENABLED,
     AMD_MODE,
     AMD_SILENCE_TIMEOUT_MS,
@@ -177,6 +178,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
     async def hangup(self) -> None:
         self.closing_requested = True
+        await self._drain_playback()
         await self._complete_twilio_call()
         if self.websocket is not None:
             try:
@@ -386,6 +388,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
                     await self.clear_playback()
                 elif message_type == "control" and isinstance(data, str):
                     self.closing_requested = True
+                    # Let the goodbye actually finish. The close signal comes
+                    # from AgentAudioDone, which means Deepgram stopped
+                    # *sending* audio -- not that Twilio finished *playing*
+                    # it. Pacing deliberately keeps several seconds in flight,
+                    # so hanging up here cut the closing line off mid-word on
+                    # every call that ended cleanly.
+                    await self._drain_playback()
                     await self._complete_twilio_call()
                     if self.websocket is not None:
                         try:
@@ -526,6 +535,29 @@ class TwilioAdapter(BaseTelephonyAdapter):
             self._end_soft_pause()
             self._paced_sender.resume()
 
+
+    async def _drain_playback(self, timeout: float = AGENT_PLAYBACK_DRAIN_SECONDS) -> None:
+        """Wait until the customer has actually heard everything queued.
+
+        `audio_currently_playing` is the honest signal: it is true while the
+        paced sender still holds frames *and* while Twilio has unacknowledged
+        marks, which are echoed back only once the audio preceding them has
+        played. Polling it is the only way to distinguish "we finished
+        generating" from "they finished hearing".
+
+        Bounded, because neither condition is guaranteed to clear: if the
+        customer already hung up, no mark ever comes back and no frame is
+        ever accepted. Waiting forever would hold the line open and the
+        concurrency slot with it, so the timeout wins and the call ends.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while self.audio_currently_playing and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        if self.audio_currently_playing:
+            logger.info(
+                "playback_drain_timed_out",
+                extra={"call_id": self.session.call_id if self.session else "unknown", "timeout": timeout},
+            )
 
     async def _complete_twilio_call(self) -> None:
         if not self.call_sid:
