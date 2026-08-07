@@ -53,6 +53,14 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `CALL_AGENT_AMD_ENABLED` | No | Answering-machine detection (adds Twilio's per-call AMD charge) | `1`; set `0` to disable | No |
 | `CALL_AGENT_AMD_MODE` | No | `Enable` or `DetectMessageEnd` | `Enable` | No |
 | `CALL_AGENT_AMD_*_MS` / `_SECONDS` | No | Twilio detection tuning | Twilio defaults | No |
+| `DEEPGRAM_SPEAK_MODEL_ID` | No | TTS model | `eleven_flash_v2_5` | No |
+| `DEEPGRAM_SPEAK_LANGUAGE` | No | Pins TTS language so code-mixed text doesn't shift accent; empty = auto-detect | `hi` | No |
+| `CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD` | No | Minimum clamp for the adaptive voice threshold | `250` | No |
+| `CALL_AGENT_BARGE_IN_NOISE_MULTIPLIER` | No | How far above the measured noise floor speech must sit | `6` | No |
+| `CALL_AGENT_BARGE_IN_HANGOVER_FRAMES` | No | Silent 20ms frames before a voiced run ends | `10` (200ms) | No |
+| `CALL_AGENT_BARGE_IN_CONFIRM_MS` | No | Sustained voice that confirms an interruption | `600` | No |
+| `CALL_AGENT_BARGE_IN_ECHO_MARGIN` | No | How far inbound must exceed played agent audio to count as the customer | `0.55` | No |
+| `CALL_AGENT_BARGE_IN_MAX_PAUSE_MS` | No | Ambiguous-pause safety net | `2500` | No |
 
 Generate secrets without putting them in shell history:
 
@@ -204,12 +212,30 @@ python scripts/ulaw_to_wav.py "$CALL_AGENT_MEDIA_DUMP_DIR/<call_id>"   # stereo:
 
 This writes both sides of real customer conversations to disk. Treat the directory as call recordings: restricted permissions, deliberate retention, deleted when the measurement is done, and never left enabled in steady-state production.
 
+## 12b. Turn-taking and audio tuning
+
+These defaults were derived by replaying a real recorded call and by benchmarking the live Deepgram agent, not chosen by feel. Re-derive them the same way rather than adjusting by ear.
+
+**Barge-in.** The voice threshold is not fixed: it is `noise_floor x CALL_AGENT_BARGE_IN_NOISE_MULTIPLIER`, clamped between the configured minimum and 4000. The floor is measured over the first 500ms of the stream and then tracked continuously, but only while the agent is silent — inbound audio during agent speech is largely the agent's own echo.
+
+Two settings decide whether a customer is heard:
+
+- `CALL_AGENT_BARGE_IN_HANGOVER_FRAMES` — how long a gap may be before a voiced run is considered over. Too short and ordinary syllable gaps split one utterance into fragments that never reach the confirm threshold, so genuine interruptions are ignored entirely. This is what 3 frames (60ms) did.
+- `CALL_AGENT_BARGE_IN_CONFIRM_MS` — how much sustained voice confirms a real interruption. On real call audio, run lengths are bimodal: backchannels ("haan", "acha") at or under 400ms, real turns at or over 600ms. Keep this in that gap. Raising it makes the agent harder to interrupt; lowering it makes it stop for acknowledgements.
+
+`metrics_barge_in` events record the decision, the RMS, the live threshold, the sustained voiced duration, and whether agent audio was playing — enough to re-tune from a real batch instead of guessing.
+
+**Latency.** `scripts/call_metrics.py` reports the split. If `eot_to_first_audio_ms` regresses, check which stage moved: `tts_ttfb_ms` is the TTS model, `llm_first_token_ms` is the think model and prompt length, and `provider_signal_to_first_audio_ms` is our own transport and pacing.
+
 ## 13. Troubleshooting
 
 - **401 dashboard/API:** set both admin variables and send Basic credentials.
 - **403 Twilio callback:** verify auth token and exact public URL/proxy path. `GET /health` and `/api/operations` now report `twilio_signature_failures`; a nonzero total across all three endpoints means `PUBLIC_BASE_URL` does not match the URL Twilio signed, and **no call will produce media** until it is corrected.
 - **Calls never end on their own:** confirm the agent registered `end_call` — `/api/calls/{id}` events include `agent_requested_end_call` in the logs and `metrics_call.media_end_reason`. A silent agent with no audio at all is usually a rejected Deepgram setting; check `metrics_provider_error` events for the cause.
 - **Voicemail reached:** `calls.answered_by` records Twilio's verdict. `unknown` is not treated as a machine by design.
+- **Agent talks over the customer / ignores interruptions:** inspect `metrics_barge_in` events. Many `resume` decisions with high `voiced_ms` means `CALL_AGENT_BARGE_IN_CONFIRM_MS` is too high; many `commit` decisions with `agent_playing: true` and low `rms` relative to `threshold` means echo is leaking past `CALL_AGENT_BARGE_IN_ECHO_MARGIN`.
+- **Agent interrupts itself:** speakerphone echo. Lower `CALL_AGENT_BARGE_IN_ECHO_MARGIN` toward 0 to filter more aggressively, at the cost of missing quiet customers.
+- **Accent shifts mid-sentence:** `DEEPGRAM_SPEAK_LANGUAGE` is unset or wrong. Code-mixed Devanagari/Roman text makes the voice re-infer language per phrase unless it is pinned.
 - **Media closes with policy violation:** verify stream secret, clock synchronization, CallSid binding, and TwiML custom parameters.
 - **Calls remain reconciliation:** inspect `/api/operations`; verify Twilio credentials/network and provider state. Unknown-SID ambiguous dials require manual provider-log review.
 - **Queue does not advance:** inspect active/canceling jobs and provider terminal confirmation; capacity is intentionally not released on a timer alone.
