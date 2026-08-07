@@ -12,13 +12,26 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from twilio.request_validator import RequestValidator
 
-from app.core.settings import MAX_CALL_SECONDS, PUBLIC_BASE_URL, RING_TIMEOUT_SECONDS, STREAM_SECRET, TWILIO_AUTH_TOKEN
+from app.core.settings import (
+    BARGE_IN_VOICE_ENERGY_THRESHOLD,
+    MAX_CALL_SECONDS,
+    MEDIA_DUMP_DIR,
+    METRICS_ENABLED,
+    METRICS_FLUSH_SECONDS,
+    METRICS_SILENCE_GAP_MS,
+    PUBLIC_BASE_URL,
+    RING_TIMEOUT_SECONDS,
+    STREAM_SECRET,
+    TWILIO_AUTH_TOKEN,
+)
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
+from app.telephony.audio.media_dump import MediaDump
 from app.telephony.call_session import CallSession
+from app.telephony.metrics import CallMetrics, MetricsWriter
 
 router = APIRouter(prefix="/twilio", tags=["twilio"])
 media_router = APIRouter(tags=["twilio-media"])
@@ -104,7 +117,39 @@ async def media_stream(websocket: WebSocket):
     session=CallSession(call_id=call_id,campaign_name="twilio_outbound",phone_number=call["phone_number"],direction="twilio",metadata={"lead_id":call.get("lead_id"),"business_name":call.get("business_name"),"category":call.get("category"),"notes":call.get("notes"),"phone_number":call.get("phone_number"),"call_sid":sid,"media_connected":True})
     session.safe_transition_to(__import__('app.telephony.state_machine',fromlist=['CallState']).CallState.CONNECTING)
     session.safe_transition_to(__import__('app.telephony.state_machine',fromlist=['CallState']).CallState.CONNECTED)
-    bridge=AudioBridge(session,_result_service); adapter=TwilioAdapter(bridge); adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
-    try: await adapter.start()
+
+    # Instrumentation is built before the bridge so the clock is anchored at
+    # the earliest instant this process controls, and torn down last so the
+    # final flush still happens on an errored or hung-up call.
+    metrics, writer = _build_metrics(call_id)
+    dump = MediaDump.create(MEDIA_DUMP_DIR, call_id)
+    if metrics is not None:
+        metrics.bind()
+
+    bridge=AudioBridge(session,_result_service,metrics=metrics); adapter=TwilioAdapter(bridge,metrics=metrics,media_dump=dump); adapter.attach(session); adapter.call_sid=sid; adapter.stream_sid=start.get("streamSid"); adapter.websocket=websocket
+    close_reason = "completed"
+    try:
+        await adapter.start()
+    except Exception:
+        close_reason = "error"
+        raise
     finally:
         if session.ended_at is None: await bridge.stop("completed")
+        if dump is not None: dump.close()
+        if metrics is not None and writer is not None:
+            writer.sink(metrics.finish(close_reason))
+            await writer.stop()
+
+
+def _build_metrics(call_id: str) -> tuple[CallMetrics | None, MetricsWriter | None]:
+    if not METRICS_ENABLED:
+        return None, None
+    writer = MetricsWriter(_repo(), call_id, flush_interval=METRICS_FLUSH_SECONDS)
+    writer.start()
+    metrics = CallMetrics(
+        call_id,
+        writer.sink,
+        voice_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD,
+        silence_gap_ms=METRICS_SILENCE_GAP_MS,
+    )
+    return metrics, writer

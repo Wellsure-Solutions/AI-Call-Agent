@@ -5,6 +5,7 @@ import asyncio
 from app.core.conversation.conversation_engine import ConversationEngine
 from app.services.call_service import CallResultService
 from app.telephony.call_session import CallSession
+from app.telephony.metrics import CallMetrics
 from app.telephony.state_machine import CallState
 
 
@@ -32,6 +33,7 @@ class AudioBridge:
         session: CallSession,
         result_service: CallResultService | None = None,
         hard_interrupt: bool = True,
+        metrics: CallMetrics | None = None,
     ) -> None:
         self.session = session
         self.result_service = result_service
@@ -45,6 +47,7 @@ class AudioBridge:
             on_text=self._queue_text,
             on_finished=self._mark_finished,
             on_interrupted=self._handle_interruption,
+            metrics=metrics,
         )
 
     async def start(self) -> None:

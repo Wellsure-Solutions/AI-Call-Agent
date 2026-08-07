@@ -45,6 +45,10 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `OPENAI_API_KEY` | Required only when extraction runs | Post-call extraction | provider key; absence never blocks raw persistence | Yes |
 | `OPENAI_MODEL` | No | Extraction model | `gpt-4.1-mini` | No |
 | `DEEPGRAM_*` | No | Listen/think/speak/greeting tuning | defaults in `app/core/settings.py` | API key only |
+| `CALL_AGENT_METRICS_ENABLED` | No | Per-turn latency/barge-in/cost instrumentation | `1`; set `0` to disable | No |
+| `CALL_AGENT_METRICS_SILENCE_GAP_MS` | No | Gap counted as dead air | `1500` | No |
+| `CALL_AGENT_METRICS_FLUSH_SECONDS` | No | Metric batch flush interval | `5` | No |
+| `CALL_AGENT_MEDIA_DUMP_DIR` | No | Raw mu-law capture directory — **records customer calls** | unset (disabled) | Contains call audio |
 
 Generate secrets without putting them in shell history:
 
@@ -161,6 +165,39 @@ Monitor:
 - SQLite disk/WAL growth and filesystem capacity.
 
 Avoid logging transcripts, notes, full credentials, provider keys, or media tokens.
+
+## 12a. Call quality instrumentation
+
+Every media call writes numeric measurements into `call_events` under `metrics_*` event names. Payloads contain numbers, short enum-like strings, and timestamps only — never transcript text, phone numbers, credentials, or media tokens.
+
+| Event | Records |
+|---|---|
+| `metrics_bound` | Media stream bound; anchors the call clock |
+| `metrics_greeting` | Stream bind → first agent audio byte handed to Twilio |
+| `metrics_turn` | Caller's last voiced frame (EOT) → first agent audio byte; and the share of that spent in our own transport/pacing |
+| `metrics_provider_latency` | Deepgram's per-turn `LatencyReport`: STT, LLM first token, TTS time-to-first-byte, provider end-to-end |
+| `metrics_barge_in` / `metrics_barge_in_pause` | Every pause and its outcome (`commit`/`resume`/`timeout`) with the RMS, sustained voiced duration, elapsed ms, and whether agent audio was playing |
+| `metrics_provider_warning` / `metrics_provider_error` | Deepgram warning/error codes — a silent call caused by a rejected model id or speak provider shows up only here |
+| `metrics_call` | Per-call summary: media seconds, billable seconds, TTS characters, turns, dead-air gaps, barge-in tallies |
+| `metrics_acoustics` | RMS histograms split by whether agent audio was playing, plus the caller-over-agent level ratio in dB |
+
+Report percentiles across a batch:
+
+```bash
+python scripts/call_metrics.py --limit 200          # p50/p90/p99 per metric
+python scripts/call_metrics.py --call-id <uuid>     # one call
+python scripts/call_metrics.py --json               # machine-readable
+```
+
+The headline metric is `eot_to_first_audio_ms`. It is measured at the Twilio socket and includes the endpointing hold, so it is larger than Deepgram's `total_latency` by design — it is what the customer hears. Targets: p50 ≤ 800ms, p90 ≤ 1200ms; answer → greeting ≤ 500ms.
+
+To check measurements against what a human actually hears, set `CALL_AGENT_MEDIA_DUMP_DIR` and convert a capture:
+
+```bash
+python scripts/ulaw_to_wav.py "$CALL_AGENT_MEDIA_DUMP_DIR/<call_id>"   # stereo: L=caller, R=agent
+```
+
+This writes both sides of real customer conversations to disk. Treat the directory as call recordings: restricted permissions, deliberate retention, deleted when the measurement is done, and never left enabled in steady-state production.
 
 ## 13. Troubleshooting
 

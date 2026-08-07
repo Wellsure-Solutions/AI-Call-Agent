@@ -65,8 +65,25 @@ DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD")
 # ---------------------------------------------------------------------------
 
-TWILIO_FRAME_MS = 20  
-TWILIO_FRAME_BYTES = 160 
+TWILIO_FRAME_MS = 20
+TWILIO_FRAME_BYTES = 160
 BARGE_IN_VOICE_ENERGY_THRESHOLD = float(os.getenv("CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD", "400"))
 BARGE_IN_CONFIRM_MS = int(os.getenv("CALL_AGENT_BARGE_IN_CONFIRM_MS", "550"))
 BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "4000"))
+
+# ---------------------------------------------------------------------------
+# Instrumentation. Measurement only -- nothing below changes call behaviour.
+# ---------------------------------------------------------------------------
+# Per-turn latency, barge-in decisions, silence, and cost inputs are written
+# to the existing `call_events` table as numeric payloads. On by default:
+# without it there is no way to tell whether a tuning change helped.
+METRICS_ENABLED = os.getenv("CALL_AGENT_METRICS_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+# A conversational gap this long or longer counts as dead air on the line.
+METRICS_SILENCE_GAP_MS = int(os.getenv("CALL_AGENT_METRICS_SILENCE_GAP_MS", "1500"))
+METRICS_FLUSH_SECONDS = float(os.getenv("CALL_AGENT_METRICS_FLUSH_SECONDS", "5"))
+# Raw mu-law capture, for checking measured timings against what a human
+# actually hears. This writes both sides of real customer conversations to
+# disk, so it is off unless a directory is deliberately configured, and it
+# must not be left on in production.
+_MEDIA_DUMP_DIR = os.getenv("CALL_AGENT_MEDIA_DUMP_DIR", "").strip()
+MEDIA_DUMP_DIR = Path(_MEDIA_DUMP_DIR) if _MEDIA_DUMP_DIR else None

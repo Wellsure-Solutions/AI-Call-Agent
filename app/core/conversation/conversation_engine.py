@@ -15,6 +15,7 @@ from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_setting
 from app.services.call_control import is_closing_call_message, is_terminal_assistant_text
 from app.services.transcript_sanitizer import strip_spoken_internal_commands
 from app.telephony.call_session import CallSession
+from app.telephony.metrics import CallMetrics
 from app.telephony.state_machine import CallState
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,10 @@ class ConversationEngine:
         on_text: TextCallback,
         on_finished: FinishedCallback,
         on_interrupted: InterruptedCallback | None = None,
+        metrics: CallMetrics | None = None,
     ) -> None:
         self.session = session
+        self.metrics = metrics
         self.on_audio = on_audio
         self.on_text = on_text
         self.on_finished = on_finished
@@ -93,6 +96,8 @@ class ConversationEngine:
             )
         )
         self.session.safe_transition_to(CallState.AI_ACTIVE)
+        if self.metrics is not None:
+            self.metrics.deepgram_started()
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
         # The call may sit ringing for well over Deepgram's ~10s idle
         # timeout before Twilio answers and real audio starts flowing.
@@ -192,6 +197,22 @@ class ConversationEngine:
                     self._call_threadsafe(self.on_interrupted)
                 return
 
+            if self.metrics is not None:
+                # Provider-side turn boundaries and its own STT/LLM/TTS
+                # split. Recorded verbatim as numbers; the end-to-end figure
+                # the customer experiences is still measured at the Twilio
+                # socket, because these stop at Deepgram's egress.
+                if msg_type == "AgentStartedSpeaking":
+                    self.metrics.agent_turn_started()
+                elif msg_type == "LatencyReport":
+                    self.metrics.latency_report(safe_event_payload(message))
+                elif msg_type in {"Warning", "Error"}:
+                    self.metrics.provider_diagnostic(
+                        msg_type.lower(),
+                        getattr(message, "code", None),
+                        getattr(message, "description", None),
+                    )
+
             if is_closing_call_message(message, content):
                 self.closing_requested = True
                 self.session.safe_transition_to(CallState.AI_FINISHED)
@@ -209,6 +230,13 @@ class ConversationEngine:
                 if not cleaned_content:
                     return
                 self.session.add_turn(role, cleaned_content)
+                if self.metrics is not None:
+                    # Only the length crosses into metrics -- TTS is billed
+                    # per character, and the text itself must never be logged.
+                    if role == "assistant":
+                        self.metrics.assistant_characters(len(cleaned_content))
+                    else:
+                        self.metrics.user_message()
                 if role == "assistant" and is_terminal_assistant_text(cleaned_content):
                     self._close_after_audio_done = True
                 payload = json.dumps({"role": role or "agent", "content": cleaned_content})

@@ -588,6 +588,37 @@ class SQLiteCallStore(JsonCallStore):
             raise KeyError(call_id)
         return self._decode_call(dict(row))
 
+    def record_events(self, call_id: str, events: list[tuple[str, dict[str, Any]]]) -> int:
+        """Bulk-append instrumentation events for one call.
+
+        Written in a single transaction because the metrics writer batches:
+        one commit per flush rather than one per measured turn keeps the
+        instrumentation off the hot path of SQLite's write lock, which the
+        coordinator and the provider webhooks are also contending for.
+
+        A call row may already be gone (operator deletion mid-flush); the
+        foreign key would then reject the batch. Metrics are never worth
+        raising into a live call, so that is swallowed.
+        """
+        if not events:
+            return 0
+        now = utcnow()
+        rows = [(call_id, name, json.dumps(metadata or {}, ensure_ascii=False), now) for name, metadata in events]
+        try:
+            with self.transaction(immediate=True) as db:
+                db.executemany("INSERT INTO call_events(call_id,event_name,metadata,timestamp) VALUES(?,?,?,?)", rows)
+        except sqlite3.Error:
+            return 0
+        return len(rows)
+
+    def list_events(self, call_id: str, prefix: str = "") -> list[dict[str, Any]]:
+        if prefix:
+            return self._rows(
+                "SELECT * FROM call_events WHERE call_id=? AND event_name LIKE ? ORDER BY event_id",
+                (call_id, prefix + "%"),
+            )
+        return self._rows("SELECT * FROM call_events WHERE call_id=? ORDER BY event_id", (call_id,))
+
     def _event(self, db: sqlite3.Connection, call_id: str, name: str, timestamp: str, metadata: dict[str, Any] | None = None) -> None:
         # Exact duplicate callback events within one transaction are harmless; history remains bounded only by durable disk.
         db.execute("INSERT INTO call_events(call_id,event_name,metadata,timestamp) VALUES(?,?,?,?)", (call_id, name, json.dumps(metadata or {}), timestamp))

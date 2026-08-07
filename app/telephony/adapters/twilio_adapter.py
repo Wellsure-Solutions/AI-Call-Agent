@@ -23,9 +23,11 @@ from app.core.settings import (
 from app.integrations.twilio_media import decode_media_payload, encode_media_payload
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
-from app.telephony.audio.local_vad import VoicedDurationTracker
+from app.telephony.audio.local_vad import VoicedDurationTracker, rms_energy
+from app.telephony.audio.media_dump import MediaDump
 from app.telephony.audio.paced_sender import PacedSender
 from app.telephony.call_session import CallSession
+from app.telephony.metrics import CallMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +52,18 @@ class TwilioAdapter(BaseTelephonyAdapter):
     bridges that gap without retaining provider objects in process memory.
     """
 
-    def __init__(self, audio_bridge: AudioBridge | None = None, client=None) -> None:
+    def __init__(
+        self,
+        audio_bridge: AudioBridge | None = None,
+        client=None,
+        metrics: CallMetrics | None = None,
+        media_dump: MediaDump | None = None,
+    ) -> None:
         super().__init__()
+        # Instrumentation only. Both are optional and neither influences a
+        # playback, pacing, or barge-in decision anywhere in this class.
+        self.metrics = metrics
+        self.media_dump = media_dump
         self.from_number = TWILIO_FROM_NUMBER
         self.public_base_url = PUBLIC_BASE_URL
 
@@ -76,6 +88,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         )
         self._pause_started_at: float | None = None
         self._frames_since_pause = 0
+        self._last_caller_rms = 0.0
         self._pending_marks: set[str] = set()
         self._next_mark_id = 0
         self._frames_since_mark = 0
@@ -145,6 +158,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
                 "streamSid": self.stream_sid,
                 "media": {"payload": payload_b64},
             }))
+            # Measured here rather than where the paced sender dequeues, so
+            # "first agent audio byte" means the byte actually left for
+            # Twilio -- pacing delay and socket backpressure included.
+            if self.metrics is not None:
+                self.metrics.observe_outbound(mulaw_frame)
+            if self.media_dump is not None:
+                self.media_dump.write_outbound(mulaw_frame)
             return True
         except (WebSocketDisconnect, RuntimeError) as exc:
             self.closing_requested = True
@@ -166,7 +186,12 @@ class TwilioAdapter(BaseTelephonyAdapter):
             event = msg.get("event")
 
             if event == "media":
-                return decode_media_payload(msg["media"]["payload"])
+                frame = decode_media_payload(msg["media"]["payload"])
+                if self.metrics is not None:
+                    self.metrics.observe_inbound(frame)
+                if self.media_dump is not None:
+                    self.media_dump.write_inbound(frame)
+                return frame
 
             elif event == "stop":
                 return None
@@ -343,11 +368,32 @@ class TwilioAdapter(BaseTelephonyAdapter):
         self._vad_tracker.reset()
         self._pause_started_at = time.monotonic()
         self._frames_since_pause = 0
+        if self.metrics is not None:
+            self.metrics.barge_in_pause(self.audio_currently_playing)
 
     def _end_soft_pause(self) -> None:
         self._pause_started_at = None
         self._frames_since_pause = 0
         self._vad_tracker.reset()
+
+    def _record_barge_in(self, decision: str) -> None:
+        """Log why this pause ended, with the evidence that decided it.
+
+        Every one of these is either a customer whose interruption was
+        honoured or a customer who got talked over -- and from the outside
+        the two are indistinguishable without the RMS, the sustained voiced
+        duration, and whether agent audio was playing at the time.
+        """
+        if self.metrics is None or self._pause_started_at is None:
+            return
+        self.metrics.barge_in_decision(
+            decision,
+            rms=self._last_caller_rms,
+            voiced_ms=self._vad_tracker.voiced_ms,
+            elapsed_ms=(time.monotonic() - self._pause_started_at) * 1000,
+            frames=self._frames_since_pause,
+            agent_playing=self.audio_currently_playing,
+        )
 
     def _process_barge_in_signal(self, caller_frame: bytes) -> None:
         """Called for every caller frame while a soft pause is active, to
@@ -358,9 +404,11 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
         self._frames_since_pause += 1
         self._vad_tracker.observe(caller_frame)
+        self._last_caller_rms = rms_energy(caller_frame)
 
         if self._vad_tracker.voiced_ms >= BARGE_IN_CONFIRM_MS:
             # Sustained voice long enough: this is a genuine interruption.
+            self._record_barge_in("commit")
             self._end_soft_pause()
             self.audio_bridge.commit_interruption()
             return
@@ -376,6 +424,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         ):
             # Backchannel, cough, or noise: resume from exactly where the
             # ticker paused. Nothing was lost.
+            self._record_barge_in("resume")
             self._end_soft_pause()
             self._paced_sender.resume()
             return
@@ -384,6 +433,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         if elapsed_ms >= BARGE_IN_MAX_PAUSE_MS:
             # Safety net: the signal has stayed ambiguous too long. Fail
             # open rather than leave the line silently paused.
+            self._record_barge_in("timeout")
             self._end_soft_pause()
             self._paced_sender.resume()
 

@@ -41,6 +41,13 @@ def _ulaw_byte_to_pcm16(u_byte: int) -> int:
 # frame over the life of a call.
 _MULAW_DECODE_TABLE: tuple[int, ...] = tuple(_ulaw_byte_to_pcm16(i) for i in range(256))
 
+# RMS only ever needs the square, and mu-law has just 256 distinct input
+# bytes, so the multiply is precomputable too. Instrumentation now measures
+# every inbound frame rather than only the frames during a barge-in pause --
+# at 50 frames/sec/call the per-byte Python loop this replaces was the single
+# hottest thing in the audio path.
+_MULAW_SQUARE_TABLE: tuple[int, ...] = tuple(sample * sample for sample in _MULAW_DECODE_TABLE)
+
 
 def decode_mulaw_to_pcm16(mulaw_frame: bytes) -> list[int]:
     """Decode an 8 kHz mu-law frame to linear PCM16 samples."""
@@ -54,11 +61,9 @@ def rms_energy(mulaw_frame: bytes) -> float:
     threshold."""
     if not mulaw_frame:
         return 0.0
-    table = _MULAW_DECODE_TABLE
-    sum_sq = 0
-    for b in mulaw_frame:
-        sample = table[b]
-        sum_sq += sample * sample
+    # Integer arithmetic throughout, so this is bit-for-bit identical to
+    # summing table[b] * table[b] in a Python loop -- just without the loop.
+    sum_sq = sum(map(_MULAW_SQUARE_TABLE.__getitem__, mulaw_frame))
     return (sum_sq / len(mulaw_frame)) ** 0.5
 
 
