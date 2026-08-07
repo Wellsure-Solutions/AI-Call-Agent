@@ -61,6 +61,7 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `CALL_AGENT_BARGE_IN_CONFIRM_MS` | No | Sustained voice that confirms an interruption | `600` | No |
 | `CALL_AGENT_BARGE_IN_ECHO_MARGIN` | No | How far inbound must exceed played agent audio to count as the customer | `0.55` | No |
 | `CALL_AGENT_BARGE_IN_MAX_PAUSE_MS` | No | Ambiguous-pause safety net | `2500` | No |
+| `CALL_AGENT_GREETING_CACHE_DIR` | No | Pre-rendered greeting audio | `<data dir>/greetings` | No |
 
 Generate secrets without putting them in shell history:
 
@@ -225,6 +226,15 @@ Two settings decide whether a customer is heard:
 
 `metrics_barge_in` events record the decision, the RMS, the live threshold, the sustained voiced duration, and whether agent audio was playing — enough to re-tune from a real batch instead of guessing.
 
+**The greeting.** Synthesising it after pickup cost 2.0 seconds of dead air at the start of every measured call — a websocket handshake, a settings round-trip, and speech synthesis, all after the customer said hello. Render it once instead:
+
+```bash
+python scripts/prerender_greeting.py          # render and cache
+python scripts/prerender_greeting.py --check  # is the cache current? (exit 1 if not)
+```
+
+**Re-run this after changing `DEEPGRAM_GREETING`, the voice, the TTS model, or `DEEPGRAM_SPEAK_LANGUAGE`.** The cache key covers all of them, so a stale file is ignored rather than played and the call silently falls back to the slow path. `--check` is suitable for a deploy gate.
+
 **Latency.** `scripts/call_metrics.py` reports the split. If `eot_to_first_audio_ms` regresses, check which stage moved: `tts_ttfb_ms` is the TTS model, `llm_first_token_ms` is the think model and prompt length, and `provider_signal_to_first_audio_ms` is our own transport and pacing.
 
 ## 13. Troubleshooting
@@ -235,6 +245,8 @@ Two settings decide whether a customer is heard:
 - **Voicemail reached:** `calls.answered_by` records Twilio's verdict. `unknown` is not treated as a machine by design.
 - **Agent talks over the customer / ignores interruptions:** inspect `metrics_barge_in` events. Many `resume` decisions with high `voiced_ms` means `CALL_AGENT_BARGE_IN_CONFIRM_MS` is too high; many `commit` decisions with `agent_playing: true` and low `rms` relative to `threshold` means echo is leaking past `CALL_AGENT_BARGE_IN_ECHO_MARGIN`.
 - **Agent interrupts itself:** speakerphone echo. Lower `CALL_AGENT_BARGE_IN_ECHO_MARGIN` toward 0 to filter more aggressively, at the cost of missing quiet customers.
+- **Long silence after the customer picks up:** the greeting cache is missing or stale. Run `python scripts/prerender_greeting.py --check`.
+- **Agent greets twice:** cached greeting audio is playing while the provider greeting is also configured. `get_agent_settings(greeting_already_played=True)` suppresses the provider one; this only happens if that flag is not being threaded through.
 - **Accent shifts mid-sentence:** `DEEPGRAM_SPEAK_LANGUAGE` is unset or wrong. Code-mixed Devanagari/Roman text makes the voice re-infer language per phrase unless it is pinned.
 - **Media closes with policy violation:** verify stream secret, clock synchronization, CallSid binding, and TwiML custom parameters.
 - **Calls remain reconciliation:** inspect `/api/operations`; verify Twilio credentials/network and provider state. Unknown-SID ambiguous dials require manual provider-log review.
