@@ -18,7 +18,7 @@ from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
-from app.telephony.twilio_routes import OutboundCallRequest, configure as configure_twilio, media_router, router as twilio_router, start_outbound_call
+from app.telephony.twilio_routes import OutboundCallRequest, configure as configure_twilio, media_router, router as twilio_router, signature_failure_health, start_outbound_call
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +231,10 @@ async def operations():
     return {
         "coordinator": coordinator.health(),
         "reconciliation": await asyncio.to_thread(answer_store.list_reconciliation, 100),
+        # Any nonzero total here means Twilio callbacks are being rejected --
+        # almost always a PUBLIC_BASE_URL that does not match the URL Twilio
+        # signed. Nothing else in the system reports that condition.
+        "twilio_signature_failures": signature_failure_health(),
     }
 
 
@@ -253,7 +257,12 @@ async def export_calls(fmt: str):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "data_dir": str(DATA_DIR), "coordinator": coordinator.health()}
+    return {
+        "status": "ok",
+        "data_dir": str(DATA_DIR),
+        "coordinator": coordinator.health(),
+        "twilio_signature_failures": signature_failure_health(),
+    }
 
 
 @app.websocket("/ws")

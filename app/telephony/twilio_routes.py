@@ -4,7 +4,10 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import time
+from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket
@@ -33,6 +36,7 @@ from app.telephony.audio.media_dump import MediaDump
 from app.telephony.call_session import CallSession
 from app.telephony.metrics import CallMetrics, MetricsWriter
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/twilio", tags=["twilio"])
 media_router = APIRouter(tags=["twilio-media"])
 TERMINAL_CALL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled"}
@@ -63,6 +67,39 @@ async def _valid_signature(request: Request, form: dict) -> bool:
     signature = request.headers.get("X-Twilio-Signature", "")
     return RequestValidator(TWILIO_AUTH_TOKEN).validate(_external_url(request), form, signature)
 
+
+# A wrong PUBLIC_BASE_URL or auth token rejects *every* Twilio callback, and
+# each rejection is individually indistinguishable from a forged request --
+# so the failure mode is total and completely silent. TwiML never renders, so
+# no call produces media; status callbacks never land, so each job holds its
+# concurrency slot until the maximum-call deadline reconciles it. Counting
+# rejections turns that into something an operator can see.
+_signature_failures: dict[str, Any] = {"total": 0, "by_endpoint": {}, "last_at": None, "last_endpoint": None}
+
+
+def _record_signature_failure(endpoint: str, call_id: str) -> None:
+    _signature_failures["total"] += 1
+    _signature_failures["by_endpoint"][endpoint] = _signature_failures["by_endpoint"].get(endpoint, 0) + 1
+    _signature_failures["last_at"] = datetime.now(timezone.utc).isoformat()
+    _signature_failures["last_endpoint"] = endpoint
+    # Logged at warning with the configured origin, because the overwhelmingly
+    # likely cause is a mismatch between it and the URL Twilio actually
+    # signed. The token itself is never logged.
+    logger.warning(
+        "twilio_signature_rejected",
+        extra={
+            "endpoint": endpoint,
+            "call_id": call_id,
+            "configured_public_base_url": PUBLIC_BASE_URL or "<unset>",
+            "total_rejections": _signature_failures["total"],
+        },
+    )
+
+
+def signature_failure_health() -> dict[str, Any]:
+    """Surfaced on /api/operations and /health so a total outage is visible."""
+    return dict(_signature_failures, by_endpoint=dict(_signature_failures["by_endpoint"]))
+
 def stream_token(call_id: str, sid: str, expiry: int) -> str:
     if not STREAM_SECRET: return ""
     return hmac.new(STREAM_SECRET.encode(), f"{call_id}:{sid}:{expiry}".encode(), hashlib.sha256).hexdigest()
@@ -81,7 +118,9 @@ async def start_outbound_call(request: OutboundCallRequest, idempotency_key: str
 @router.post("/twiml/{call_id}")
 async def twiml_webhook(call_id: str, request: Request):
     form = dict(await request.form())
-    if not await _valid_signature(request, form): raise HTTPException(403, "Invalid Twilio signature")
+    if not await _valid_signature(request, form):
+        _record_signature_failure("twiml", call_id)
+        raise HTTPException(403, "Invalid Twilio signature")
     call = await _repo().aget_call(call_id); sid = str(form.get("CallSid") or "")
     if not call or not sid or not await asyncio.to_thread(_repo().bind_call_sid, call_id, sid, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS): raise HTTPException(409, "Call correlation failed")
     expiry = int(time.time()) + 300
@@ -92,7 +131,9 @@ async def twiml_webhook(call_id: str, request: Request):
 @router.post("/status/{call_id}")
 async def status_webhook(call_id: str, request: Request):
     form = dict(await request.form())
-    if not await _valid_signature(request, form): raise HTTPException(403, "Invalid Twilio signature")
+    if not await _valid_signature(request, form):
+        _record_signature_failure("status", call_id)
+        raise HTTPException(403, "Invalid Twilio signature")
     sid, status = str(form.get("CallSid") or ""), str(form.get("CallStatus") or "").lower()
     if sid and status: await _repo().aprovider_status(call_id, status, sid)
     return Response(status_code=200)
