@@ -321,6 +321,7 @@ class CallMetrics:
         elapsed_ms: float,
         frames: int,
         agent_playing: bool,
+        threshold: float | None = None,
     ) -> None:
         with self._lock:
             if decision == "commit":
@@ -334,7 +335,7 @@ class CallMetrics:
             {
                 "decision": decision,
                 "rms": round(float(rms), 1),
-                "threshold": self._voice_threshold,
+                "threshold": round(float(self._voice_threshold if threshold is None else threshold), 1),
                 "voiced_ms": int(voiced_ms),
                 "elapsed_ms": round(float(elapsed_ms), 1),
                 "frames": int(frames),

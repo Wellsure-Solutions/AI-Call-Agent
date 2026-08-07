@@ -124,58 +124,50 @@ def test_a_brief_backchannel_resumes_playback_and_is_logged_as_such():
     assert adapter._paced_sender.has_buffered_audio
 
 
-def test_speakerphone_echo_currently_reads_as_a_genuine_interruption():
-    """Documents the Phase 2C defect rather than asserting it is fixed.
+def test_energy_and_duration_alone_cannot_reject_echo():
+    """Why the level comparison in the adapter has to exist.
 
-    Echo is the agent's own voice at a lower level. Energy alone cannot
-    reject it, so today it confirms a barge-in and the agent cuts itself off.
-    When adaptive/echo-aware gating lands, this test flips to assert `resume`
-    and becomes the regression guard for it.
+    Fed to the duration tracker with no knowledge of what the agent was
+    playing, speakerphone echo is indistinguishable from a customer: it is
+    loud, it is sustained, and it confirms a barge-in. The rejection cannot
+    come from this stage, which is what `_is_probable_echo` is for --
+    exercised against the adapter in tests/test_barge_in_acoustics.py.
     """
-    class Bridge:
-        def __init__(self) -> None:
-            self.committed = False
+    from app.telephony.audio.local_vad import VoicedDurationTracker
+    from app.core.settings import BARGE_IN_CONFIRM_MS, BARGE_IN_HANGOVER_FRAMES, TWILIO_FRAME_MS
 
-        def commit_interruption(self) -> None:
-            self.committed = True
-
-    bridge = Bridge()
-    metrics = CallMetrics("call-e", voice_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD)
-    metrics.bind()
-    adapter = build_adapter(metrics)
-    adapter.audio_bridge = bridge
-    adapter._paced_sender = PacedSender(adapter.send_audio)
-    adapter._begin_soft_pause()
-
-    for frame in fixtures.speakerphone_echo(ms=BARGE_IN_CONFIRM_MS + 100):
-        adapter._process_barge_in_signal(frame)
-
-    assert bridge.committed is True
-    assert events_by_name(metrics)["metrics_barge_in"][0]["decision"] == "commit"
+    tracker = VoicedDurationTracker(
+        BARGE_IN_VOICE_ENERGY_THRESHOLD, TWILIO_FRAME_MS, hangover_frames=BARGE_IN_HANGOVER_FRAMES
+    )
+    for frame in fixtures.speakerphone_echo(ms=BARGE_IN_CONFIRM_MS + 200):
+        tracker.observe(frame)
+    assert tracker.voiced_ms >= BARGE_IN_CONFIRM_MS
 
 
-def test_a_noisy_line_currently_confirms_a_barge_in_with_nobody_speaking():
-    """The fixed 400 RMS threshold is below a bad PSTN line's noise floor,
-    so silence on a poor connection reads as sustained speech."""
-    class Bridge:
-        def __init__(self) -> None:
-            self.committed = False
+def test_a_noisy_line_stops_confirming_barge_ins_once_the_floor_has_adapted():
+    """The line's own noise used to clear the fixed threshold, so a
+    barge-in confirmed with nobody speaking. The floor is learned from
+    inbound audio during agent silence, so drive it the way the call loop
+    does before judging.
+    """
+    from app.telephony.audio.local_vad import AdaptiveNoiseFloor, VoicedDurationTracker, rms_energy
+    from app.core.settings import (
+        BARGE_IN_CONFIRM_MS, BARGE_IN_HANGOVER_FRAMES, BARGE_IN_NOISE_MULTIPLIER, TWILIO_FRAME_MS,
+    )
 
-        def commit_interruption(self) -> None:
-            self.committed = True
+    floor = AdaptiveNoiseFloor(
+        multiplier=BARGE_IN_NOISE_MULTIPLIER, minimum=BARGE_IN_VOICE_ENERGY_THRESHOLD
+    )
+    for frame in fixtures.noisy_line(20000):
+        floor.observe(rms_energy(frame), False)
 
-    bridge = Bridge()
-    metrics = CallMetrics("call-f", voice_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD)
-    metrics.bind()
-    adapter = build_adapter(metrics)
-    adapter.audio_bridge = bridge
-    adapter._paced_sender = PacedSender(adapter.send_audio)
-    adapter._begin_soft_pause()
-
-    for frame in fixtures.noisy_line(BARGE_IN_CONFIRM_MS + 100):
-        adapter._process_barge_in_signal(frame)
-
-    assert bridge.committed is True
+    tracker = VoicedDurationTracker(
+        BARGE_IN_VOICE_ENERGY_THRESHOLD, TWILIO_FRAME_MS,
+        hangover_frames=BARGE_IN_HANGOVER_FRAMES, threshold_provider=lambda: floor.threshold,
+    )
+    for frame in fixtures.noisy_line(BARGE_IN_CONFIRM_MS + 400):
+        tracker.observe(frame)
+    assert tracker.voiced_ms < BARGE_IN_CONFIRM_MS, "line noise must no longer confirm a barge-in"
 
 
 def test_media_dump_keeps_both_directions_time_aligned(tmp_path):

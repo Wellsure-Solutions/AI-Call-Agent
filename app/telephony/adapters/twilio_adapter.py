@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from contextlib import suppress
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -18,7 +19,10 @@ from app.core.settings import (
     AMD_SPEECH_THRESHOLD_MS,
     AMD_TIMEOUT_SECONDS,
     BARGE_IN_CONFIRM_MS,
+    BARGE_IN_ECHO_MARGIN,
+    BARGE_IN_HANGOVER_FRAMES,
     BARGE_IN_MAX_PAUSE_MS,
+    BARGE_IN_NOISE_MULTIPLIER,
     BARGE_IN_VOICE_ENERGY_THRESHOLD,
     PUBLIC_BASE_URL,
     TWILIO_ACCOUNT_SID,
@@ -29,7 +33,7 @@ from app.core.settings import (
 from app.integrations.twilio_media import decode_media_payload, encode_media_payload
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
-from app.telephony.audio.local_vad import VoicedDurationTracker, rms_energy
+from app.telephony.audio.local_vad import AdaptiveNoiseFloor, VoicedDurationTracker, rms_energy
 from app.telephony.audio.media_dump import MediaDump
 from app.telephony.audio.paced_sender import PacedSender
 from app.telephony.call_session import CallSession
@@ -41,6 +45,12 @@ logger = logging.getLogger(__name__)
 # echoed-back "mark" events give a ground-truth read on whether audio is
 # genuinely still playing -- not just "how much did we hand to the socket".
 _MARK_EVERY_N_FRAMES = 5  # 5 * 20ms = ~100ms
+
+# How far back to look for the agent level an inbound frame might be an echo
+# of. Acoustic echo on a speakerphone arrives delayed by the room and the
+# handset's own buffering, so comparing against only the frame being played
+# right now misses it.
+_ECHO_WINDOW_FRAMES = 20  # 400ms
 
 class TwilioAdapter(BaseTelephonyAdapter):
     """
@@ -88,10 +98,24 @@ class TwilioAdapter(BaseTelephonyAdapter):
         # are exactly why this lives here rather than in the shared
         # AudioBridge. See AudioBridge.hard_interrupt and PacedSender.
         self._paced_sender: PacedSender | None = None
+        # The threshold is derived from the line's measured noise floor
+        # rather than fixed. A single constant cannot be right across Indian
+        # PSTN lines: too low and noise confirms a barge-in with nobody
+        # speaking, too high and a softly-spoken customer is never heard.
+        self._noise_floor = AdaptiveNoiseFloor(
+            multiplier=BARGE_IN_NOISE_MULTIPLIER,
+            minimum=BARGE_IN_VOICE_ENERGY_THRESHOLD,
+        )
         self._vad_tracker = VoicedDurationTracker(
             energy_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD,
             frame_ms=TWILIO_FRAME_MS,
+            hangover_frames=BARGE_IN_HANGOVER_FRAMES,
+            threshold_provider=lambda: self._noise_floor.threshold,
         )
+        # Recent agent output levels, for rejecting the agent's own voice
+        # coming back through a speakerphone. One frame is not enough --
+        # acoustic echo arrives delayed, so this keeps a short window.
+        self._recent_agent_rms: deque[float] = deque(maxlen=_ECHO_WINDOW_FRAMES)
         self._pause_started_at: float | None = None
         self._frames_since_pause = 0
         self._last_caller_rms = 0.0
@@ -181,6 +205,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
             # Measured here rather than where the paced sender dequeues, so
             # "first agent audio byte" means the byte actually left for
             # Twilio -- pacing delay and socket backpressure included.
+            self._recent_agent_rms.append(rms_energy(mulaw_frame))
             if self.metrics is not None:
                 self.metrics.observe_outbound(mulaw_frame)
             if self.media_dump is not None:
@@ -207,6 +232,10 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
             if event == "media":
                 frame = decode_media_payload(msg["media"]["payload"])
+                # The floor must be learned continuously, not only while a
+                # pause is active -- by the time a barge-in candidate opens,
+                # the threshold has to already be right.
+                self._noise_floor.observe(rms_energy(frame), self.audio_currently_playing)
                 if self.metrics is not None:
                     self.metrics.observe_inbound(frame)
                 if self.media_dump is not None:
@@ -396,6 +425,28 @@ class TwilioAdapter(BaseTelephonyAdapter):
         self._frames_since_pause = 0
         self._vad_tracker.reset()
 
+    def _is_probable_echo(self, caller_frame: bytes) -> bool:
+        """True if this inbound frame is most likely our own audio returning.
+
+        Only ever consulted while agent audio is playing, because that is the
+        only time echo can exist. The test is relative, not absolute: echo is
+        an attenuated copy of what we just sent, so a frame that fails to
+        exceed the recent agent level by a margin is treated as echo. A real
+        customer speaking into their handset is close to the microphone and
+        clears that margin comfortably; the agent leaking out of a
+        speakerphone and back in does not.
+
+        Deliberately conservative. Rejecting a real interruption is the worse
+        failure, so the margin is well under unity -- only clear echo is
+        filtered, and anything ambiguous still reaches the duration test.
+        """
+        if not self.audio_currently_playing or not self._recent_agent_rms:
+            return False
+        agent_level = max(self._recent_agent_rms)
+        if agent_level <= 0:
+            return False
+        return rms_energy(caller_frame) < agent_level * BARGE_IN_ECHO_MARGIN
+
     def _record_barge_in(self, decision: str) -> None:
         """Log why this pause ended, with the evidence that decided it.
 
@@ -408,6 +459,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
             return
         self.metrics.barge_in_decision(
             decision,
+            threshold=self._noise_floor.threshold,
             rms=self._last_caller_rms,
             voiced_ms=self._vad_tracker.voiced_ms,
             elapsed_ms=(time.monotonic() - self._pause_started_at) * 1000,
@@ -423,8 +475,17 @@ class TwilioAdapter(BaseTelephonyAdapter):
             return
 
         self._frames_since_pause += 1
+        if self._is_probable_echo(caller_frame):
+            # The agent's own voice returning through a speakerphone. It is
+            # loud, sustained, and perfectly correlated with agent speech --
+            # everything the duration test looks for. Left unfiltered the
+            # agent interrupts itself, which is indistinguishable from a
+            # customer barging in and is why it must be rejected before the
+            # tracker ever sees the frame.
+            self._last_caller_rms = rms_energy(caller_frame)
+            return
         self._vad_tracker.observe(caller_frame)
-        self._last_caller_rms = rms_energy(caller_frame)
+        self._last_caller_rms = self._vad_tracker.last_energy
 
         if self._vad_tracker.voiced_ms >= BARGE_IN_CONFIRM_MS:
             # Sustained voice long enough: this is a genuine interruption.

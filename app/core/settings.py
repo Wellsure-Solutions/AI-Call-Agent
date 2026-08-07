@@ -67,9 +67,34 @@ DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD")
 
 TWILIO_FRAME_MS = 20
 TWILIO_FRAME_BYTES = 160
-BARGE_IN_VOICE_ENERGY_THRESHOLD = float(os.getenv("CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD", "400"))
-BARGE_IN_CONFIRM_MS = int(os.getenv("CALL_AGENT_BARGE_IN_CONFIRM_MS", "550"))
-BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "4000"))
+# Floor for the adaptive voice threshold, not the threshold itself. The live
+# value is derived from the line's measured noise floor; this only stops a
+# pathologically quiet line from triggering on nothing.
+BARGE_IN_VOICE_ENERGY_THRESHOLD = float(os.getenv("CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD", "250"))
+# How far above the measured noise floor speech has to sit. Measured on a real
+# call the floor was ~42 RMS and speech peaked at 1400-2900, so 6x lands at
+# ~250 -- clear of the noise, far below any actual utterance.
+BARGE_IN_NOISE_MULTIPLIER = float(os.getenv("CALL_AGENT_BARGE_IN_NOISE_MULTIPLIER", "6"))
+# Consecutive silent frames before a voiced run is considered over. This was
+# 3 frames (60ms), which is shorter than the gap between ordinary syllables:
+# replaying a real call, it shattered 25 speech segments into 94 fragments and
+# no fragment ever reached the confirm threshold, so genuine interruptions
+# were ignored outright. At 10 frames (200ms) the same audio yields one run
+# per real utterance.
+BARGE_IN_HANGOVER_FRAMES = int(os.getenv("CALL_AGENT_BARGE_IN_HANGOVER_FRAMES", "10"))
+# Sustained voiced duration that confirms a real interruption. On real call
+# audio, run lengths are bimodal -- backchannels ("haan", "acha") at or under
+# 400ms, real turns at or over 600ms -- so this sits in the gap between them.
+BARGE_IN_CONFIRM_MS = int(os.getenv("CALL_AGENT_BARGE_IN_CONFIRM_MS", "600"))
+# How far an inbound frame must exceed the recently-played agent level to be
+# treated as the customer rather than the agent's own echo. Well under unity
+# on purpose: rejecting a real interruption is worse than admitting some
+# echo, so only clearly-attenuated audio is filtered.
+BARGE_IN_ECHO_MARGIN = float(os.getenv("CALL_AGENT_BARGE_IN_ECHO_MARGIN", "0.55"))
+# Safety net: how long an ambiguous pause may last before playback resumes.
+# Lowered because a 4s silent pause is itself the robotic failure it was
+# meant to prevent.
+BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "2500"))
 
 # After the agent asks to end the call, how long to let its closing sentence
 # finish before hanging up regardless. Long enough for a goodbye, far short of
