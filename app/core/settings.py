@@ -45,10 +45,25 @@ EXTRACTION_RETRY_DELAY_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_EXTRACTION
 DEEPGRAM_LISTEN_MODEL = os.getenv("DEEPGRAM_LISTEN_MODEL", "flux-general-multi")
 DEEPGRAM_THINK_PROVIDER = os.getenv("DEEPGRAM_THINK_PROVIDER", "open_ai")
 DEEPGRAM_THINK_MODEL = os.getenv("DEEPGRAM_THINK_MODEL", "gpt-5.4-mini")
-DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.7"))
+# A step-gated script with fixed facts and fixed objection answers gains
+# nothing from sampling diversity; it only gains drift off the script.
+DEEPGRAM_THINK_TEMPERATURE = float(os.getenv("DEEPGRAM_THINK_TEMPERATURE", "0.3"))
 DEEPGRAM_SPEAK_PROVIDER = os.getenv("DEEPGRAM_SPEAK_PROVIDER", "eleven_labs")
-DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_multilingual_v2")
+# Measured against the live agent over 5 runs each, same voice, same prompt:
+#   eleven_multilingual_v2  TTS time-to-first-byte  median 939ms  (max 3935ms)
+#   eleven_flash_v2_5       TTS time-to-first-byte  median 240ms  (max  710ms)
+# Provider end-to-end went from a 1473ms median to 732ms, and the tail
+# collapsed from 5.9s to 1.5s. multilingual_v2 is the quality tier, not the
+# latency tier, and after mu-law at 8 kHz its quality headroom is largely
+# inaudible anyway.
+DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_flash_v2_5")
 DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "k2intd1ORm0YUH8etnXg")
+# Pins the voice's language so it does not re-infer it per sentence. The
+# campaign script is deliberately code-mixed -- Devanagari Hindi with English
+# business terms ("GST invoice", "Amazon Business account", "cashback") left
+# in Roman script -- and without a pin the model re-detects language at those
+# words and shifts accent mid-sentence. Set to empty to let it auto-detect.
+DEEPGRAM_SPEAK_LANGUAGE = os.getenv("DEEPGRAM_SPEAK_LANGUAGE", "hi").strip()
 # zT03pEAEi0VHKciJODfn RAJU
 # JNaMjd7t4u3EhgkVknn3 JANVI
 # IpXGk4Ks434Jj33XXcNh ANJURA

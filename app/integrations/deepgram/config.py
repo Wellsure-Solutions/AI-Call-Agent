@@ -16,6 +16,7 @@ from app.core.settings import (
     DEEPGRAM_API_KEY,
     DEEPGRAM_GREETING,
     DEEPGRAM_LISTEN_MODEL,
+    DEEPGRAM_SPEAK_LANGUAGE,
     DEEPGRAM_SPEAK_MODEL_ID,
     DEEPGRAM_SPEAK_PROVIDER,
     DEEPGRAM_SPEAK_VOICE_ID,
@@ -37,6 +38,19 @@ def _listen_provider_settings() -> dict[str, object]:
     }
     if DEEPGRAM_EAGER_EOT_THRESHOLD is not None:
         provider["eager_eot_threshold"] = DEEPGRAM_EAGER_EOT_THRESHOLD
+    return provider
+
+
+def _speak_provider_settings() -> dict[str, object]:
+    provider: dict[str, object] = {
+        "type": DEEPGRAM_SPEAK_PROVIDER,
+        "model_id": DEEPGRAM_SPEAK_MODEL_ID,
+        "voice_id": DEEPGRAM_SPEAK_VOICE_ID,
+    }
+    if DEEPGRAM_SPEAK_LANGUAGE:
+        # Omitted rather than sent empty: an empty language is not the same
+        # request as no language, and the provider is entitled to reject it.
+        provider["language"] = DEEPGRAM_SPEAK_LANGUAGE
     return provider
 
 
@@ -104,13 +118,7 @@ def get_agent_settings(
                 # the customer hung up or the 900s deadline expired.
                 "functions": [END_CALL_FUNCTION_SCHEMA],
             },
-            speak={
-                "provider": {
-                    "type": DEEPGRAM_SPEAK_PROVIDER,
-                    "model_id": DEEPGRAM_SPEAK_MODEL_ID,
-                    "voice_id": DEEPGRAM_SPEAK_VOICE_ID,
-                }
-            },
+            speak={"provider": _speak_provider_settings()},
             greeting=DEEPGRAM_GREETING,
         ),
     )
