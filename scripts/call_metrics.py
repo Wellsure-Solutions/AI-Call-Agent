@@ -36,6 +36,7 @@ LATENCY_METRICS: list[tuple[str, str, str]] = [
     ("metrics_turn", "eot_to_first_audio_ms", "EOT -> first agent audio (perceived)"),
     ("metrics_turn", "provider_signal_to_first_audio_ms", "  of which: our transport + pacing"),
     ("metrics_greeting", "bind_to_first_audio_ms", "Stream bind -> greeting audio"),
+    ("metrics_answer", "answer_to_greeting_ms", "Answer -> greeting audio (what the caller hears)"),
     ("metrics_provider_latency", "stt_ms", "Deepgram STT"),
     ("metrics_provider_latency", "llm_first_token_ms", "LLM first token (any)"),
     ("metrics_provider_latency", "llm_first_text_ms", "LLM first text token"),
@@ -46,7 +47,23 @@ LATENCY_METRICS: list[tuple[str, str, str]] = [
 # Targets stated in the brief, printed alongside so a regression is obvious.
 TARGETS_MS: dict[str, tuple[float, float]] = {
     "eot_to_first_audio_ms": (800.0, 1200.0),
+    "answer_to_greeting_ms": (500.0, 800.0),
 }
+
+# Metrics that should exist on any real call. Reporting their absence is the
+# point: a silently missing breakdown reads as "latency is fine" when it
+# actually means the events never arrived. A provider-side field that stops
+# being populated is invisible otherwise -- exactly how an empty LatencyReport
+# went unnoticed across a whole batch.
+EXPECTED_METRICS: list[tuple[str, str]] = [
+    ("metrics_turn", "per-turn latency"),
+    ("metrics_greeting", "greeting latency"),
+    ("metrics_provider_latency", "Deepgram STT/LLM/TTS breakdown"),
+    ("metrics_call", "per-call summary"),
+]
+
+# Below this many samples a percentile is not a percentile.
+LOW_SAMPLE_WARNING = 10
 
 
 def load_events(db_path: Path, call_ids: list[str] | None, since: str | None, limit: int) -> dict[str, list[dict[str, Any]]]:
@@ -93,8 +110,48 @@ def summarize(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
+def derive_answer_to_greeting(events: dict[str, list[dict[str, Any]]]) -> None:
+    """Reconstruct answer -> greeting, which no single event can record.
+
+    The answer instant comes from Twilio's status webhook in one process and
+    the first agent audio byte from the media socket in another, so the only
+    thing joining them is the wall clock. This is the number the customer
+    actually experiences as "how long before it said anything", and it is
+    strictly larger than the stream-bind figure because Twilio's own
+    answer-to-stream setup sits in between.
+    """
+    answered: dict[str, str] = {}
+    for name in ("provider_in-progress", "provider_answered"):
+        for payload in events.get(name, []):
+            call_id = payload.get("_call_id")
+            if call_id and call_id not in answered:
+                answered[call_id] = payload.get("at", "")
+    derived: list[dict[str, Any]] = []
+    for payload in events.get("metrics_greeting", []):
+        call_id, first_audio_at = payload.get("_call_id"), payload.get("at")
+        answer_at = answered.get(call_id)
+        if not (answer_at and first_audio_at):
+            continue
+        try:
+            delta = (_parse(first_audio_at) - _parse(answer_at)).total_seconds() * 1000
+        except (ValueError, TypeError):
+            continue
+        if 0 <= delta <= 60000:
+            derived.append({"_call_id": call_id, "answer_to_greeting_ms": round(delta, 1)})
+    if derived:
+        events["metrics_answer"] = derived
+
+
+def _parse(stamp: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+
+
 def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    derive_answer_to_greeting(events)
     report: dict[str, Any] = {"latency": {}, "barge_in": {}, "silence": {}, "cost": {}, "diagnostics": {}}
+    report["missing"] = [label for name, label in EXPECTED_METRICS if not events.get(name)]
 
     for event_name, key, label in LATENCY_METRICS:
         values = [float(p[key]) for p in events.get(event_name, []) if isinstance(p.get(key), (int, float))]
@@ -117,10 +174,18 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
 
     calls = events.get("metrics_call", [])
     if calls:
+        shares = [
+            100.0 * float(c.get("silence_total_ms", 0)) / (float(c.get("media_seconds", 0)) * 1000)
+            for c in calls if float(c.get("media_seconds", 0)) > 0
+        ]
         report["silence"] = {
             "calls": len(calls),
             "gaps_per_call": summarize([float(c.get("silence_gaps", 0)) for c in calls]),
             "total_ms_per_call": summarize([float(c.get("silence_total_ms", 0)) for c in calls]),
+            # The share matters more than the total: 13s of dead air in a 40s
+            # call is a third of the conversation spent waiting, and that is
+            # what a listener registers as robotic.
+            "share_of_call_pct": summarize(shares),
         }
         report["cost"] = {
             "media_seconds": summarize([float(c.get("media_seconds", 0)) for c in calls]),
@@ -168,11 +233,17 @@ def _bucket_sort(item: tuple[str, int]) -> float:
 
 
 def print_report(report: dict[str, Any]) -> None:
+    if report.get("missing"):
+        print("\n=== Missing measurements ===")
+        for label in report["missing"]:
+            print(f"  !! no {label} recorded -- this is absent data, not good data")
+
     print("\n=== Latency (ms) ===")
     if not report["latency"]:
         print("  no instrumented turns found")
     for label, stats in report["latency"].items():
-        line = f"  {label:<42} n={stats['n']:<5} p50={_fmt(stats['p50'])} p90={_fmt(stats['p90'])} p99={_fmt(stats['p99'])}"
+        mark = " (low n)" if stats["n"] < LOW_SAMPLE_WARNING else ""
+        line = f"  {label:<46} n={stats['n']:<4}{mark} p50={_fmt(stats['p50'])} p90={_fmt(stats['p90'])} p99={_fmt(stats['p99'])}"
         target = TARGETS_MS.get(stats["key"])
         if target and stats["p50"] is not None and stats["p90"] is not None:
             ok = stats["p50"] <= target[0] and stats["p90"] <= target[1]
@@ -180,7 +251,15 @@ def print_report(report: dict[str, Any]) -> None:
         print(line)
 
     print("\n=== Barge-in ===")
-    print(f"  decisions: {report['barge_in'].get('decisions') or 'none recorded'}")
+    decisions = report["barge_in"].get("decisions")
+    if not decisions:
+        # Not necessarily a fault: a pause only opens when Deepgram reports
+        # the customer speaking over agent audio. A strictly turn-taking call
+        # produces none, so this says "untested", not "working".
+        print("  no decisions recorded -- nobody spoke over the agent in this batch, so")
+        print("  barge-in tuning is UNTESTED here rather than confirmed working")
+    else:
+        print(f"  decisions: {decisions}")
     if "commit_rate" in report["barge_in"]:
         print(f"  commit rate: {report['barge_in']['commit_rate']}"
               f"   decisions while agent audio playing: {report['barge_in']['while_agent_playing']}")
@@ -191,8 +270,12 @@ def print_report(report: dict[str, Any]) -> None:
     if report["silence"]:
         print("\n=== Dead air (gaps >= configured threshold) ===")
         gaps, total = report["silence"]["gaps_per_call"], report["silence"]["total_ms_per_call"]
+        share = report["silence"].get("share_of_call_pct") or {}
         print(f"  gaps/call:      p50={_fmt(gaps['p50'])} p90={_fmt(gaps['p90'])} max={_fmt(gaps['max'])}")
         print(f"  total ms/call:  p50={_fmt(total['p50'])} p90={_fmt(total['p90'])} max={_fmt(total['max'])}")
+        if share.get("p50") is not None:
+            flag = "  <-- a third or more of the call is waiting" if share["p50"] >= 30 else ""
+            print(f"  share of call:  p50={_fmt(share['p50'])}% p90={_fmt(share['p90'])}%{flag}")
 
     if report["cost"]:
         cost = report["cost"]

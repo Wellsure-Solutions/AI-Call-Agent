@@ -265,13 +265,23 @@ class CallMetrics:
             self._turn_started_at = time.monotonic()
             self._turn_source = "provider"
 
-    def latency_report(self, report: dict[str, Any]) -> None:
+    def latency_report(self, report: Any) -> None:
         """Deepgram's own STT/LLM/TTS split for the turn that just completed.
 
         These are provider-side seconds measured to the point audio left
         Deepgram, so they decompose -- but never replace -- the end-to-end
         number measured at the Twilio socket.
+
+        Accepts either the SDK message object or a plain mapping. The SDK
+        sends a pydantic model, not a dict or a dataclass, so reading it
+        needs getattr; an earlier version only handled mappings and produced
+        reports with every field missing.
         """
+        def field(name: str) -> Any:
+            if isinstance(report, dict):
+                return report.get(name)
+            return getattr(report, name, None)
+
         payload: dict[str, Any] = {"turn": self._turn_index}
         for source, target in (
             ("stt_latency", "stt_ms"),
@@ -280,9 +290,14 @@ class CallMetrics:
             ("tts_latency", "tts_ttfb_ms"),
             ("total_latency", "provider_total_ms"),
         ):
-            value = report.get(source)
+            value = field(source)
             if isinstance(value, (int, float)):
                 payload[target] = round(float(value) * 1000, 1)
+        if len(payload) == 1:
+            # Nothing usable on the message. Recording an empty report would
+            # make the analysis pass show a metric with no data rather than
+            # an absent one, which reads as "latency is fine".
+            return
         self._stamp("metrics_provider_latency", payload)
 
     def assistant_characters(self, count: int) -> None:

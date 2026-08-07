@@ -216,7 +216,12 @@ class ConversationEngine:
                 if msg_type == "AgentStartedSpeaking":
                     self.metrics.agent_turn_started()
                 elif msg_type == "LatencyReport":
-                    self.metrics.latency_report(safe_event_payload(message))
+                    # Read off the message itself. safe_event_payload() is a
+                    # generic diagnostic dumper whose field list does not
+                    # include the latency numbers, so routing this through it
+                    # silently produced empty reports -- the whole STT/LLM/TTS
+                    # breakdown was missing from real call data before this.
+                    self.metrics.latency_report(message)
                 elif msg_type in {"Warning", "Error"}:
                     self.metrics.provider_diagnostic(
                         msg_type.lower(),
