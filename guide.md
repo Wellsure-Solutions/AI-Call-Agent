@@ -49,6 +49,10 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `CALL_AGENT_METRICS_SILENCE_GAP_MS` | No | Gap counted as dead air | `1500` | No |
 | `CALL_AGENT_METRICS_FLUSH_SECONDS` | No | Metric batch flush interval | `5` | No |
 | `CALL_AGENT_MEDIA_DUMP_DIR` | No | Raw mu-law capture directory — **records customer calls** | unset (disabled) | Contains call audio |
+| `CALL_AGENT_CLOSE_GRACE_SECONDS` | No | Grace for the agent's closing line after it calls `end_call` | `10` | No |
+| `CALL_AGENT_AMD_ENABLED` | No | Answering-machine detection (adds Twilio's per-call AMD charge) | `1`; set `0` to disable | No |
+| `CALL_AGENT_AMD_MODE` | No | `Enable` or `DetectMessageEnd` | `Enable` | No |
+| `CALL_AGENT_AMD_*_MS` / `_SECONDS` | No | Twilio detection tuning | Twilio defaults | No |
 
 Generate secrets without putting them in shell history:
 
@@ -114,6 +118,7 @@ The installed Twilio SDK supports `timeout` on call creation; the ring timeout i
 
 ## 9. Complete execution sequence
 
+0. Answering-machine detection runs asynchronously alongside the call; a machine/fax verdict requests provider completion but never releases capacity itself.
 1. Import validation normalizes an E.164-compatible phone and bounds/sanitizes text.
 2. Enqueue checks suppression, lead DND/review state, idempotency key, and unresolved phone jobs in one transaction; it inserts `calls` and `call_jobs` rows.
 3. A coordinator atomically checks database-wide capacity and conditionally claims one queued job.
@@ -202,7 +207,9 @@ This writes both sides of real customer conversations to disk. Treat the directo
 ## 13. Troubleshooting
 
 - **401 dashboard/API:** set both admin variables and send Basic credentials.
-- **403 Twilio callback:** verify auth token and exact public URL/proxy path.
+- **403 Twilio callback:** verify auth token and exact public URL/proxy path. `GET /health` and `/api/operations` now report `twilio_signature_failures`; a nonzero total across all three endpoints means `PUBLIC_BASE_URL` does not match the URL Twilio signed, and **no call will produce media** until it is corrected.
+- **Calls never end on their own:** confirm the agent registered `end_call` — `/api/calls/{id}` events include `agent_requested_end_call` in the logs and `metrics_call.media_end_reason`. A silent agent with no audio at all is usually a rejected Deepgram setting; check `metrics_provider_error` events for the cause.
+- **Voicemail reached:** `calls.answered_by` records Twilio's verdict. `unknown` is not treated as a machine by design.
 - **Media closes with policy violation:** verify stream secret, clock synchronization, CallSid binding, and TwiML custom parameters.
 - **Calls remain reconciliation:** inspect `/api/operations`; verify Twilio credentials/network and provider state. Unknown-SID ambiguous dials require manual provider-log review.
 - **Queue does not advance:** inspect active/canceling jobs and provider terminal confirmation; capacity is intentionally not released on a timer alone.
