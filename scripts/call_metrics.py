@@ -196,6 +196,16 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "tts_characters_total": sum(int(c.get("tts_characters", 0)) for c in calls),
         }
         report["cost"]["end_reasons"] = dict(Counter(c.get("media_end_reason") for c in calls))
+        # How often the model tried to hang up without speaking a closing.
+        # A refusal is the guard working; a rising count means the prompt has
+        # stopped carrying the closing rule, which is otherwise only
+        # observable by listening to calls.
+        refusals = sum(int(c.get("end_call_refusals", 0) or 0) for c in calls)
+        report["closing"] = {
+            "calls": len(calls),
+            "hangups_refused_for_no_closing": refusals,
+            "calls_affected": sum(1 for c in calls if int(c.get("end_call_refusals", 0) or 0)),
+        }
 
     for kind in ("metrics_provider_warning", "metrics_provider_error"):
         found = Counter(p.get("code") or p.get("description", "")[:60] for p in events.get(kind, []))
@@ -251,6 +261,26 @@ def print_report(report: dict[str, Any]) -> None:
             f"{greeting['provider']} call(s) synthesised the greeting live -- "
             "run scripts/prerender_greeting.py"
         )
+    barge_in = report.get("barge_in") or {}
+    decisions = barge_in.get("decisions") or {}
+    # Every pause ending in a timeout means the customer sat through the full
+    # ambiguity window -- BARGE_IN_MAX_PAUSE_MS of dead air each -- and none
+    # was ever honoured. That is what a caller misclassified as echo looks
+    # like from here, so it is called out rather than left to be read out of
+    # the decision counts.
+    if decisions and barge_in.get("commit_rate") == 0.0:
+        timeouts = decisions.get("timeout", 0)
+        attention.append(
+            f"no barge-in was ever honoured ({sum(decisions.values())} decision(s), "
+            f"{timeouts} timed out) -- customers spoke over the agent and were not heard"
+        )
+    closing = report.get("closing") or {}
+    if closing.get("hangups_refused_for_no_closing"):
+        attention.append(
+            f"{closing['hangups_refused_for_no_closing']} hangup(s) refused across "
+            f"{closing['calls_affected']} call(s) because no closing had been spoken -- "
+            "the guard held, but the model is still trying to drop the line"
+        )
     if attention:
         print("\n=== Needs attention ===")
         for line in attention:
@@ -300,6 +330,18 @@ def print_report(report: dict[str, Any]) -> None:
     if "rms" in report["barge_in"]:
         stats = report["barge_in"]["rms"]
         print(f"  caller RMS at decision: p50={_fmt(stats['p50'])} p90={_fmt(stats['p90'])} max={_fmt(stats['max'])}")
+
+    closing = report.get("closing") or {}
+    if closing.get("calls"):
+        print("\n=== Closing the call ===")
+        refused = closing["hangups_refused_for_no_closing"]
+        if refused:
+            print(f"  {refused} hangup(s) refused across {closing['calls_affected']} of "
+                  f"{closing['calls']} call(s) because the agent had said nothing")
+            print("  since the customer's last turn. The guard held the line open and asked")
+            print("  for a closing -- but the model still tried to drop the call.")
+        else:
+            print(f"  no hangup was attempted without a closing across {closing['calls']} call(s)")
 
     if report["silence"]:
         print("\n=== Dead air (gaps >= configured threshold) ===")
