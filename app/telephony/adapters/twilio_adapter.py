@@ -133,6 +133,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         # loop acts on it, because that is where the socket -- and therefore
         # mark acknowledgements -- is read.
         self._close_after_playback = asyncio.Event()
+        self._completed_via_api = False
 
     def attach(self, session: CallSession) -> None:
         super().attach(session)
@@ -353,8 +354,17 @@ class TwilioAdapter(BaseTelephonyAdapter):
                         await self.audio_bridge.start()
                     accepted = await self.audio_bridge.receive_telephony_audio(audio)
                     if not accepted or self._close_after_playback.is_set():
-                        close_status = "ai_disconnected"
-                        logger.info("AI audio bridge finished accepting Twilio audio for call %s", self.session.call_id)
+                        # An agent that said goodbye and hung up is a
+                        # completed call. Only a provider that stopped
+                        # accepting audio without ever asking to close is a
+                        # disconnection -- and the two map to opposite
+                        # lifecycle states, AI_FINISHED against FAILED.
+                        agent_closed = self._close_after_playback.is_set()
+                        close_status = "completed" if agent_closed else "ai_disconnected"
+                        logger.info(
+                            "twilio_stream_closing",
+                            extra={"call_id": self.session.call_id, "close_status": close_status},
+                        )
                         # Everything the agent generated may still be queued.
                         # The close belongs here rather than in the outbound
                         # pump because this loop owns the socket, and mark
@@ -699,8 +709,15 @@ class TwilioAdapter(BaseTelephonyAdapter):
         )
 
     async def _complete_twilio_call(self) -> None:
-        if not self.call_sid:
+        """Ask Twilio to end the call. Safe to call more than once.
+
+        Both the close path and the teardown `finally` can reach this on the
+        same call, and a second REST hangup on an already-completed call just
+        raises -- noise in the log that reads like a real failure.
+        """
+        if not self.call_sid or self._completed_via_api:
             return
+        self._completed_via_api = True
         try:
             await asyncio.to_thread(self._client.calls(self.call_sid).update, status="completed")
         except Exception as exc:

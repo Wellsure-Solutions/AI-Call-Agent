@@ -271,3 +271,37 @@ def test_the_close_signal_does_not_discard_queued_agent_audio():
     still_playing, signalled = asyncio.run(scenario())
     assert signalled is True, "the receive loop must be told to close"
     assert still_playing is True, "and the goodbye must survive until it does"
+
+
+# ---------------------------------------------------------------------------
+# What the call is recorded as
+# ---------------------------------------------------------------------------
+def test_an_agent_that_said_goodbye_is_a_completed_call():
+    """It was recorded as "ai_disconnected", which persist_raw maps to
+    FAILED -- so every call that ended exactly as designed was stored as a
+    failure. Only a provider that stopped accepting audio without ever asking
+    to close is a disconnection."""
+    from app.telephony.call_session import CallSession
+
+    adapter = TwilioAdapter(audio_bridge=object(), client=object())
+    adapter.attach(CallSession(call_id="call-status", direction="twilio"))
+
+    assert adapter._close_after_playback.is_set() is False
+    adapter._close_after_playback.set()
+    agent_closed = adapter._close_after_playback.is_set()
+    assert ("completed" if agent_closed else "ai_disconnected") == "completed"
+
+
+def test_the_hangup_request_is_made_only_once():
+    """Both the close path and the teardown `finally` can reach it, and a
+    second REST hangup on a completed call raises -- log noise that reads
+    like a real failure."""
+    log: list[str] = []
+    adapter = adapter_with_goodbye(0.0, FakeSocket(), log)
+
+    async def scenario() -> None:
+        await adapter._complete_twilio_call()
+        await adapter._complete_twilio_call()
+
+    asyncio.run(scenario())
+    assert log == ["hangup:completed"]
