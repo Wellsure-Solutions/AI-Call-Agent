@@ -20,6 +20,7 @@ def test_extracts_sales_qualification_answers_with_openai(monkeypatch):
                         "Amazon_business_account": "no",
                         "account_creation_interest": "yes",
                         "callback_approved": "yes",
+                        "callback_time": "kal shaam 5 baje",
                         "do_not_call_requested": "no",
                     }
                 )
@@ -54,5 +55,8 @@ def test_extracts_sales_qualification_answers_with_openai(monkeypatch):
         "Amazon_business_account": "no",
         "account_creation_interest": "yes",
         "callback_approved": "yes",
+        # The time the customer actually named. Recorded verbatim so the
+        # onboarding team calls when they said, rather than "tomorrow".
+        "callback_time": "kal shaam 5 baje",
         "do_not_call_requested": "no",
     }
