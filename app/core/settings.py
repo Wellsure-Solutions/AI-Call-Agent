@@ -130,6 +130,14 @@ BARGE_IN_MAX_PAUSE_MS = int(os.getenv("CALL_AGENT_BARGE_IN_MAX_PAUSE_MS", "2500"
 # finish before hanging up regardless. Long enough for a goodbye, far short of
 # the 900s maximum-call deadline that was previously the only way out.
 AGENT_CLOSE_GRACE_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_CLOSE_GRACE_SECONDS", "10")))
+# When the model asks to hang up without having said anything since the
+# customer last spoke, it is refused once and told to speak its closing line
+# first. This bounds how long that second chance lasts: if no closing and no
+# repeat request arrive, the call ends anyway. Longer than the normal grace
+# because a whole turn -- LLM, TTS, and playback -- has to fit inside it.
+AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS = max(
+    1.0, float(os.getenv("CALL_AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS", "20"))
+)
 # How long to wait for audio already handed to Twilio to finish playing before
 # hanging up. Pacing keeps several seconds in flight by design, and the
 # provider's "audio done" signal only means it stopped sending -- so without

@@ -12,7 +12,7 @@ from deepgram import DeepgramClient
 from deepgram.agent.v1.types import AgentV1SendFunctionCallResponse
 from deepgram.core.events import EventType
 
-from app.core.settings import AGENT_CLOSE_GRACE_SECONDS
+from app.core.settings import AGENT_CLOSE_GRACE_SECONDS, AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
 from app.services.call_control import (
     END_CALL_FUNCTION,
@@ -88,6 +88,11 @@ class ConversationEngine:
         self._deepgram_closed = False
         self._keepalive_task: asyncio.Task | None = None
         self._close_deadline_task = None
+        # Whether the agent has said anything since the customer's last turn.
+        # Starts True because nothing is owed to a customer who has not spoken
+        # yet -- a voicemail or a dead line should still be hung up promptly.
+        self._assistant_spoke_since_user = True
+        self._end_call_refused = False
 
     async def start(self) -> None:
         if not DEEPGRAM_API_KEY:
@@ -253,6 +258,12 @@ class ConversationEngine:
                 if not cleaned_content:
                     return
                 self.session.add_turn(role, cleaned_content)
+                if role == "assistant":
+                    self._assistant_spoke_since_user = True
+                elif role == "user":
+                    # The customer has the floor again, and anything the agent
+                    # does next -- including hanging up -- owes them a reply.
+                    self._assistant_spoke_since_user = False
                 if self.metrics is not None:
                     # Only the length crosses into metrics -- TTS is billed
                     # per character, and the text itself must never be logged.
@@ -284,6 +295,9 @@ class ConversationEngine:
             if name == END_CALL_FUNCTION:
                 reason = normalize_end_call_reason(getattr(call, "arguments", None))
                 self.session.metadata["end_call_reason"] = reason
+                if self._should_refuse_end_call():
+                    self._refuse_end_call(call_id, name, reason)
+                    continue
                 logger.info(
                     "agent_requested_end_call",
                     extra={"call_id": self.session.call_id, "reason": reason},
@@ -294,9 +308,51 @@ class ConversationEngine:
                 # for AgentAudioDone, with a bounded fallback in case the
                 # model called the tool without speaking afterwards.
                 self._close_after_audio_done = True
-                self._arm_close_deadline()
+                self._arm_close_deadline(AGENT_CLOSE_GRACE_SECONDS)
             else:
                 self._send_function_result(call_id, name, "This function is not available.")
+
+    def _should_refuse_end_call(self) -> bool:
+        """True when hanging up now would drop the line without a goodbye.
+
+        Observed on real calls: the customer says "अच्छा अच्छा, बिल्कुल बढ़िया
+        है" and the model answers by calling `end_call` with no assistant text
+        at all in between. Every downstream guard -- AgentAudioDone, the
+        playback drain -- correctly waits for audio that was never generated,
+        so the customer simply hears the line go dead mid-conversation.
+
+        The prompt already forbids this, and the tool description says so
+        twice; the model does it anyway. So it is enforced here rather than
+        asked for.
+        """
+        return not self._assistant_spoke_since_user and not self._end_call_refused
+
+    def _refuse_end_call(self, call_id: str | None, name: str, reason: str) -> None:
+        """Answer the request with an instruction instead of a hangup.
+
+        Refused exactly once per call. A model that asks again -- having
+        spoken or not -- is obeyed, because a loop of refusals would be a
+        worse failure than a missing goodbye: the call would never end.
+        """
+        self._end_call_refused = True
+        logger.info(
+            "agent_end_call_without_closing",
+            extra={"call_id": self.session.call_id, "reason": reason},
+        )
+        if self.metrics is not None:
+            self.metrics.end_call_refused()
+        self._send_function_result(
+            call_id,
+            name,
+            "Not yet -- you have not said anything since the customer last "
+            "spoke. Say your closing line out loud to the customer now, then "
+            "call end_call again.",
+        )
+        # Deliberately not setting _close_after_audio_done: the next
+        # AgentAudioDone belongs to the closing line we just asked for, not to
+        # a hangup. The deadline is the only backstop, and it is long enough
+        # for a full turn.
+        self._arm_close_deadline(AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS)
 
     def _send_function_result(self, call_id: str | None, name: str, content: str) -> None:
         if self.loop is None:
@@ -321,26 +377,31 @@ class ConversationEngine:
                 extra={"call_id": self.session.call_id, "error": type(exc).__name__},
             )
 
-    def _arm_close_deadline(self) -> None:
+    def _arm_close_deadline(self, grace_seconds: float) -> None:
         """Hang up even if AgentAudioDone never arrives.
 
         The whole point of the end-call tool is that a call cannot outlive
         its purpose. Making the hangup depend solely on a provider event
         would reintroduce the bug in a narrower form.
+
+        Re-arming replaces any deadline already pending, so the refusal path's
+        long grace is not left running once the real hangup is armed.
         """
-        if self.loop is None or self._close_deadline_task is not None:
+        if self.loop is None:
             return
+        if self._close_deadline_task is not None:
+            self._close_deadline_task.cancel()
         self._close_deadline_task = asyncio.run_coroutine_threadsafe(
-            self._close_after_grace(), self.loop
+            self._close_after_grace(grace_seconds), self.loop
         )
 
-    async def _close_after_grace(self) -> None:
-        await asyncio.sleep(AGENT_CLOSE_GRACE_SECONDS)
+    async def _close_after_grace(self, grace_seconds: float) -> None:
+        await asyncio.sleep(grace_seconds)
         if self.closing_requested:
             return
         logger.info(
             "agent_close_grace_expired",
-            extra={"call_id": self.session.call_id, "grace_seconds": AGENT_CLOSE_GRACE_SECONDS},
+            extra={"call_id": self.session.call_id, "grace_seconds": grace_seconds},
         )
         self.closing_requested = True
         self.session.safe_transition_to(CallState.AI_FINISHED)

@@ -137,6 +137,7 @@ class CallMetrics:
         self._assistant_characters = 0
         self._assistant_messages = 0
         self._user_messages = 0
+        self._end_call_refusals = 0
 
         # Barge-in accounting
         self._barge_in_commits = 0
@@ -318,6 +319,17 @@ class CallMetrics:
         with self._lock:
             self._user_messages += 1
 
+    def end_call_refused(self) -> None:
+        """The model tried to hang up without speaking a closing line.
+
+        Counted because it is the difference between a call that ends and a
+        call the customer experiences as being cut off, and because a rising
+        rate here means the prompt has stopped carrying the closing rule.
+        """
+        with self._lock:
+            self._end_call_refusals += 1
+        self._stamp("metrics_end_call_refused", {})
+
     def provider_diagnostic(self, kind: str, code: str | None, description: str | None) -> None:
         """Record a Deepgram Warning/Error code so a silent call has a cause.
 
@@ -397,6 +409,7 @@ class CallMetrics:
                     "barge_in_commits": self._barge_in_commits,
                     "barge_in_resumes": self._barge_in_resumes,
                     "barge_in_timeouts": self._barge_in_timeouts,
+                    "end_call_refusals": self._end_call_refusals,
                 },
             )
             self._append_locked(
