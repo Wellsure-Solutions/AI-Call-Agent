@@ -1,12 +1,16 @@
 .env
 __pycache__/
 *.py[cod]
-data/
+data/analytics.json
+data/call_agent.sqlite3
+data/calls.json
+data/campaigns.json
+data/leads.json
+data/responses.json
+data/settings.json
 call_answers.xlsx
 .venv/
 venv/
 .pytest_cache/
-
 # Local metric captures: raw call audio, never committed.
-*.ulaw
 *.wav
