@@ -200,6 +200,20 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         # A refusal is the guard working; a rising count means the prompt has
         # stopped carrying the closing rule, which is otherwise only
         # observable by listening to calls.
+        # Eager end-of-turn: what it was set to, and what it cost. A resume is
+        # a draft thrown away, so resumes/turns is both the wasted-LLM-call
+        # rate and the "answered into a pause" rate.
+        eager_settings = sorted({float(c.get("eager_eot", 0) or 0) for c in calls})
+        eager_turns = sum(int(c.get("eager_turns", 0) or 0) for c in calls)
+        resumes = sum(int(c.get("turn_resumes", 0) or 0) for c in calls)
+        report["eager_eot"] = {
+            "thresholds_in_batch": eager_settings,
+            "eager_turns": eager_turns,
+            "turn_resumes": resumes,
+            "false_start_rate": round(resumes / eager_turns, 3) if eager_turns else None,
+            "agent_turns": sum(int(c.get("agent_turns", 0) or 0) for c in calls),
+        }
+
         refusals = sum(int(c.get("end_call_refusals", 0) or 0) for c in calls)
         report["closing"] = {
             "calls": len(calls),
@@ -274,6 +288,19 @@ def print_report(report: dict[str, Any]) -> None:
             f"no barge-in was ever honoured ({sum(decisions.values())} decision(s), "
             f"{timeouts} timed out) -- customers spoke over the agent and were not heard"
         )
+    eager = report.get("eager_eot") or {}
+    if len(eager.get("thresholds_in_batch") or []) > 1:
+        # The one comparison this feature has to be judged on is before
+        # against after. A batch containing both settings cannot make it.
+        attention.append(
+            f"batch mixes eager end-of-turn settings {eager['thresholds_in_batch']} -- "
+            "latency figures here average two different systems"
+        )
+    if eager.get("false_start_rate") is not None and eager["false_start_rate"] >= 0.5:
+        attention.append(
+            f"{eager['false_start_rate']:.0%} of eager turns were false starts -- "
+            "the threshold is firing inside pauses the customer had not finished"
+        )
     closing = report.get("closing") or {}
     if closing.get("hangups_refused_for_no_closing"):
         attention.append(
@@ -330,6 +357,27 @@ def print_report(report: dict[str, Any]) -> None:
     if "rms" in report["barge_in"]:
         stats = report["barge_in"]["rms"]
         print(f"  caller RMS at decision: p50={_fmt(stats['p50'])} p90={_fmt(stats['p90'])} max={_fmt(stats['max'])}")
+
+    eager = report.get("eager_eot") or {}
+    if eager.get("thresholds_in_batch"):
+        print("\n=== Eager end-of-turn ===")
+        active = [t for t in eager["thresholds_in_batch"] if t]
+        if not active:
+            print("  disabled in this batch -- these calls are the baseline to compare against")
+        else:
+            print(f"  threshold(s): {active}")
+            if eager["eager_turns"]:
+                print(f"  eager turns: {eager['eager_turns']}   resumed (draft discarded): "
+                      f"{eager['turn_resumes']}   false-start rate: {eager['false_start_rate']:.0%}")
+                print(f"  extra LLM calls this batch: ~{eager['turn_resumes']} on top of "
+                      f"{eager['agent_turns']} agent turns")
+            else:
+                # Deepgram does not document whether the Agent API forwards
+                # Flux's eager events or consumes them upstream. Zero here with
+                # a latency improvement means the latter, not a broken setting.
+                print("  no eager events reached this process -- either the Agent API handles")
+                print("  the early draft upstream, or the setting did not take. Judge it on the")
+                print("  EOT -> first agent audio figure above, against a disabled batch.")
 
     closing = report.get("closing") or {}
     if closing.get("calls"):

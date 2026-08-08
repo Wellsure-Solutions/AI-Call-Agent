@@ -3,9 +3,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-def _optional_float(name: str) -> float | None:
-    """Read an optional float, treating an unset or blank value as disabled."""
-    value = os.getenv(name)
+def _optional_float(name: str, default: str | None = None) -> float | None:
+    """Read an optional float. A blank value disables the feature.
+
+    Blank is deliberately distinct from unset: with a default present, an
+    explicitly empty env var is the only way to turn the feature back off
+    without editing code.
+    """
+    value = os.getenv(name, default)
     if value is None or not value.strip():
         return None
     return float(value)
@@ -89,10 +94,38 @@ DEEPGRAM_GREETING = os.getenv(
 # synthesising it as before, so this is safe to leave unpopulated.
 GREETING_CACHE_DIR = Path(os.getenv("CALL_AGENT_GREETING_CACHE_DIR", DATA_DIR / "greetings"))
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
-# Eager end-of-turn starts the LLM before the user's turn is final. It can
-# reduce latency, but it also makes short pauses sound like interruptions.
-# Keep it opt-in so normal EndOfTurn detection is the safe default.
-DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD")
+# Eager end-of-turn starts the reply while Flux is only moderately confident
+# the customer has stopped, instead of waiting for high confidence. Deepgram
+# reports 150-250ms earlier audio across the 0.3-0.5 band, at 50-70% more LLM
+# calls, because every draft made against a turn that turns out not to have
+# ended is discarded.
+#
+# 0.5 is the top of that band on purpose. Lower fires earlier and produces
+# more false starts, and a false start here is the failure this project is
+# actually trying to fix -- the agent answering into a pause the customer had
+# not finished. Start at the fewest-false-starts end of the useful range and
+# only move down against a measured batch.
+#
+# Set the env var to an empty string to disable and go back to plain
+# EndOfTurn.
+DEEPGRAM_EAGER_EOT_THRESHOLD = _optional_float("DEEPGRAM_EAGER_EOT_THRESHOLD", "0.5")
+if DEEPGRAM_EAGER_EOT_THRESHOLD is not None:
+    # Deepgram rejects the whole Settings message if this is out of range, and
+    # a rejected Settings message is a call that connects and never speaks --
+    # the single hardest symptom to diagnose from the outside. Fail at import
+    # instead, where the traceback names the variable.
+    if not 0.3 <= DEEPGRAM_EAGER_EOT_THRESHOLD <= 0.9:
+        raise ValueError(
+            f"DEEPGRAM_EAGER_EOT_THRESHOLD must be between 0.3 and 0.9, got {DEEPGRAM_EAGER_EOT_THRESHOLD}"
+        )
+    if DEEPGRAM_EAGER_EOT_THRESHOLD > DEEPGRAM_EOT_THRESHOLD:
+        # Eager fires at *lower* confidence than the final decision. Above it,
+        # the eager signal could only ever arrive after the turn was already
+        # final, so it would cost the extra LLM calls and buy nothing.
+        raise ValueError(
+            f"DEEPGRAM_EAGER_EOT_THRESHOLD ({DEEPGRAM_EAGER_EOT_THRESHOLD}) must not exceed "
+            f"DEEPGRAM_EOT_THRESHOLD ({DEEPGRAM_EOT_THRESHOLD})"
+        )
 # ---------------------------------------------------------------------------
 
 TWILIO_FRAME_MS = 20

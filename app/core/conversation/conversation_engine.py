@@ -223,6 +223,15 @@ class ConversationEngine:
                 # socket, because these stop at Deepgram's egress.
                 if msg_type == "AgentStartedSpeaking":
                     self.metrics.agent_turn_started()
+                elif msg_type == "EagerEndOfTurn":
+                    # Whether the Agent API forwards Flux's eager events to the
+                    # client, or consumes them itself to draft early, is not
+                    # documented. Counting them costs nothing and answers the
+                    # question from the next batch: zero eager turns alongside
+                    # a latency improvement means Deepgram handled it upstream.
+                    self.metrics.eager_turn_started()
+                elif msg_type == "TurnResumed":
+                    self.metrics.turn_resumed()
                 elif msg_type == "LatencyReport":
                     # Read off the message itself. safe_event_payload() is a
                     # generic diagnostic dumper whose field list does not

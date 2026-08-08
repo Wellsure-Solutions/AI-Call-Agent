@@ -95,6 +95,7 @@ class CallMetrics:
         silence_gap_ms: int = 1500,
         flush_every: int = 32,
         greeting_source: str = "provider",
+        eager_eot: float | None = None,
     ) -> None:
         self.call_id = call_id
         self._sink = sink
@@ -104,6 +105,11 @@ class CallMetrics:
         # averages a 2-second provider synthesis into the same figure as a
         # pre-rendered greeting and neither number means anything.
         self._greeting_source = greeting_source
+        # Recorded so a batch can be attributed to the turn-taking config it
+        # ran under. Comparing a batch with eager end-of-turn against one
+        # without is the only way to judge it, and neither batch says which it
+        # was unless the setting travels with the measurements.
+        self._eager_eot = eager_eot
         self._flush_every = max(1, flush_every)
 
         self._lock = threading.Lock()
@@ -139,6 +145,13 @@ class CallMetrics:
         self._user_messages = 0
         self._end_call_refusals = 0
 
+        # Eager end-of-turn accounting. A resume means a reply was drafted
+        # against a turn that had not ended: the wasted LLM call this feature
+        # trades for latency. The ratio is what says whether the threshold is
+        # set too low.
+        self._eager_turns = 0
+        self._turn_resumes = 0
+
         # Barge-in accounting
         self._barge_in_commits = 0
         self._barge_in_resumes = 0
@@ -159,7 +172,10 @@ class CallMetrics:
                 return
             self._bound_at = time.monotonic()
             self._bound_wall = _utcnow()
-            self._append_locked("metrics_bound", {"voice_threshold": self._voice_threshold})
+            self._append_locked("metrics_bound", {
+                "voice_threshold": self._voice_threshold,
+                "eager_eot": self._eager_eot if self._eager_eot is not None else 0,
+            })
 
     def deepgram_started(self) -> None:
         """Deepgram settings have been sent; the agent can now produce audio."""
@@ -273,6 +289,23 @@ class CallMetrics:
             self._turn_open = True
             self._turn_started_at = time.monotonic()
             self._turn_source = "provider"
+
+    def eager_turn_started(self) -> None:
+        """Flux reported EagerEndOfTurn: a reply is being drafted early."""
+        with self._lock:
+            self._eager_turns += 1
+
+    def turn_resumed(self) -> None:
+        """The customer kept talking after an eager end-of-turn.
+
+        The draft made against that turn is thrown away. This is the cost side
+        of eager end-of-turn, and it is also the signal that matters for
+        naturalness: a high rate means the threshold is firing inside pauses
+        the customer had not finished.
+        """
+        with self._lock:
+            self._turn_resumes += 1
+        self._stamp("metrics_turn_resumed", {"turn": self._turn_index})
 
     def latency_report(self, report: Any) -> None:
         """Deepgram's own STT/LLM/TTS split for the turn that just completed.
@@ -410,6 +443,9 @@ class CallMetrics:
                     "barge_in_resumes": self._barge_in_resumes,
                     "barge_in_timeouts": self._barge_in_timeouts,
                     "end_call_refusals": self._end_call_refusals,
+                    "eager_eot": self._eager_eot if self._eager_eot is not None else 0,
+                    "eager_turns": self._eager_turns,
+                    "turn_resumes": self._turn_resumes,
                 },
             )
             self._append_locked(
