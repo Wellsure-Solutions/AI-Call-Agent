@@ -19,7 +19,8 @@ class DurableCallCoordinator:
 
     def __init__(self, store: SQLiteCallStore, maximum: int, start_interval: float, *, ring_timeout: int = 45,
                  max_call_seconds: int = 900, extraction_timeout: float = 30, extraction_retry_delay: float = 5,
-                 extractor: AnswerExtractor | None = None, adapter_factory=TwilioAdapter) -> None:
+                 extractor: AnswerExtractor | None = None, adapter_factory=TwilioAdapter,
+                 reconciliation_max_attempts: int = 8, abandoned_grace_seconds: float = 300.0) -> None:
         self.store = store
         self.maximum = maximum
         self.start_interval = start_interval
@@ -29,6 +30,9 @@ class DurableCallCoordinator:
         self.extraction_retry_delay = extraction_retry_delay
         self.extractor = extractor or AnswerExtractor()
         self.adapter_factory = adapter_factory
+        self.reconciliation_max_attempts = reconciliation_max_attempts
+        self.abandoned_grace_seconds = abandoned_grace_seconds
+        self.quarantined = 0
         self.owner = str(uuid4())
         self._stop = asyncio.Event()
         self.last_iteration_at: str | None = None
@@ -50,6 +54,21 @@ class DurableCallCoordinator:
     async def run_once(self) -> None:
         self.iterations += 1
         self.last_iteration_at = datetime.now(timezone.utc).isoformat()
+        # Release capacity held by calls that no deadline action can still
+        # resolve. A single one of those blocks every queued call at the
+        # default concurrency of one.
+        #
+        # Isolated deliberately: this is housekeeping, and letting it fail the
+        # iteration would stop dialling entirely -- reproducing, via a
+        # different route, exactly the stall it exists to clear.
+        try:
+            released = await asyncio.to_thread(self.store.quarantine_abandoned_jobs, self.abandoned_grace_seconds)
+        except Exception as error:
+            released = 0
+            logger.warning("job_quarantine_sweep_failed", extra={"error_type": type(error).__name__})
+        if released:
+            self.quarantined += released
+            logger.warning("jobs_quarantined", extra={"count": released})
         action = await asyncio.to_thread(self.store.claim_due_action, self.owner)
         if action:
             await self._reconcile(action)
@@ -101,15 +120,18 @@ class DurableCallCoordinator:
             adapter = self.adapter_factory()
             status = await adapter.fetch_status(call["call_sid"])
             if status in PROVIDER_TERMINAL:
-                await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, status)
+                await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, status,
+                                        None, self.reconciliation_max_attempts)
                 return
             # Ringing/queued calls are canceled; connected calls are completed.
             requested = "canceled" if status in {"queued", "ringing", "initiated"} else "completed"
             await adapter.update_status(call["call_sid"], requested)
             # Capacity remains occupied pending terminal webhook or a later terminal lookup.
-            await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None, "Provider termination requested")
+            await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None,
+                                    "Provider termination requested", self.reconciliation_max_attempts)
         except Exception as error:
-            await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None, type(error).__name__)
+            await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None,
+                                    type(error).__name__, self.reconciliation_max_attempts)
 
     async def _extract(self, call: dict) -> None:
         session = CallSession(call_id=call["call_id"], phone_number=call["phone_number"], metadata={"lead_id": call.get("lead_id")})
@@ -131,7 +153,8 @@ class DurableCallCoordinator:
 
     def health(self) -> dict[str, object]:
         return {"owner": self.owner, "running": not self._stop.is_set(), "iterations": self.iterations,
-                "last_iteration_at": self.last_iteration_at, "last_error": self.last_error}
+                "last_iteration_at": self.last_iteration_at, "last_error": self.last_error,
+                "quarantined_jobs": self.quarantined}
 
     def stop(self) -> None:
         self._stop.set()

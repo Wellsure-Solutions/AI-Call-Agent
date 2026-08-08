@@ -3,3 +3,10 @@ __pycache__/
 *.py[cod]
 data/
 call_answers.xlsx
+.venv/
+venv/
+.pytest_cache/
+
+# Local metric captures: raw call audio, never committed.
+*.ulaw
+*.wav

@@ -103,6 +103,10 @@ class SQLiteCallStore(JsonCallStore):
             "reconciliation_status": "TEXT", "reconciliation_error": "TEXT",
             "reconciliation_attempts": "INTEGER NOT NULL DEFAULT 0", "next_reconciliation_at": "TEXT",
             "action_owner": "TEXT", "action_lease_expires_at": "TEXT",
+            # Twilio's async AMD verdict, kept separate from provider_status
+            # and outcome so a machine pickup stays distinguishable from a
+            # human who hung up early.
+            "answered_by": "TEXT", "answered_by_at": "TEXT",
         }
         existing = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
         for name, declaration in call_columns.items():
@@ -385,8 +389,16 @@ class SQLiteCallStore(JsonCallStore):
             lead_id = metadata.get("lead_id")
             if lead_id and not db.execute("SELECT 1 FROM leads WHERE lead_id=?", (lead_id,)).fetchone():
                 lead_id = None
+            # A browser test has no phone number. Using the bare literal
+            # "browser" for all of them collided with the one_active_phone
+            # unique index -- browser calls finish in AI_FINISHED, which is
+            # not terminal, so the first one held the slot forever and every
+            # later INSERT OR IGNORE was silently skipped. The row then did
+            # not exist for the SELECT below and finalisation crashed on
+            # every browser call after the first.
+            phone = session.phone_number or metadata.get("phone_number") or f"browser:{session.call_id}"
             db.execute("""INSERT OR IGNORE INTO calls(call_id,lead_id,phone_number,business_name,category,notes,lifecycle_state,media_connected,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'CREATED',?,?,?)""", (session.call_id, lead_id, session.phone_number or metadata.get("phone_number") or "browser", metadata.get("business_name") or "", metadata.get("category") or "", metadata.get("notes") or "", int(bool(metadata.get("media_connected", session.direction == "browser"))), session.started_at.isoformat(), now))
+                VALUES(?,?,?,?,?,?,'CREATED',?,?,?)""", (session.call_id, lead_id, phone, metadata.get("business_name") or "", metadata.get("category") or "", metadata.get("notes") or "", int(bool(metadata.get("media_connected", session.direction == "browser"))), session.started_at.isoformat(), now))
             db.execute("""UPDATE calls SET transcript=?,ended_at=COALESCE(ended_at,?),duration=?,media_connected=CASE WHEN ? THEN 1 ELSE media_connected END,
                 media_end_reason=?,media_ended_at=COALESCE(media_ended_at,?),
                 raw_persisted_at=COALESCE(raw_persisted_at,?),lifecycle_state=CASE WHEN provider_terminal_at IS NULL THEN ? ELSE lifecycle_state END,
@@ -396,7 +408,14 @@ class SQLiteCallStore(JsonCallStore):
                  int(bool(metadata.get("media_connected", session.direction == "browser"))), media_end_reason, now, now,
                  lifecycle, int(bool(metadata.get("media_connected", session.direction == "browser"))),
                  now, now, session.call_id))
-            connected = db.execute("SELECT media_connected FROM calls WHERE call_id=?", (session.call_id,)).fetchone()[0]
+            row = db.execute("SELECT media_connected FROM calls WHERE call_id=?", (session.call_id,)).fetchone()
+            if row is None:
+                # The insert above was rejected, so there is nothing to
+                # persist against. Losing a transcript is bad; crashing the
+                # websocket handler during cleanup is worse, because it also
+                # skips the rest of teardown.
+                raise SuppressedError(f"call row missing for {session.call_id}; raw transcript not persisted")
+            connected = row[0]
             if connected:
                 db.execute("""INSERT INTO extraction_jobs(call_id,state,next_attempt_at,max_attempts,created_at,updated_at)
                     VALUES(?,'pending',?,?,?,?) ON CONFLICT(call_id) DO NOTHING""", (session.call_id, now, max_extraction_attempts, now, now))
@@ -489,7 +508,28 @@ class SQLiteCallStore(JsonCallStore):
             db.execute("UPDATE call_jobs SET queue_state='canceling',updated_at=? WHERE call_id=?", (now, row["call_id"]))
             return self._call_from_db(db, row["call_id"])
 
-    def reconciliation_result(self, call_id: str, owner: str, provider_status: str | None, error: str | None = None) -> None:
+    def reconciliation_result(self, call_id: str, owner: str, provider_status: str | None, error: str | None = None,
+                              max_attempts: int = 8) -> None:
+        """Record the outcome of one provider reconciliation attempt.
+
+        A proven terminal status resolves the call normally. Anything else is
+        retried with bounded backoff -- but only up to `max_attempts`, after
+        which the job is quarantined.
+
+        The bound exists because without it a call whose provider cannot be
+        reached at all (network down, tunnel dead, credentials rotated)
+        retries every 300 seconds forever while still occupying a capacity
+        slot. At the default ceiling of one concurrent call that is a total
+        outage of the queue, caused by a single call nobody can resolve.
+
+        Quarantine does not invent a terminal status and does not redial.
+        `needs_reconciliation` is the state this design already uses for an
+        expired dial claim: unresolved, operator-visible, still blocking its
+        phone number, and deliberately outside the capacity count. The
+        invariant that capacity is never released by a *timer alone* holds --
+        release here requires repeated, recorded, failed attempts to obtain
+        proof, which is evidence, not elapsed time.
+        """
         if provider_status:
             self.provider_status(call_id, provider_status)
         now = utcnow()
@@ -501,10 +541,94 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("UPDATE calls SET action_owner=NULL,action_lease_expires_at=NULL,reconciliation_status=NULL,reconciliation_error=NULL WHERE call_id=?", (call_id,))
                 return
             attempts = row["reconciliation_attempts"] + 1
+            reason = (error or "Provider remains nonterminal")[:500]
+            if attempts >= max(1, max_attempts):
+                db.execute("""UPDATE calls SET action_owner=NULL,action_lease_expires_at=NULL,
+                    lifecycle_state=CASE WHEN provider_terminal_at IS NULL THEN 'NEEDS_RECONCILIATION' ELSE lifecycle_state END,
+                    reconciliation_status='stalled',reconciliation_error=?,reconciliation_attempts=?,
+                    next_reconciliation_at=NULL,updated_at=? WHERE call_id=?""", (reason, attempts, now, call_id))
+                db.execute("UPDATE call_jobs SET queue_state='needs_reconciliation',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
+                self._event(db, call_id, "reconciliation_stalled", now, {"attempts": attempts})
+                return
             db.execute("""UPDATE calls SET action_owner=NULL,action_lease_expires_at=NULL,reconciliation_status='retry_pending',
                 reconciliation_error=?,reconciliation_attempts=?,next_reconciliation_at=?,updated_at=? WHERE call_id=?""",
-                ((error or "Provider remains nonterminal")[:500], attempts, future(min(300, 5 * 2 ** min(attempts, 6))), now, call_id))
+                (reason, attempts, future(min(300, 5 * 2 ** min(attempts, 6))), now, call_id))
             db.execute("UPDATE call_jobs SET queue_state='active',updated_at=? WHERE call_id=?", (now, call_id))
+
+    def quarantine_abandoned_jobs(self, grace_seconds: float = 300.0) -> int:
+        """Release capacity held by calls that outlived every deadline.
+
+        The deadline reconciler only picks up calls it can identify: it needs
+        a CallSid and a due deadline. A call that never got either -- a dial
+        whose webhooks never arrived, a coordinator killed between claiming
+        and submitting -- holds its slot with nothing scheduled to ever look
+        at it again.
+
+        `grace_seconds` is added on top of the call's own maximum-call
+        deadline, so this can only fire well after the call could still have
+        been live. Like every other quarantine here it neither terminalizes
+        nor redials; it makes the call an operator's problem instead of the
+        queue's.
+        """
+        now, cutoff = utcnow(), future(-grace_seconds)
+        with self.transaction(immediate=True) as db:
+            # Deliberately keyed on the call's own deadline and nothing else.
+            # An earlier version also required the row to be untouched
+            # recently, which meant a call being actively (and fruitlessly)
+            # retried refreshed `updated_at` on every attempt and was never
+            # swept -- the exact case this exists for.
+            stalled = db.execute("""SELECT c.call_id FROM calls c JOIN call_jobs j USING(call_id)
+                WHERE j.queue_state IN ('claimed','active','canceling')
+                  AND c.provider_terminal_at IS NULL
+                  AND COALESCE(c.max_call_deadline, c.ring_deadline, c.created_at) < ?""", (cutoff,)).fetchall()
+            for row in stalled:
+                db.execute("""UPDATE calls SET lifecycle_state='NEEDS_RECONCILIATION',reconciliation_status='abandoned',
+                    reconciliation_error='No provider resolution within the maximum call window',
+                    next_reconciliation_at=NULL,action_owner=NULL,action_lease_expires_at=NULL,updated_at=?
+                    WHERE call_id=? AND provider_terminal_at IS NULL""", (now, row[0]))
+                db.execute("UPDATE call_jobs SET queue_state='needs_reconciliation',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, row[0]))
+                self._event(db, row[0], "job_abandoned", now)
+            return len(stalled)
+
+    def resolve_stuck_call(self, call_id: str, status: str = "failed", note: str = "operator_resolved") -> dict[str, Any] | None:
+        """Operator override for a call the provider will never resolve.
+
+        Deliberately not automatic and deliberately not a timer. Someone has
+        checked the provider console and is asserting the outcome; that is
+        the proof the durable design requires before a call becomes terminal.
+        The phone stays suppressed from redial by the usual rules, and the
+        override is recorded as an event so the history shows a human decided
+        rather than the system guessing.
+        """
+        if status not in PROVIDER_TERMINAL:
+            raise ValueError(f"status must be one of {sorted(PROVIDER_TERMINAL)}")
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT lifecycle_state,provider_terminal_at FROM calls WHERE call_id=?", (call_id,)).fetchone()
+            if not row:
+                return None
+            if row["provider_terminal_at"]:
+                return self._call_from_db(db, call_id)
+            self._event(db, call_id, "operator_resolved", now, {"status": status, "note": note[:120]})
+        self.provider_status(call_id, status)
+        with self.transaction(immediate=True) as db:
+            db.execute("UPDATE calls SET reconciliation_status=NULL,reconciliation_error=NULL,next_reconciliation_at=NULL,action_owner=NULL,action_lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
+            db.execute("UPDATE call_jobs SET queue_state='terminal',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
+            return self._call_from_db(db, call_id)
+
+    def capacity_snapshot(self) -> dict[str, Any]:
+        """What is currently occupying the queue, and for how long."""
+        with self._connect() as db:
+            states = dict(db.execute("SELECT queue_state,COUNT(*) FROM call_jobs GROUP BY queue_state"))
+            occupied = sum(states.get(state, 0) for state in CAPACITY_STATES)
+            oldest = db.execute("""SELECT c.call_id,c.lifecycle_state,c.provider_status,c.created_at,j.queue_state
+                FROM calls c JOIN call_jobs j USING(call_id)
+                WHERE j.queue_state IN ('claimed','active','canceling') ORDER BY c.created_at LIMIT 5""").fetchall()
+        return {
+            "queue_states": states,
+            "capacity_occupied": occupied,
+            "oldest_occupying": [dict(row) for row in oldest],
+        }
 
     def list_reconciliation(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._rows("SELECT * FROM calls WHERE reconciliation_status IS NOT NULL AND provider_terminal_at IS NULL ORDER BY updated_at LIMIT ?", (min(limit, 100),))
@@ -533,11 +657,16 @@ class SQLiteCallStore(JsonCallStore):
 
     def statistics(self) -> dict[str, Any]:
         with self._connect() as db:
+            # Every aggregate is COALESCEd. SUM() over zero rows returns NULL,
+            # not 0, so on a fresh database the arithmetic below raised a
+            # TypeError and the dashboard's stats panel 500'd on first load --
+            # before a single call had been placed.
             row = db.execute("""SELECT COUNT(*) total_calls,
-                SUM(CASE WHEN media_connected=1 THEN 1 ELSE 0 END) calls_answered,
-                SUM(CASE WHEN outcome IN ('busy','failed') THEN 1 ELSE 0 END) busy_failed_calls,
-                COALESCE(AVG(duration),0) average_call_duration,SUM(interested) interested_responses,
-                SUM(callback_requested) callback_requested FROM calls""").fetchone()
+                COALESCE(SUM(CASE WHEN media_connected=1 THEN 1 ELSE 0 END),0) calls_answered,
+                COALESCE(SUM(CASE WHEN outcome IN ('busy','failed') THEN 1 ELSE 0 END),0) busy_failed_calls,
+                COALESCE(AVG(duration),0) average_call_duration,
+                COALESCE(SUM(interested),0) interested_responses,
+                COALESCE(SUM(callback_requested),0) callback_requested FROM calls""").fetchone()
             outcomes = dict(db.execute("SELECT COALESCE(outcome,'unknown'),COUNT(*) FROM calls GROUP BY COALESCE(outcome,'unknown')"))
             days = dict(db.execute("SELECT substr(COALESCE(ended_at,started_at,created_at),1,10),COUNT(*) FROM calls GROUP BY 1"))
             leads = db.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
@@ -587,6 +716,61 @@ class SQLiteCallStore(JsonCallStore):
         if not row:
             raise KeyError(call_id)
         return self._decode_call(dict(row))
+
+    def record_answered_by(self, call_id: str, answered_by: str, sid: str | None = None) -> dict[str, Any] | None:
+        """Persist Twilio's async AMD verdict for a call.
+
+        Deliberately records the verdict and nothing else. It does not
+        terminalize the call, does not set an outcome, and does not release
+        the job slot: AMD is a provider opinion delivered mid-call, not a
+        proven terminal status, and capacity is only ever freed by one. The
+        caller asks Twilio to complete the call; the resulting `completed`
+        webhook frees the slot through the normal path.
+        """
+        answered_by, now = str(answered_by or "").lower()[:40], utcnow()
+        if not answered_by:
+            return None
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT call_sid,answered_by FROM calls WHERE call_id=?", (call_id,)).fetchone()
+            if not row or (sid and row["call_sid"] not in (None, sid)):
+                return None
+            if row["answered_by"]:
+                # AMD callbacks can be redelivered; the first verdict stands.
+                return self._call_from_db(db, call_id)
+            db.execute("UPDATE calls SET answered_by=?,answered_by_at=?,updated_at=? WHERE call_id=?", (answered_by, now, now, call_id))
+            self._event(db, call_id, "answered_by", now, {"answered_by": answered_by})
+            return self._call_from_db(db, call_id)
+
+    def record_events(self, call_id: str, events: list[tuple[str, dict[str, Any]]]) -> int:
+        """Bulk-append instrumentation events for one call.
+
+        Written in a single transaction because the metrics writer batches:
+        one commit per flush rather than one per measured turn keeps the
+        instrumentation off the hot path of SQLite's write lock, which the
+        coordinator and the provider webhooks are also contending for.
+
+        A call row may already be gone (operator deletion mid-flush); the
+        foreign key would then reject the batch. Metrics are never worth
+        raising into a live call, so that is swallowed.
+        """
+        if not events:
+            return 0
+        now = utcnow()
+        rows = [(call_id, name, json.dumps(metadata or {}, ensure_ascii=False), now) for name, metadata in events]
+        try:
+            with self.transaction(immediate=True) as db:
+                db.executemany("INSERT INTO call_events(call_id,event_name,metadata,timestamp) VALUES(?,?,?,?)", rows)
+        except sqlite3.Error:
+            return 0
+        return len(rows)
+
+    def list_events(self, call_id: str, prefix: str = "") -> list[dict[str, Any]]:
+        if prefix:
+            return self._rows(
+                "SELECT * FROM call_events WHERE call_id=? AND event_name LIKE ? ORDER BY event_id",
+                (call_id, prefix + "%"),
+            )
+        return self._rows("SELECT * FROM call_events WHERE call_id=? ORDER BY event_id", (call_id,))
 
     def _event(self, db: sqlite3.Connection, call_id: str, name: str, timestamp: str, metadata: dict[str, Any] | None = None) -> None:
         # Exact duplicate callback events within one transaction are harmless; history remains bounded only by durable disk.
