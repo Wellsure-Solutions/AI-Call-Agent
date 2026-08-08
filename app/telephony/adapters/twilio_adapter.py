@@ -515,11 +515,18 @@ class TwilioAdapter(BaseTelephonyAdapter):
             # loud, sustained, and perfectly correlated with agent speech --
             # everything the duration test looks for. Left unfiltered the
             # agent interrupts itself, which is indistinguishable from a
-            # customer barging in and is why it must be rejected before the
-            # tracker ever sees the frame.
-            self._last_caller_rms = rms_energy(caller_frame)
-            return
-        self._vad_tracker.observe(caller_frame)
+            # customer barging in, so it must never count as voice.
+            #
+            # It is still counted as *silence* rather than skipped. Returning
+            # here left `voiced_ms` frozen and `_frames_since_pause` growing
+            # against a resume check that was never reached, so a pause the
+            # customer never spoke in could only end on the 2.5s ambiguity
+            # timeout -- 2.5 seconds of dead air, which is the robotic
+            # failure the pause exists to avoid. Observed on a real call: the
+            # single barge-in decision in the batch was a timeout.
+            self._vad_tracker.observe_unvoiced(rms_energy(caller_frame))
+        else:
+            self._vad_tracker.observe(caller_frame)
         self._last_caller_rms = self._vad_tracker.last_energy
 
         if self._vad_tracker.voiced_ms >= BARGE_IN_CONFIRM_MS:

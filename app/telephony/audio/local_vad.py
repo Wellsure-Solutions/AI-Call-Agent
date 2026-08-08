@@ -225,7 +225,23 @@ class VoicedDurationTracker:
             self._silent_run = 0
             self.voiced_ms += self.frame_ms
         else:
-            self._silent_run += 1
-            if self._silent_run >= self.hangover_frames:
-                self.voiced_ms = 0
+            self._advance_silence()
         return voiced
+
+    def observe_unvoiced(self, energy: float) -> None:
+        """Account for a frame that was loud but was not the caller.
+
+        The only current source is echo, which the caller's adapter rejects
+        before it reaches `observe`. Dropping those frames entirely instead
+        of counting them freezes the tracker: `voiced_ms` never reaches zero,
+        so the pause they occur in can only end on the ambiguity timeout.
+        From the caller's side these frames are silence, and counting them as
+        silence is what lets a run actually end.
+        """
+        self.last_energy = energy
+        self._advance_silence()
+
+    def _advance_silence(self) -> None:
+        self._silent_run += 1
+        if self._silent_run >= self.hangover_frames:
+            self.voiced_ms = 0

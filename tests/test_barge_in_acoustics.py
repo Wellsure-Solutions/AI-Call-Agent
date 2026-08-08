@@ -204,6 +204,23 @@ def test_speakerphone_echo_no_longer_interrupts_the_agent():
     assert bridge.committed is False
 
 
+def test_an_echo_only_pause_resumes_quickly_instead_of_timing_out():
+    """Rejected echo used to be dropped before the tracker saw it, which left
+    `voiced_ms` frozen and the resume check unreachable -- so a pause the
+    customer never spoke in could only end on the 2.5s ambiguity timeout.
+    That is 2.5 seconds of dead air per false trigger, and it is what the
+    last real batch measured: one barge-in decision, and it was a timeout.
+    """
+    adapter, bridge, metrics = adapter_in_pause(agent_playing=True)
+    feed(adapter, fixtures.speakerphone_echo(ms=2000))
+
+    assert bridge.committed is False
+    decisions = [p for name, p in metrics.drain() if name == "metrics_barge_in"]
+    assert decisions, "the pause must have ended"
+    assert decisions[0]["decision"] == "resume"
+    assert decisions[0]["elapsed_ms"] < 1000, "and ended promptly, not on the timeout"
+
+
 def test_a_real_customer_still_interrupts_through_playing_agent_audio():
     """The echo filter must not become a way to ignore customers. Someone
     speaking into their handset is far louder than agent leakage."""
