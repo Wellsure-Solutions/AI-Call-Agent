@@ -205,6 +205,11 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             "calls": len(calls),
             "hangups_refused_for_no_closing": refusals,
             "calls_affected": sum(1 for c in calls if int(c.get("end_call_refusals", 0) or 0)),
+            # The model was asked for a closing, said nothing, and we spoke
+            # for it. Counted apart from a refusal: a refusal the model then
+            # answers is the guard working, this is the guard being the only
+            # thing that spoke.
+            "spoken_for_the_model": sum(int(c.get("fallback_closings", 0) or 0) for c in calls),
         }
 
     for kind in ("metrics_provider_warning", "metrics_provider_error"):
@@ -275,6 +280,11 @@ def print_report(report: dict[str, Any]) -> None:
             f"{timeouts} timed out) -- customers spoke over the agent and were not heard"
         )
     closing = report.get("closing") or {}
+    if closing.get("spoken_for_the_model"):
+        attention.append(
+            f"{closing['spoken_for_the_model']} call(s) ended on the pre-rendered goodbye -- "
+            "the model produced no closing of its own"
+        )
     if closing.get("hangups_refused_for_no_closing"):
         attention.append(
             f"{closing['hangups_refused_for_no_closing']} hangup(s) refused across "
@@ -342,6 +352,11 @@ def print_report(report: dict[str, Any]) -> None:
             print("  for a closing -- but the model still tried to drop the call.")
         else:
             print(f"  no hangup was attempted without a closing across {closing['calls']} call(s)")
+        spoken_for = closing.get("spoken_for_the_model") or 0
+        if spoken_for:
+            print(f"  {spoken_for} call(s) were closed by the pre-rendered goodbye because the")
+            print("  model never spoke one. The customer heard a close, but the model still")
+            print("  failed to produce it -- check the prompt's CLOSING section.")
 
     if report["silence"]:
         print("\n=== Dead air (gaps >= configured threshold) ===")

@@ -41,15 +41,20 @@ def greeting_fingerprint(text: str, provider: str, model_id: str, voice_id: str,
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
-def cache_path(directory: Path, fingerprint: str) -> Path:
-    return Path(directory) / f"greeting-{fingerprint}.ulaw"
+def cache_path(directory: Path, fingerprint: str, kind: str = "greeting") -> Path:
+    return Path(directory) / f"{kind}-{fingerprint}.ulaw"
 
 
-def load_greeting(directory: Path | None, fingerprint: str) -> bytes | None:
-    """Return cached mu-law greeting audio, or None to fall back to the provider."""
+def load_greeting(directory: Path | None, fingerprint: str, kind: str = "greeting") -> bytes | None:
+    """Return cached mu-law audio, or None to fall back to the provider.
+
+    `kind` only names the file. The fingerprint already covers the text, so
+    two different phrases never collide -- this just keeps the cache
+    directory readable.
+    """
     if directory is None:
         return None
-    path = cache_path(directory, fingerprint)
+    path = cache_path(directory, fingerprint, kind)
     try:
         audio = path.read_bytes()
     except OSError:
@@ -63,9 +68,9 @@ def load_greeting(directory: Path | None, fingerprint: str) -> bytes | None:
     return audio
 
 
-def save_greeting(directory: Path, fingerprint: str, audio: bytes) -> Path:
+def save_greeting(directory: Path, fingerprint: str, audio: bytes, kind: str = "greeting") -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    path = cache_path(directory, fingerprint)
+    path = cache_path(directory, fingerprint, kind)
     path.write_bytes(audio)
     return path

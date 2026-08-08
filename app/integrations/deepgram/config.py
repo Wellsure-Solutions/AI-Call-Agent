@@ -16,6 +16,7 @@ from app.telephony.audio.greeting_cache import greeting_fingerprint, load_greeti
 from app.core.settings import (
     DEEPGRAM_API_KEY,
     GREETING_CACHE_DIR,
+    DEEPGRAM_FALLBACK_CLOSING,
     DEEPGRAM_GREETING,
     DEEPGRAM_LISTEN_MODEL,
     DEEPGRAM_SPEAK_LANGUAGE,
@@ -66,6 +67,26 @@ def greeting_fingerprint_for_current_config() -> str:
 def cached_greeting_audio() -> bytes | None:
     """Pre-rendered greeting for the current voice/text, if one exists."""
     return load_greeting(GREETING_CACHE_DIR, greeting_fingerprint_for_current_config())
+
+
+def closing_fingerprint_for_current_config() -> str:
+    return greeting_fingerprint(
+        DEEPGRAM_FALLBACK_CLOSING, DEEPGRAM_SPEAK_PROVIDER, DEEPGRAM_SPEAK_MODEL_ID,
+        DEEPGRAM_SPEAK_VOICE_ID, DEEPGRAM_SPEAK_LANGUAGE,
+    )
+
+
+def cached_closing_audio() -> bytes | None:
+    """Pre-rendered goodbye, played only when the model will not speak one.
+
+    Rendered through the same voice as the rest of the call, so a customer who
+    hears it does not hear the agent change person on the last sentence.
+    """
+    if not DEEPGRAM_FALLBACK_CLOSING:
+        return None
+    return load_greeting(
+        GREETING_CACHE_DIR, closing_fingerprint_for_current_config(), kind="closing"
+    )
 
 
 _ALREADY_GREETED_NOTE = (

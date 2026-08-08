@@ -138,6 +138,7 @@ class CallMetrics:
         self._assistant_messages = 0
         self._user_messages = 0
         self._end_call_refusals = 0
+        self._fallback_closings = 0
 
         # Barge-in accounting
         self._barge_in_commits = 0
@@ -330,6 +331,18 @@ class CallMetrics:
             self._end_call_refusals += 1
         self._stamp("metrics_end_call_refused", {})
 
+    def fallback_closing_spoken(self) -> None:
+        """We said goodbye because the model would not.
+
+        The call was saved, but the model still failed to close it. Counted
+        separately from a refusal so the two are not confused: a refusal the
+        model then answers is the guard working, and this is the guard being
+        the only thing that spoke.
+        """
+        with self._lock:
+            self._fallback_closings += 1
+        self._stamp("metrics_fallback_closing", {})
+
     def provider_diagnostic(self, kind: str, code: str | None, description: str | None) -> None:
         """Record a Deepgram Warning/Error code so a silent call has a cause.
 
@@ -410,6 +423,7 @@ class CallMetrics:
                     "barge_in_resumes": self._barge_in_resumes,
                     "barge_in_timeouts": self._barge_in_timeouts,
                     "end_call_refusals": self._end_call_refusals,
+                    "fallback_closings": self._fallback_closings,
                 },
             )
             self._append_locked(

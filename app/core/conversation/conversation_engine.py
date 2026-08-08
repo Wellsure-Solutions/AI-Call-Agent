@@ -13,7 +13,13 @@ from deepgram.agent.v1.types import AgentV1SendFunctionCallResponse
 from deepgram.core.events import EventType
 
 from app.core.settings import AGENT_CLOSE_GRACE_SECONDS, AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS
-from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
+from app.core.settings import DEEPGRAM_FALLBACK_CLOSING
+from app.integrations.audio_profiles import get_audio_profile
+from app.integrations.deepgram.config import (
+    DEEPGRAM_API_KEY,
+    cached_closing_audio,
+    get_agent_settings,
+)
 from app.services.call_control import (
     END_CALL_FUNCTION,
     is_closing_call_message,
@@ -403,9 +409,42 @@ class ConversationEngine:
             "agent_close_grace_expired",
             extra={"call_id": self.session.call_id, "grace_seconds": grace_seconds},
         )
+        if not self._assistant_spoke_since_user:
+            # The model was asked for a closing and produced nothing. Rather
+            # than drop the line in silence -- which is what a customer
+            # actually experiences as being hung up on -- say goodbye
+            # ourselves. Queued before on_finished(), so the adapter's close
+            # path drains it like any other agent audio.
+            self._speak_fallback_closing()
         self.closing_requested = True
         self.session.safe_transition_to(CallState.AI_FINISHED)
         self.on_finished()
+
+    def _speak_fallback_closing(self) -> bool:
+        """Play the pre-rendered goodbye. Returns whether anything was played.
+
+        Only on transports whose wire format matches the cached audio. The
+        cache is 8 kHz mu-law because that is what the phone leg carries; a
+        browser session runs linear16 at 24 kHz, and pushing mu-law bytes into
+        it would emit noise, not a goodbye.
+        """
+        if get_audio_profile(self.session.direction).encoding != "mulaw":
+            return False
+        audio = cached_closing_audio()
+        if not audio:
+            # Nothing rendered. The call closes silently, exactly as before --
+            # a missing cache must never be the reason a call fails.
+            logger.info(
+                "fallback_closing_unavailable",
+                extra={"call_id": self.session.call_id},
+            )
+            return False
+        logger.info("fallback_closing_spoken", extra={"call_id": self.session.call_id})
+        if self.metrics is not None:
+            self.metrics.fallback_closing_spoken()
+        self.session.add_turn("assistant", DEEPGRAM_FALLBACK_CLOSING)
+        self.on_audio(audio)
+        return True
 
     def _on_close(self, event) -> None:
         self._deepgram_closed = True
