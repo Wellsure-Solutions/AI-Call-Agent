@@ -66,7 +66,7 @@ DEEPGRAM_SPEAK_PROVIDER = os.getenv("DEEPGRAM_SPEAK_PROVIDER", "eleven_labs")
 # latency tier, and after mu-law at 8 kHz its quality headroom is largely
 # inaudible anyway.
 DEEPGRAM_SPEAK_MODEL_ID = os.getenv("DEEPGRAM_SPEAK_MODEL_ID", "eleven_flash_v2_5")
-DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "k2intd1ORm0YUH8etnXg")
+DEEPGRAM_SPEAK_VOICE_ID = os.getenv("DEEPGRAM_SPEAK_VOICE_ID", "Ms9OTvWb99V6DwRHZn6q")
 # Pins the voice's language so it does not re-infer it per sentence. The
 # campaign script is deliberately code-mixed -- Devanagari Hindi with English
 # business terms ("GST invoice", "Amazon Business account", "cashback") left
