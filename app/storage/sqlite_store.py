@@ -389,8 +389,16 @@ class SQLiteCallStore(JsonCallStore):
             lead_id = metadata.get("lead_id")
             if lead_id and not db.execute("SELECT 1 FROM leads WHERE lead_id=?", (lead_id,)).fetchone():
                 lead_id = None
+            # A browser test has no phone number. Using the bare literal
+            # "browser" for all of them collided with the one_active_phone
+            # unique index -- browser calls finish in AI_FINISHED, which is
+            # not terminal, so the first one held the slot forever and every
+            # later INSERT OR IGNORE was silently skipped. The row then did
+            # not exist for the SELECT below and finalisation crashed on
+            # every browser call after the first.
+            phone = session.phone_number or metadata.get("phone_number") or f"browser:{session.call_id}"
             db.execute("""INSERT OR IGNORE INTO calls(call_id,lead_id,phone_number,business_name,category,notes,lifecycle_state,media_connected,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'CREATED',?,?,?)""", (session.call_id, lead_id, session.phone_number or metadata.get("phone_number") or "browser", metadata.get("business_name") or "", metadata.get("category") or "", metadata.get("notes") or "", int(bool(metadata.get("media_connected", session.direction == "browser"))), session.started_at.isoformat(), now))
+                VALUES(?,?,?,?,?,?,'CREATED',?,?,?)""", (session.call_id, lead_id, phone, metadata.get("business_name") or "", metadata.get("category") or "", metadata.get("notes") or "", int(bool(metadata.get("media_connected", session.direction == "browser"))), session.started_at.isoformat(), now))
             db.execute("""UPDATE calls SET transcript=?,ended_at=COALESCE(ended_at,?),duration=?,media_connected=CASE WHEN ? THEN 1 ELSE media_connected END,
                 media_end_reason=?,media_ended_at=COALESCE(media_ended_at,?),
                 raw_persisted_at=COALESCE(raw_persisted_at,?),lifecycle_state=CASE WHEN provider_terminal_at IS NULL THEN ? ELSE lifecycle_state END,
@@ -400,7 +408,14 @@ class SQLiteCallStore(JsonCallStore):
                  int(bool(metadata.get("media_connected", session.direction == "browser"))), media_end_reason, now, now,
                  lifecycle, int(bool(metadata.get("media_connected", session.direction == "browser"))),
                  now, now, session.call_id))
-            connected = db.execute("SELECT media_connected FROM calls WHERE call_id=?", (session.call_id,)).fetchone()[0]
+            row = db.execute("SELECT media_connected FROM calls WHERE call_id=?", (session.call_id,)).fetchone()
+            if row is None:
+                # The insert above was rejected, so there is nothing to
+                # persist against. Losing a transcript is bad; crashing the
+                # websocket handler during cleanup is worse, because it also
+                # skips the rest of teardown.
+                raise SuppressedError(f"call row missing for {session.call_id}; raw transcript not persisted")
+            connected = row[0]
             if connected:
                 db.execute("""INSERT INTO extraction_jobs(call_id,state,next_attempt_at,max_attempts,created_at,updated_at)
                     VALUES(?,'pending',?,?,?,?) ON CONFLICT(call_id) DO NOTHING""", (session.call_id, now, max_extraction_attempts, now, now))

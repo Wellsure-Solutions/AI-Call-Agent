@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from app.core.conversation.conversation_engine import ConversationEngine
 from app.services.call_service import CallResultService
 from app.telephony.call_session import CallSession
 from app.telephony.metrics import CallMetrics
 from app.telephony.state_machine import CallState
+
+logger = logging.getLogger(__name__)
 
 
 class AudioBridge:
@@ -80,7 +83,20 @@ class AudioBridge:
                 self.session.safe_transition_to(CallState.AI_FINISHED)
             if self.result_service is not None:
                 self.session.safe_transition_to(CallState.EXTRACTION)
-                await self.result_service.afinalize(self.session, status)
+                try:
+                    await self.result_service.afinalize(self.session, status)
+                except Exception:
+                    # This runs from the adapter's `finally`, so raising here
+                    # aborts the rest of teardown: the media dump is left open
+                    # and the call's metrics are never flushed. Losing the
+                    # transcript is bad; losing the transcript *and* every
+                    # measurement of why is worse, and the failure would then
+                    # be invisible in the batch report.
+                    logger.exception(
+                        "call_finalization_failed",
+                        extra={"call_id": self.session.call_id, "media_end_reason": status},
+                    )
+                    self.session.finish(status)
             else:
                 self.session.finish(status)
 
