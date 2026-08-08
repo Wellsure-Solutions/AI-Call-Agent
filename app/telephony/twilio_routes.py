@@ -18,7 +18,6 @@ from twilio.request_validator import RequestValidator
 from app.core.settings import (
     AMD_TERMINAL_VERDICTS,
     BARGE_IN_VOICE_ENERGY_THRESHOLD,
-    DEEPGRAM_EAGER_EOT_THRESHOLD,
     MAX_CALL_SECONDS,
     MEDIA_DUMP_DIR,
     METRICS_ENABLED,
@@ -242,6 +241,5 @@ def _build_metrics(call_id: str, greeting_source: str = "provider") -> tuple[Cal
         voice_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD,
         silence_gap_ms=METRICS_SILENCE_GAP_MS,
         greeting_source=greeting_source,
-        eager_eot=DEEPGRAM_EAGER_EOT_THRESHOLD,
     )
     return metrics, writer
