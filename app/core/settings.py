@@ -169,6 +169,13 @@ AGENT_PLAYBACK_DRAIN_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_DRA
 # दिन शुभ हो सर, धन्यवाद।" does not fit in it, and the observed symptom was
 # exactly that -- the goodbye started, then the call dropped mid-sentence.
 AGENT_PLAYBACK_STALL_SECONDS = max(0.5, float(os.getenv("CALL_AGENT_PLAYBACK_STALL_SECONDS", "3")))
+# A short tail after playback reports finished, before the line drops.
+# Playback is measured at our own socket and by Twilio's mark
+# acknowledgements; Twilio still holds a small buffer downstream of both, so
+# cutting at the exact instant the last mark returns clips the final
+# consonant. Not a substitute for the drain -- it is the last few hundred
+# milliseconds the drain cannot see.
+AGENT_PLAYBACK_TAIL_MS = max(0, int(os.getenv("CALL_AGENT_PLAYBACK_TAIL_MS", "400")))
 # Jitter headroom: how much agent audio Twilio is allowed to hold ahead of
 # real time. Pacing exactly to real time keeps its buffer at about one 20ms
 # frame, so any hiccup writing to the socket -- a tunnel, a congested link, a
