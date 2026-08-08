@@ -474,10 +474,17 @@ class TwilioAdapter(BaseTelephonyAdapter):
         Deliberately conservative. Rejecting a real interruption is the worse
         failure, so the margin is well under unity -- only clear echo is
         filtered, and anything ambiguous still reaches the duration test.
+
+        The reference level is the window's *mean*, not its peak. Speech
+        swings widely between a stressed vowel and the gap after a word, so
+        the loudest frame in 400ms is far above what the window is actually
+        playing at -- and using it silently raised the bar on the customer
+        by that whole margin, for the whole window, every time the agent hit
+        a vowel. That is the defect this filter was observed failing on.
         """
         if not self.audio_currently_playing or not self._recent_agent_rms:
             return False
-        agent_level = max(self._recent_agent_rms)
+        agent_level = sum(self._recent_agent_rms) / len(self._recent_agent_rms)
         if agent_level <= 0:
             return False
         return rms_energy(caller_frame) < agent_level * BARGE_IN_ECHO_MARGIN

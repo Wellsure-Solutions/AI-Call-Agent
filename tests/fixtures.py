@@ -96,6 +96,37 @@ def genuine_interruption(ms: int = 1200) -> list[bytes]:
     return frames(tone(8000, ms))
 
 
+def agent_speech(ms: int = 400) -> list[bytes]:
+    """Agent TTS output with the dynamics real speech has.
+
+    Every other fixture here is a constant tone, which is fine for threshold
+    tests but hides an entire class of bug in anything that summarises a
+    *window* of agent audio: with a flat signal the window's peak and its
+    mean are the same number, so a comparison against either behaves
+    identically. Real TTS swings roughly 25 dB between a vowel peak and the
+    gap after a word, and that gap is where the two diverge.
+
+    The pattern is one short phrase: two stressed syllables, an unstressed
+    one, and the pauses between them.
+    """
+    plan = ((9000, 120), (1200, 60), (7000, 100), (400, 60), (5000, 60))
+    scaled = max(1, round(ms / sum(duration for _amplitude, duration in plan)))
+    payload = b"".join(tone(amplitude, duration) for amplitude, duration in plan * scaled)
+    return frames(payload)
+
+
+def soft_interruption(ms: int = 1200) -> list[bytes]:
+    """A customer who is genuinely speaking, but not loudly.
+
+    Amplitude picked so the frames land at ~2570 RMS, which is the level a
+    real call actually measured while the agent was mid-sentence -- the one
+    barge-in in that batch, and it was misclassified as echo. Held here so
+    the number in the regression test is the observed one rather than a
+    round figure chosen to pass.
+    """
+    return frames(tone(3640, ms))
+
+
 def speakerphone_echo(agent_amplitude: int = 9000, attenuation_db: float = 12.0, ms: int = 1000) -> list[bytes]:
     """The agent's own audio returning attenuated through a speakerphone.
 

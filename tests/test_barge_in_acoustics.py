@@ -159,7 +159,9 @@ class Bridge:
         self.committed = True
 
 
-def adapter_in_pause(agent_playing: bool = False) -> tuple[TwilioAdapter, Bridge, CallMetrics]:
+def adapter_in_pause(
+    agent_playing: bool = False, agent_frames: list[bytes] | None = None
+) -> tuple[TwilioAdapter, Bridge, CallMetrics]:
     metrics = CallMetrics("call-x", voice_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD)
     metrics.bind()
     bridge = Bridge()
@@ -169,8 +171,9 @@ def adapter_in_pause(agent_playing: bool = False) -> tuple[TwilioAdapter, Bridge
     if agent_playing:
         # Unresolved marks are what audio_currently_playing reads as "playing".
         adapter._pending_marks.add("m1")
-        for _ in range(20):
-            adapter._recent_agent_rms.append(rms_energy(fixtures.tone(9000)))
+        played = agent_frames or [fixtures.tone(9000)] * 20
+        for frame in played:
+            adapter._recent_agent_rms.append(rms_energy(frame))
     adapter._begin_soft_pause()
     return adapter, bridge, metrics
 
@@ -227,6 +230,42 @@ def test_a_real_customer_still_interrupts_through_playing_agent_audio():
     adapter, bridge, _ = adapter_in_pause(agent_playing=True)
     feed(adapter, fixtures.genuine_interruption(1500))
     assert bridge.committed is True
+
+
+def test_a_quiet_customer_is_not_mistaken_for_echo_of_a_loud_syllable():
+    """The measured failure, and the reason every other test here missed it.
+
+    Every other fixture plays the agent as a constant tone, where a window's
+    peak and its mean are the same number -- so comparing the caller against
+    either behaved identically and the bug was invisible. Real TTS swings
+    between a stressed vowel and the gap after a word, and referencing the
+    peak raised the bar on the customer by that whole swing for the entire
+    window.
+
+    On a real call this rejected a customer at 2568 RMS speaking over the
+    agent. The batch recorded exactly one barge-in decision, a timeout, and a
+    commit rate of zero.
+    """
+    agent = fixtures.agent_speech(400)
+    adapter, bridge, _ = adapter_in_pause(agent_playing=True, agent_frames=agent)
+    feed(adapter, fixtures.soft_interruption(1500))
+    assert bridge.committed is True
+
+    peak = max(rms_energy(frame) for frame in agent)
+    caller = rms_energy(fixtures.soft_interruption(20)[0])
+    assert caller < peak * BARGE_IN_ECHO_MARGIN, (
+        "the fixture must still reproduce the old peak-referenced misclassification, "
+        "otherwise this test would pass with the bug present"
+    )
+
+
+def test_echo_through_a_dynamic_agent_signal_is_still_rejected():
+    """The mean is a lower reference than the peak, so it has to be shown not
+    to have opened the door to the echo this filter exists for."""
+    agent = fixtures.agent_speech(400)
+    adapter, bridge, _ = adapter_in_pause(agent_playing=True, agent_frames=agent)
+    feed(adapter, fixtures.speakerphone_echo(ms=2000))
+    assert bridge.committed is False
 
 
 def test_echo_rejection_is_inactive_when_no_agent_audio_is_playing():
