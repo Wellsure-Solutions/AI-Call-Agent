@@ -69,6 +69,18 @@ class PacedSender:
     def has_buffered_audio(self) -> bool:
         return len(self._buffer) > 0
 
+    @property
+    def buffered_seconds(self) -> float:
+        """How long the queued audio will take to play, in real time.
+
+        Exact rather than estimated: the buffer is 8 kHz mu-law at one byte
+        per sample, and pacing emits it at real-time rate by construction. A
+        caller deciding how long to wait for playback to finish should ask
+        this instead of guessing a timeout -- a guess that is too small cuts
+        the agent off mid-word.
+        """
+        return len(self._buffer) / (self.FRAME_BYTES / self.FRAME_SECONDS)
+
     def pause(self) -> None:
         """Stop emitting new frames. Whatever's already buffered here stays
         untouched -- this is what makes a false barge-in cheap: resuming

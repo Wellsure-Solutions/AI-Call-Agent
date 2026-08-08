@@ -143,7 +143,18 @@ AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS = max(
 # provider's "audio done" signal only means it stopped sending -- so without
 # this the closing line is cut off mid-word. Bounded because a customer who
 # already hung up will never acknowledge the remaining audio.
-AGENT_PLAYBACK_DRAIN_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_DRAIN_SECONDS", "8")))
+AGENT_PLAYBACK_DRAIN_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_DRAIN_SECONDS", "30")))
+# How long playback may make no progress before the drain gives up. This is
+# what actually ends the wait on a live call -- the cap above is only reached
+# by a line that never drains at all. It has to cover the mark round-trip,
+# since the last marks come back after the final audio has played.
+#
+# Waiting is now driven by how much audio is genuinely queued rather than a
+# flat timeout. The flat 8s this replaced was shorter than a full closing
+# line: "जी बढ़िया सर, हमारी team आपको कल call करके पूरा process बता देगी। आपका
+# दिन शुभ हो सर, धन्यवाद।" does not fit in it, and the observed symptom was
+# exactly that -- the goodbye started, then the call dropped mid-sentence.
+AGENT_PLAYBACK_STALL_SECONDS = max(0.5, float(os.getenv("CALL_AGENT_PLAYBACK_STALL_SECONDS", "3")))
 # Jitter headroom: how much agent audio Twilio is allowed to hold ahead of
 # real time. Pacing exactly to real time keeps its buffer at about one 20ms
 # frame, so any hiccup writing to the socket -- a tunnel, a congested link, a

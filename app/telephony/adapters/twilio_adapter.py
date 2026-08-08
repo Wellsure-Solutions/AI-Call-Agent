@@ -13,6 +13,7 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.core.settings import (
     AGENT_PLAYBACK_DRAIN_SECONDS,
+    AGENT_PLAYBACK_STALL_SECONDS,
     AMD_ENABLED,
     AMD_MODE,
     AMD_SILENCE_TIMEOUT_MS,
@@ -568,6 +569,13 @@ class TwilioAdapter(BaseTelephonyAdapter):
             self._paced_sender.resume()
 
 
+    @property
+    def buffered_playback_seconds(self) -> float:
+        """Real-time duration of agent audio still waiting to be sent."""
+        if self._paced_sender is None:
+            return 0.0
+        return self._paced_sender.buffered_seconds
+
     async def _drain_playback(self, timeout: float = AGENT_PLAYBACK_DRAIN_SECONDS) -> None:
         """Wait until the customer has actually heard everything queued.
 
@@ -577,19 +585,46 @@ class TwilioAdapter(BaseTelephonyAdapter):
         played. Polling it is the only way to distinguish "we finished
         generating" from "they finished hearing".
 
-        Bounded, because neither condition is guaranteed to clear: if the
-        customer already hung up, no mark ever comes back and no frame is
-        ever accepted. Waiting forever would hold the line open and the
-        concurrency slot with it, so the timeout wins and the call ends.
+        How long to wait comes from the audio itself. Pacing is real time, so
+        the queued bytes state exactly how many seconds are left, and the wait
+        is re-derived from them on every pass. A fixed timeout cannot work
+        here: it is either shorter than a long closing line -- which hangs up
+        mid-goodbye, the reported bug -- or long enough for one, in which case
+        every dead line holds a concurrency slot for that whole duration.
+
+        Two bounds keep it terminating. Playback that stops making progress is
+        a line that is no longer draining, so the wait ends a few seconds
+        after the last frame left; and `timeout` caps the whole thing for the
+        case where nothing ever moves at all.
         """
-        deadline = time.monotonic() + max(0.0, timeout)
-        while self.audio_currently_playing and time.monotonic() < deadline:
+        hard_deadline = time.monotonic() + max(0.0, timeout)
+        remaining = self.buffered_playback_seconds
+        # Enough to play what is queued, plus the mark round-trip after it.
+        stall_deadline = time.monotonic() + remaining + AGENT_PLAYBACK_STALL_SECONDS
+        while self.audio_currently_playing:
+            now = time.monotonic()
+            if now >= hard_deadline:
+                self._log_drain_gave_up("playback_drain_hit_cap", timeout)
+                return
+            queued = self.buffered_playback_seconds
+            if queued < remaining - 0.01:
+                remaining = queued
+                stall_deadline = now + queued + AGENT_PLAYBACK_STALL_SECONDS
+            elif now >= stall_deadline:
+                self._log_drain_gave_up("playback_drain_stalled", queued)
+                return
             await asyncio.sleep(0.05)
-        if self.audio_currently_playing:
-            logger.info(
-                "playback_drain_timed_out",
-                extra={"call_id": self.session.call_id if self.session else "unknown", "timeout": timeout},
-            )
+
+    def _log_drain_gave_up(self, event: str, seconds: float) -> None:
+        """Every one of these is a customer who was cut off mid-sentence."""
+        logger.info(
+            event,
+            extra={
+                "call_id": self.session.call_id if self.session else "unknown",
+                "unplayed_seconds": round(self.buffered_playback_seconds, 2),
+                "seconds": round(seconds, 2),
+            },
+        )
 
     async def _complete_twilio_call(self) -> None:
         if not self.call_sid:

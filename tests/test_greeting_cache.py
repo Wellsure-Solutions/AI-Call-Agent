@@ -207,6 +207,68 @@ def test_the_drain_is_bounded_when_the_customer_already_hung_up():
     assert adapter.audio_currently_playing is True, "still unplayed, but we stopped waiting"
 
 
+def test_a_long_closing_is_not_cut_off_by_a_fixed_timeout():
+    """The reported bug, reproduced at its real length.
+
+    The closing that was truncated on a live call was:
+
+        "जी बढ़िया सर, हमारी team आपको कल call करके पूरा process बता देगी।
+         आपका दिन शुभ हो सर, धन्यवाद।"
+
+    which runs past the 8-second timeout the drain used to stop at. Pacing is
+    real time, so the drain must take its patience from the audio -- 12
+    seconds queued means 12 seconds of waiting, and it must still finish.
+    """
+    adapter = TwilioAdapter(audio_bridge=object(), client=object())
+    adapter.websocket = FakeWebSocket()
+    adapter.stream_sid = "MZ"
+
+    sent: list[bytes] = []
+
+    async def send(frame: bytes) -> bool:
+        sent.append(frame)
+        return True
+
+    async def scenario() -> tuple[float, int]:
+        # 12 seconds of closing: longer than any fixed timeout would allow.
+        adapter._paced_sender = PacedSender(send, lead_seconds=5.0)
+        adapter._paced_sender.feed(b"\xff" * (8000 * 12))
+        assert adapter.buffered_playback_seconds == pytest.approx(12.0)
+        pump = asyncio.create_task(adapter._paced_sender.run())
+        started = asyncio.get_running_loop().time()
+        await adapter._drain_playback()
+        elapsed = asyncio.get_running_loop().time() - started
+        pump.cancel()
+        try:
+            await pump
+        except asyncio.CancelledError:
+            pass
+        return elapsed, len(sent)
+
+    elapsed, frames_sent = asyncio.run(scenario())
+    assert frames_sent == 8000 * 12 // 160, "every frame of the closing must have been sent"
+    assert elapsed > 6.0, "the drain must have waited for real audio, not returned early"
+    assert adapter.buffered_playback_seconds == 0.0
+
+
+def test_the_drain_gives_up_once_playback_stops_making_progress():
+    """A dead line never drains, and holding its concurrency slot for the
+    full cap would stall the queue behind it."""
+    adapter = TwilioAdapter(audio_bridge=object(), client=object())
+    adapter._paced_sender = PacedSender(lambda _f: None)
+    adapter._paced_sender.feed(b"\xff" * 8000)  # a second queued, nothing draining it
+
+    async def scenario() -> float:
+        started = asyncio.get_running_loop().time()
+        await adapter._drain_playback(timeout=30.0)
+        return asyncio.get_running_loop().time() - started
+
+    elapsed = asyncio.run(scenario())
+    # One second of audio plus the stall grace, nowhere near the 30s cap.
+    assert 1.0 <= elapsed < 1.0 + settings.AGENT_PLAYBACK_STALL_SECONDS + 1.5
+    assert adapter.audio_currently_playing is True, "still unplayed, but we stopped waiting"
+
+
 def test_playback_lead_gives_twilio_jitter_headroom():
     """Pacing exactly to real time leaves Twilio about one frame of audio, so
     a single slow socket write starves it and the customer hears a crackle.
