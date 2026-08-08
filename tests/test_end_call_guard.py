@@ -137,16 +137,24 @@ def test_a_second_request_is_obeyed_even_if_the_model_still_says_nothing():
     assert harness.engine._close_after_audio_done is True
 
 
-def test_the_refusal_arms_a_deadline_long_enough_for_one_more_turn():
-    """LLM, TTS, and playback all have to fit inside it, so it is longer than
-    the ordinary post-goodbye grace."""
+def test_the_refusal_arms_a_deadline_for_the_model_to_start_speaking():
+    """It only has to cover starting a turn, not finishing one.
+
+    The deadline fires on whether the model has *begun* a closing, which shows
+    up as assistant text long before the audio ends -- and if it has not
+    begun, we speak the goodbye ourselves rather than wait longer. A grace
+    long enough for a whole turn would just be that many extra seconds of
+    silence on a call nobody is going to close.
+    """
     def scenario(harness: Harness) -> None:
         harness.says("user", "अच्छा")
         harness.requests_end_call()
 
     harness = run(scenario)
     assert harness.graces == [AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS]
-    assert AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS > AGENT_CLOSE_GRACE_SECONDS
+    assert AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS <= AGENT_CLOSE_GRACE_SECONDS, (
+        "waiting longer than the ordinary post-goodbye grace is dead air"
+    )
 
 
 def test_the_real_hangup_replaces_the_refusal_deadline():

@@ -88,6 +88,20 @@ DEEPGRAM_GREETING = os.getenv(
 # scripts/prerender_greeting.py; a cache miss falls back to the provider
 # synthesising it as before, so this is safe to leave unpopulated.
 GREETING_CACHE_DIR = Path(os.getenv("CALL_AGENT_GREETING_CACHE_DIR", DATA_DIR / "greetings"))
+# Spoken by us, not the model, when the model asks to hang up and then will
+# not say goodbye. Observed on a real call: the customer said "ठीक है." and
+# the line simply went dead. The prompt forbids that, the engine refuses the
+# first such hangup and asks for a closing, and this is what happens when the
+# model still says nothing -- a customer is never dropped in silence.
+#
+# Deliberately outcome-neutral, because at this point we do not know how the
+# call went: it has to be true after a yes, a no, and a wrong number alike.
+# Render it with scripts/prerender_greeting.py. Unrendered, the call closes
+# silently exactly as it does today.
+DEEPGRAM_FALLBACK_CLOSING = os.getenv(
+    "DEEPGRAM_FALLBACK_CLOSING",
+    "आपका समय देने के लिए धन्यवाद सर। आपका दिन शुभ हो।",
+).strip()
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # Eager end-of-turn starts the LLM before the user's turn is final. It can
 # reduce latency, but it also makes short pauses sound like interruptions.
@@ -136,7 +150,7 @@ AGENT_CLOSE_GRACE_SECONDS = max(1.0, float(os.getenv("CALL_AGENT_CLOSE_GRACE_SEC
 # repeat request arrive, the call ends anyway. Longer than the normal grace
 # because a whole turn -- LLM, TTS, and playback -- has to fit inside it.
 AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS = max(
-    1.0, float(os.getenv("CALL_AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS", "20"))
+    1.0, float(os.getenv("CALL_AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS", "8"))
 )
 # How long to wait for audio already handed to Twilio to finish playing before
 # hanging up. Pacing keeps several seconds in flight by design, and the

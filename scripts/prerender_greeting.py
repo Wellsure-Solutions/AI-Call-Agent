@@ -35,12 +35,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.settings import (  # noqa: E402
     DEEPGRAM_API_KEY,
+    DEEPGRAM_FALLBACK_CLOSING,
     DEEPGRAM_GREETING,
     DEEPGRAM_LISTEN_MODEL,
     GREETING_CACHE_DIR,
 )
 from app.integrations.deepgram.config import (  # noqa: E402
     _speak_provider_settings,
+    closing_fingerprint_for_current_config,
     greeting_fingerprint_for_current_config,
 )
 from app.telephony.audio.greeting_cache import cache_path, load_greeting, save_greeting  # noqa: E402
@@ -49,7 +51,7 @@ from app.telephony.audio.local_vad import _MULAW_DECODE_TABLE  # noqa: E402
 RENDER_TIMEOUT_SECONDS = 40
 
 
-def render() -> bytes:
+def render(text: str) -> bytes:
     from deepgram import DeepgramClient
     from deepgram.core.events import EventType
     from deepgram.agent.v1.types import (
@@ -68,7 +70,7 @@ def render() -> bytes:
             # greeting is synthesised.
             think={"provider": {"type": "open_ai", "model": "gpt-4o-mini"}, "prompt": "Say nothing."},
             speak={"provider": _speak_provider_settings()},
-            greeting=DEEPGRAM_GREETING,
+            greeting=text,
         ),
     )
 
@@ -121,6 +123,50 @@ def write_wav(destination: Path, mulaw: bytes) -> None:
         handle.writeframes(pcm)
 
 
+def _miss_consequence(kind: str) -> str:
+    if kind == "greeting":
+        return "calls will wait on the provider to synthesise the greeting"
+    return "a call the model refuses to close will end in silence"
+
+
+def render_one(kind: str, text: str, fingerprint: str, args) -> int:
+    """Render one cached phrase. Returns a process-exit-style status."""
+    path = cache_path(GREETING_CACHE_DIR, fingerprint, kind)
+    existing = load_greeting(GREETING_CACHE_DIR, fingerprint, kind)
+
+    print(f"\n[{kind}]")
+    print(f"  text       : {text!r}")
+    print(f"  fingerprint: {fingerprint}")
+    print(f"  cache path : {path}")
+
+    if not text:
+        print("  status     : not configured -- nothing to render")
+        return 0
+    if existing is not None and not args.force:
+        print(f"  status     : CURRENT ({len(existing)} bytes, {len(existing) / 8000:.2f}s)")
+        return 0
+    if args.check:
+        print(f"  status     : MISSING -- {_miss_consequence(kind)}")
+        return 1
+    if not DEEPGRAM_API_KEY:
+        print("  status     : cannot render, DEEPGRAM_API_KEY is not set", file=sys.stderr)
+        return 2
+
+    print("  status     : rendering...")
+    try:
+        audio = render(text)
+    except Exception as error:
+        print(f"  status     : FAILED -- {error}", file=sys.stderr)
+        return 3
+    saved = save_greeting(GREETING_CACHE_DIR, fingerprint, audio, kind)
+    print(f"  status     : WROTE {saved} ({len(audio)} bytes, {len(audio) / 8000:.2f}s)")
+    if args.wav:
+        listenable = saved.with_suffix(".wav")
+        write_wav(listenable, audio)
+        print(f"               {listenable}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report cache state without rendering")
@@ -128,37 +174,13 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="re-render even if the cache is current")
     args = parser.parse_args()
 
-    fingerprint = greeting_fingerprint_for_current_config()
-    path = cache_path(GREETING_CACHE_DIR, fingerprint)
-    existing = load_greeting(GREETING_CACHE_DIR, fingerprint)
-
-    print(f"greeting   : {DEEPGRAM_GREETING!r}")
-    print(f"fingerprint: {fingerprint}")
-    print(f"cache path : {path}")
-
-    if existing is not None and not args.force:
-        print(f"status     : CURRENT ({len(existing)} bytes, {len(existing) / 8000:.2f}s)")
-        return 0
-    if args.check:
-        print("status     : MISSING -- calls will wait on the provider to synthesise the greeting")
-        return 1
-    if not DEEPGRAM_API_KEY:
-        print("status     : cannot render, DEEPGRAM_API_KEY is not set", file=sys.stderr)
-        return 2
-
-    print("status     : rendering...")
-    try:
-        audio = render()
-    except Exception as error:
-        print(f"status     : FAILED -- {error}", file=sys.stderr)
-        return 3
-    saved = save_greeting(GREETING_CACHE_DIR, fingerprint, audio)
-    print(f"status     : WROTE {saved} ({len(audio)} bytes, {len(audio) / 8000:.2f}s)")
-    if args.wav:
-        listenable = saved.with_suffix(".wav")
-        write_wav(listenable, audio)
-        print(f"             {listenable}")
-    return 0
+    phrases = (
+        ("greeting", DEEPGRAM_GREETING, greeting_fingerprint_for_current_config()),
+        ("closing", DEEPGRAM_FALLBACK_CLOSING, closing_fingerprint_for_current_config()),
+    )
+    # Worst status wins, so a missing closing still fails --check even when
+    # the greeting is current.
+    return max(render_one(kind, text, fingerprint, args) for kind, text, fingerprint in phrases)
 
 
 if __name__ == "__main__":
