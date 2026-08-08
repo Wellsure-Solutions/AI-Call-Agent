@@ -9,12 +9,26 @@ from dataclasses import asdict, is_dataclass
 from typing import Callable
 
 from deepgram import DeepgramClient
+from deepgram.agent.v1.types import AgentV1SendFunctionCallResponse
 from deepgram.core.events import EventType
 
-from app.integrations.deepgram.config import DEEPGRAM_API_KEY, get_agent_settings
-from app.services.call_control import is_closing_call_message, is_terminal_assistant_text
+from app.core.settings import AGENT_CLOSE_GRACE_SECONDS, AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS
+from app.core.settings import DEEPGRAM_FALLBACK_CLOSING
+from app.integrations.audio_profiles import get_audio_profile
+from app.integrations.deepgram.config import (
+    DEEPGRAM_API_KEY,
+    cached_closing_audio,
+    get_agent_settings,
+)
+from app.services.call_control import (
+    END_CALL_FUNCTION,
+    is_closing_call_message,
+    is_terminal_assistant_text,
+    normalize_end_call_reason,
+)
 from app.services.transcript_sanitizer import strip_spoken_internal_commands
 from app.telephony.call_session import CallSession
+from app.telephony.metrics import CallMetrics
 from app.telephony.state_machine import CallState
 
 logger = logging.getLogger(__name__)
@@ -61,8 +75,12 @@ class ConversationEngine:
         on_text: TextCallback,
         on_finished: FinishedCallback,
         on_interrupted: InterruptedCallback | None = None,
+        metrics: CallMetrics | None = None,
+        greeting_already_played: bool = False,
     ) -> None:
         self.session = session
+        self.metrics = metrics
+        self.greeting_already_played = greeting_already_played
         self.on_audio = on_audio
         self.on_text = on_text
         self.on_finished = on_finished
@@ -75,6 +93,12 @@ class ConversationEngine:
         self._send_lock = asyncio.Lock()
         self._deepgram_closed = False
         self._keepalive_task: asyncio.Task | None = None
+        self._close_deadline_task = None
+        # Whether the agent has said anything since the customer's last turn.
+        # Starts True because nothing is owed to a customer who has not spoken
+        # yet -- a voicemail or a dead line should still be hung up promptly.
+        self._assistant_spoke_since_user = True
+        self._end_call_refused = False
 
     async def start(self) -> None:
         if not DEEPGRAM_API_KEY:
@@ -90,9 +114,12 @@ class ConversationEngine:
             get_agent_settings(
                 self.session.metadata,
                 transport=self.session.direction,
+                greeting_already_played=self.greeting_already_played,
             )
         )
         self.session.safe_transition_to(CallState.AI_ACTIVE)
+        if self.metrics is not None:
+            self.metrics.deepgram_started()
         threading.Thread(target=self.connection.start_listening, daemon=True).start()
         # The call may sit ringing for well over Deepgram's ~10s idle
         # timeout before Twilio answers and real audio starts flowing.
@@ -164,6 +191,9 @@ class ConversationEngine:
             with suppress(asyncio.CancelledError):
                 await self._keepalive_task
             self._keepalive_task = None
+        if self._close_deadline_task is not None:
+            self._close_deadline_task.cancel()
+            self._close_deadline_task = None
         if self._connection_context is not None:
             with suppress(Exception):
                 await asyncio.to_thread(self._connection_context.__exit__, None, None, None)
@@ -192,6 +222,31 @@ class ConversationEngine:
                     self._call_threadsafe(self.on_interrupted)
                 return
 
+            if self.metrics is not None:
+                # Provider-side turn boundaries and its own STT/LLM/TTS
+                # split. Recorded verbatim as numbers; the end-to-end figure
+                # the customer experiences is still measured at the Twilio
+                # socket, because these stop at Deepgram's egress.
+                if msg_type == "AgentStartedSpeaking":
+                    self.metrics.agent_turn_started()
+                elif msg_type == "LatencyReport":
+                    # Read off the message itself. safe_event_payload() is a
+                    # generic diagnostic dumper whose field list does not
+                    # include the latency numbers, so routing this through it
+                    # silently produced empty reports -- the whole STT/LLM/TTS
+                    # breakdown was missing from real call data before this.
+                    self.metrics.latency_report(message)
+                elif msg_type in {"Warning", "Error"}:
+                    self.metrics.provider_diagnostic(
+                        msg_type.lower(),
+                        getattr(message, "code", None),
+                        getattr(message, "description", None),
+                    )
+
+            if msg_type == "FunctionCallRequest":
+                self._handle_function_calls(message)
+                return
+
             if is_closing_call_message(message, content):
                 self.closing_requested = True
                 self.session.safe_transition_to(CallState.AI_FINISHED)
@@ -209,12 +264,187 @@ class ConversationEngine:
                 if not cleaned_content:
                     return
                 self.session.add_turn(role, cleaned_content)
+                if role == "assistant":
+                    self._assistant_spoke_since_user = True
+                elif role == "user":
+                    # The customer has the floor again, and anything the agent
+                    # does next -- including hanging up -- owes them a reply.
+                    self._assistant_spoke_since_user = False
+                if self.metrics is not None:
+                    # Only the length crosses into metrics -- TTS is billed
+                    # per character, and the text itself must never be logged.
+                    if role == "assistant":
+                        self.metrics.assistant_characters(len(cleaned_content))
+                    else:
+                        self.metrics.user_message()
                 if role == "assistant" and is_terminal_assistant_text(cleaned_content):
                     self._close_after_audio_done = True
                 payload = json.dumps({"role": role or "agent", "content": cleaned_content})
                 self._call_threadsafe(lambda: self.on_text(payload))
         except Exception as exc:
             print(f"[deepgram] handler error for call {self.session.call_id}: {exc}")
+
+    def _handle_function_calls(self, message) -> None:
+        """Answer a Deepgram FunctionCallRequest and arm the hangup.
+
+        Only `end_call` is registered. Anything else is answered with an
+        explicit refusal rather than ignored: an unanswered client-side call
+        leaves the agent waiting on a result that never arrives, which the
+        customer hears as the line going dead mid-sentence.
+        """
+        for call in getattr(message, "functions", None) or []:
+            name = str(getattr(call, "name", "") or "")
+            call_id = getattr(call, "id", None)
+            if not getattr(call, "client_side", True):
+                # Deepgram executes it and reports back; nothing owed here.
+                continue
+            if name == END_CALL_FUNCTION:
+                reason = normalize_end_call_reason(getattr(call, "arguments", None))
+                self.session.metadata["end_call_reason"] = reason
+                if self._should_refuse_end_call():
+                    self._refuse_end_call(call_id, name, reason)
+                    continue
+                logger.info(
+                    "agent_requested_end_call",
+                    extra={"call_id": self.session.call_id, "reason": reason},
+                )
+                self._send_function_result(call_id, name, "Call ending.")
+                # Do not hang up yet. The closing sentence is usually still
+                # being synthesised; cutting now truncates the goodbye. Wait
+                # for AgentAudioDone, with a bounded fallback in case the
+                # model called the tool without speaking afterwards.
+                self._close_after_audio_done = True
+                self._arm_close_deadline(AGENT_CLOSE_GRACE_SECONDS)
+            else:
+                self._send_function_result(call_id, name, "This function is not available.")
+
+    def _should_refuse_end_call(self) -> bool:
+        """True when hanging up now would drop the line without a goodbye.
+
+        Observed on real calls: the customer says "अच्छा अच्छा, बिल्कुल बढ़िया
+        है" and the model answers by calling `end_call` with no assistant text
+        at all in between. Every downstream guard -- AgentAudioDone, the
+        playback drain -- correctly waits for audio that was never generated,
+        so the customer simply hears the line go dead mid-conversation.
+
+        The prompt already forbids this, and the tool description says so
+        twice; the model does it anyway. So it is enforced here rather than
+        asked for.
+        """
+        return not self._assistant_spoke_since_user and not self._end_call_refused
+
+    def _refuse_end_call(self, call_id: str | None, name: str, reason: str) -> None:
+        """Answer the request with an instruction instead of a hangup.
+
+        Refused exactly once per call. A model that asks again -- having
+        spoken or not -- is obeyed, because a loop of refusals would be a
+        worse failure than a missing goodbye: the call would never end.
+        """
+        self._end_call_refused = True
+        logger.info(
+            "agent_end_call_without_closing",
+            extra={"call_id": self.session.call_id, "reason": reason},
+        )
+        if self.metrics is not None:
+            self.metrics.end_call_refused()
+        self._send_function_result(
+            call_id,
+            name,
+            "Not yet -- you have not said anything since the customer last "
+            "spoke. Say your closing line out loud to the customer now, then "
+            "call end_call again.",
+        )
+        # Deliberately not setting _close_after_audio_done: the next
+        # AgentAudioDone belongs to the closing line we just asked for, not to
+        # a hangup. The deadline is the only backstop, and it is long enough
+        # for a full turn.
+        self._arm_close_deadline(AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS)
+
+    def _send_function_result(self, call_id: str | None, name: str, content: str) -> None:
+        if self.loop is None:
+            return
+        response = AgentV1SendFunctionCallResponse(id=call_id, name=name, content=content)
+        asyncio.run_coroutine_threadsafe(self._send_function_response(response), self.loop)
+
+    async def _send_function_response(self, response) -> None:
+        """Serialised through the same lock as every other write.
+
+        The Deepgram SDK wraps a synchronous websocket, so two concurrent
+        sends would interleave frames on one connection.
+        """
+        try:
+            async with self._send_lock:
+                if self.connection is None or self._deepgram_closed:
+                    return
+                await asyncio.to_thread(self.connection.send_function_call_response, response)
+        except Exception as exc:
+            logger.warning(
+                "deepgram_function_response_failed",
+                extra={"call_id": self.session.call_id, "error": type(exc).__name__},
+            )
+
+    def _arm_close_deadline(self, grace_seconds: float) -> None:
+        """Hang up even if AgentAudioDone never arrives.
+
+        The whole point of the end-call tool is that a call cannot outlive
+        its purpose. Making the hangup depend solely on a provider event
+        would reintroduce the bug in a narrower form.
+
+        Re-arming replaces any deadline already pending, so the refusal path's
+        long grace is not left running once the real hangup is armed.
+        """
+        if self.loop is None:
+            return
+        if self._close_deadline_task is not None:
+            self._close_deadline_task.cancel()
+        self._close_deadline_task = asyncio.run_coroutine_threadsafe(
+            self._close_after_grace(grace_seconds), self.loop
+        )
+
+    async def _close_after_grace(self, grace_seconds: float) -> None:
+        await asyncio.sleep(grace_seconds)
+        if self.closing_requested:
+            return
+        logger.info(
+            "agent_close_grace_expired",
+            extra={"call_id": self.session.call_id, "grace_seconds": grace_seconds},
+        )
+        if not self._assistant_spoke_since_user:
+            # The model was asked for a closing and produced nothing. Rather
+            # than drop the line in silence -- which is what a customer
+            # actually experiences as being hung up on -- say goodbye
+            # ourselves. Queued before on_finished(), so the adapter's close
+            # path drains it like any other agent audio.
+            self._speak_fallback_closing()
+        self.closing_requested = True
+        self.session.safe_transition_to(CallState.AI_FINISHED)
+        self.on_finished()
+
+    def _speak_fallback_closing(self) -> bool:
+        """Play the pre-rendered goodbye. Returns whether anything was played.
+
+        Only on transports whose wire format matches the cached audio. The
+        cache is 8 kHz mu-law because that is what the phone leg carries; a
+        browser session runs linear16 at 24 kHz, and pushing mu-law bytes into
+        it would emit noise, not a goodbye.
+        """
+        if get_audio_profile(self.session.direction).encoding != "mulaw":
+            return False
+        audio = cached_closing_audio()
+        if not audio:
+            # Nothing rendered. The call closes silently, exactly as before --
+            # a missing cache must never be the reason a call fails.
+            logger.info(
+                "fallback_closing_unavailable",
+                extra={"call_id": self.session.call_id},
+            )
+            return False
+        logger.info("fallback_closing_spoken", extra={"call_id": self.session.call_id})
+        if self.metrics is not None:
+            self.metrics.fallback_closing_spoken()
+        self.session.add_turn("assistant", DEEPGRAM_FALLBACK_CLOSING)
+        self.on_audio(audio)
+        return True
 
     def _on_close(self, event) -> None:
         self._deepgram_closed = True

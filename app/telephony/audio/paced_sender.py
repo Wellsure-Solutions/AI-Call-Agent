@@ -17,9 +17,15 @@ class PacedSender:
     without pacing, Twilio's own internal buffer ends up holding audio our
     process has already handed off and lost control of, and pause/resume
     on our side becomes meaningless -- Twilio just keeps playing what it
-    already has regardless of what we do next. Pacing keeps Twilio's own
-    buffer shallow (at most ~1 frame) so pause/resume/discard here actually
-    reflect what the caller is about to hear.
+    already has regardless of what we do next. Pacing keeps that buffer
+    bounded, so pause/resume/discard here actually reflect what the caller
+    is about to hear.
+
+    How bounded is `lead_seconds`, which is a direct trade between audio
+    continuity and how much a soft pause can still take back. At zero the
+    buffer is about one frame and a pause stops essentially everything, but
+    a single slow socket write starves Twilio and the customer hears a
+    crackle. See the constructor.
 
     `time.sleep(0.02)` between frames would drift over a multi-minute call;
     instead every tick is computed from a fixed anchor plus an integer
@@ -30,9 +36,26 @@ class PacedSender:
     FRAME_SECONDS = 0.02
     SILENCE_BYTE = 0xFF  # mu-law encoding of analog silence
 
-    def __init__(self, send_frame: SendFrame, on_frame_sent: FrameSentHook | None = None) -> None:
+    def __init__(
+        self,
+        send_frame: SendFrame,
+        on_frame_sent: FrameSentHook | None = None,
+        lead_seconds: float = 0.0,
+    ) -> None:
         self._send_frame = send_frame
         self._on_frame_sent = on_frame_sent
+        # How far ahead of real time frames may be delivered, i.e. how much
+        # audio Twilio is allowed to hold. Pacing exactly to real time keeps
+        # that buffer at roughly one frame, which is ideal for barge-in and
+        # terrible for a jittery link: any delay writing to the socket leaves
+        # Twilio with nothing to play, and the customer hears a gap or a
+        # crackle. A small lead absorbs that jitter.
+        #
+        # The trade is real and bounded: a soft pause can no longer stop
+        # audio Twilio already holds, so up to `lead_seconds` keeps playing
+        # after a pause begins. A *confirmed* barge-in is unaffected -- it
+        # sends `clear`, which empties Twilio's buffer immediately.
+        self._lead_seconds = max(0.0, lead_seconds)
         self._buffer = bytearray()
         self._resumed = asyncio.Event()
         self._resumed.set()
@@ -45,6 +68,18 @@ class PacedSender:
     @property
     def has_buffered_audio(self) -> bool:
         return len(self._buffer) > 0
+
+    @property
+    def buffered_seconds(self) -> float:
+        """How long the queued audio will take to play, in real time.
+
+        Exact rather than estimated: the buffer is 8 kHz mu-law at one byte
+        per sample, and pacing emits it at real-time rate by construction. A
+        caller deciding how long to wait for playback to finish should ask
+        this instead of guessing a timeout -- a guess that is too small cuts
+        the agent off mid-word.
+        """
+        return len(self._buffer) / (self.FRAME_BYTES / self.FRAME_SECONDS)
 
     def pause(self) -> None:
         """Stop emitting new frames. Whatever's already buffered here stays
@@ -100,6 +135,9 @@ class PacedSender:
                 await self._on_frame_sent()
 
             next_tick += self.FRAME_SECONDS
-            delay = next_tick - time.monotonic()
+            # Sleep only once we are `lead_seconds` ahead of the schedule, so
+            # that much audio sits in Twilio's buffer as jitter headroom
+            # instead of arriving just in time and occasionally late.
+            delay = next_tick - self._lead_seconds - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)

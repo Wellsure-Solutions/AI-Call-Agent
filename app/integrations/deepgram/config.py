@@ -10,11 +10,16 @@ from deepgram.agent.v1.types import (
 )
 from app.core.prompts import PROMPT
 from app.integrations.audio_profiles import get_audio_profile
+from app.services.call_control import END_CALL_FUNCTION, END_CALL_FUNCTION_SCHEMA
+from app.telephony.audio.greeting_cache import greeting_fingerprint, load_greeting
 
 from app.core.settings import (
     DEEPGRAM_API_KEY,
+    GREETING_CACHE_DIR,
+    DEEPGRAM_FALLBACK_CLOSING,
     DEEPGRAM_GREETING,
     DEEPGRAM_LISTEN_MODEL,
+    DEEPGRAM_SPEAK_LANGUAGE,
     DEEPGRAM_SPEAK_MODEL_ID,
     DEEPGRAM_SPEAK_PROVIDER,
     DEEPGRAM_SPEAK_VOICE_ID,
@@ -37,6 +42,60 @@ def _listen_provider_settings() -> dict[str, object]:
     if DEEPGRAM_EAGER_EOT_THRESHOLD is not None:
         provider["eager_eot_threshold"] = DEEPGRAM_EAGER_EOT_THRESHOLD
     return provider
+
+
+def _speak_provider_settings() -> dict[str, object]:
+    provider: dict[str, object] = {
+        "type": DEEPGRAM_SPEAK_PROVIDER,
+        "model_id": DEEPGRAM_SPEAK_MODEL_ID,
+        "voice_id": DEEPGRAM_SPEAK_VOICE_ID,
+    }
+    if DEEPGRAM_SPEAK_LANGUAGE:
+        # Omitted rather than sent empty: an empty language is not the same
+        # request as no language, and the provider is entitled to reject it.
+        provider["language"] = DEEPGRAM_SPEAK_LANGUAGE
+    return provider
+
+
+def greeting_fingerprint_for_current_config() -> str:
+    return greeting_fingerprint(
+        DEEPGRAM_GREETING, DEEPGRAM_SPEAK_PROVIDER, DEEPGRAM_SPEAK_MODEL_ID,
+        DEEPGRAM_SPEAK_VOICE_ID, DEEPGRAM_SPEAK_LANGUAGE,
+    )
+
+
+def cached_greeting_audio() -> bytes | None:
+    """Pre-rendered greeting for the current voice/text, if one exists."""
+    return load_greeting(GREETING_CACHE_DIR, greeting_fingerprint_for_current_config())
+
+
+def closing_fingerprint_for_current_config() -> str:
+    return greeting_fingerprint(
+        DEEPGRAM_FALLBACK_CLOSING, DEEPGRAM_SPEAK_PROVIDER, DEEPGRAM_SPEAK_MODEL_ID,
+        DEEPGRAM_SPEAK_VOICE_ID, DEEPGRAM_SPEAK_LANGUAGE,
+    )
+
+
+def cached_closing_audio() -> bytes | None:
+    """Pre-rendered goodbye, played only when the model will not speak one.
+
+    Rendered through the same voice as the rest of the call, so a customer who
+    hears it does not hear the agent change person on the last sentence.
+    """
+    if not DEEPGRAM_FALLBACK_CLOSING:
+        return None
+    return load_greeting(
+        GREETING_CACHE_DIR, closing_fingerprint_for_current_config(), kind="closing"
+    )
+
+
+_ALREADY_GREETED_NOTE = (
+    "\n\n### ALREADY SPOKEN\n"
+    "You have ALREADY said this out loud, and the customer has heard it:\n"
+    "\"{greeting}\"\n"
+    "Do not greet again, do not repeat your name, and do not re-introduce "
+    "yourself. Continue the conversation from that point.\n"
+)
 
 
 def _lead_context_prompt(context: dict | None = None) -> str:
@@ -69,9 +128,18 @@ def _lead_context_prompt(context: dict | None = None) -> str:
 def get_agent_settings(
     context: dict | None = None,
     transport: str = "browser",
+    greeting_already_played: bool = False,
 ) -> AgentV1Settings:
-    """Return campaign and adapter-specific Deepgram Agent settings."""
+    """Return campaign and adapter-specific Deepgram Agent settings.
+
+    `greeting_already_played` is set when the adapter is playing cached
+    greeting audio itself. The provider greeting is then suppressed -- both
+    would otherwise be spoken -- and the prompt is told what the customer has
+    already heard, so the model continues instead of introducing itself twice.
+    """
     prompt = _lead_context_prompt(context)
+    if greeting_already_played:
+        prompt += _ALREADY_GREETED_NOTE.format(greeting=DEEPGRAM_GREETING)
     audio_profile = get_audio_profile(transport)
     return AgentV1Settings(
         audio=AgentV1SettingsAudio(
@@ -96,14 +164,14 @@ def get_agent_settings(
                     "temperature": DEEPGRAM_THINK_TEMPERATURE,
                 },
                 "prompt": prompt,
+                # Registered with no `endpoint`, which is what makes it a
+                # client-side function: Deepgram sends a FunctionCallRequest
+                # and this process decides what to do. Until this existed the
+                # agent had no way to hang up at all, so every call ran until
+                # the customer hung up or the 900s deadline expired.
+                "functions": [END_CALL_FUNCTION_SCHEMA],
             },
-            speak={
-                "provider": {
-                    "type": DEEPGRAM_SPEAK_PROVIDER,
-                    "model_id": DEEPGRAM_SPEAK_MODEL_ID,
-                    "voice_id": DEEPGRAM_SPEAK_VOICE_ID,
-                }
-            },
-            greeting=DEEPGRAM_GREETING,
+            speak={"provider": _speak_provider_settings()},
+            greeting=None if greeting_already_played else DEEPGRAM_GREETING,
         ),
     )

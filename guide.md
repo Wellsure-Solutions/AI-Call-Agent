@@ -37,6 +37,8 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `CALL_AGENT_EXTRACTION_TIMEOUT_SECONDS` | No | OpenAI SDK network/request timeout | `30` | No |
 | `CALL_AGENT_EXTRACTION_MAX_ATTEMPTS` | No | Durable attempt ceiling | `3` | No |
 | `CALL_AGENT_EXTRACTION_RETRY_DELAY_SECONDS` | No | Exponential-backoff base | `5` | No |
+| `CALL_AGENT_RECONCILIATION_MAX_ATTEMPTS` | No | Failed provider lookups before a call is quarantined and its slot freed | `8` | No |
+| `CALL_AGENT_ABANDONED_JOB_GRACE_SECONDS` | No | Grace past the maximum-call deadline before the sweeper quarantines a slot-holding call | `300` | No |
 | `TWILIO_ACCOUNT_SID` | Yes for phone calls | Twilio account | `AC...`; no default | Yes |
 | `TWILIO_AUTH_TOKEN` | Yes for phone calls | SDK auth and webhook validation | secret token; no default | Yes |
 | `TWILIO_FROM_NUMBER` | Yes for phone calls | Verified/capable caller number | E.164 test/example number; no default | No |
@@ -45,6 +47,23 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `OPENAI_API_KEY` | Required only when extraction runs | Post-call extraction | provider key; absence never blocks raw persistence | Yes |
 | `OPENAI_MODEL` | No | Extraction model | `gpt-4.1-mini` | No |
 | `DEEPGRAM_*` | No | Listen/think/speak/greeting tuning | defaults in `app/core/settings.py` | API key only |
+| `CALL_AGENT_METRICS_ENABLED` | No | Per-turn latency/barge-in/cost instrumentation | `1`; set `0` to disable | No |
+| `CALL_AGENT_METRICS_SILENCE_GAP_MS` | No | Gap counted as dead air | `1500` | No |
+| `CALL_AGENT_METRICS_FLUSH_SECONDS` | No | Metric batch flush interval | `5` | No |
+| `CALL_AGENT_MEDIA_DUMP_DIR` | No | Raw mu-law capture directory — **records customer calls** | unset (disabled) | Contains call audio |
+| `CALL_AGENT_CLOSE_GRACE_SECONDS` | No | Grace for the agent's closing line after it calls `end_call` | `10` | No |
+| `CALL_AGENT_AMD_ENABLED` | No | Answering-machine detection (adds Twilio's per-call AMD charge) | `1`; set `0` to disable | No |
+| `CALL_AGENT_AMD_MODE` | No | `Enable` or `DetectMessageEnd` | `Enable` | No |
+| `CALL_AGENT_AMD_*_MS` / `_SECONDS` | No | Twilio detection tuning | Twilio defaults | No |
+| `DEEPGRAM_SPEAK_MODEL_ID` | No | TTS model | `eleven_flash_v2_5` | No |
+| `DEEPGRAM_SPEAK_LANGUAGE` | No | Pins TTS language so code-mixed text doesn't shift accent; empty = auto-detect | `hi` | No |
+| `CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD` | No | Minimum clamp for the adaptive voice threshold | `250` | No |
+| `CALL_AGENT_BARGE_IN_NOISE_MULTIPLIER` | No | How far above the measured noise floor speech must sit | `6` | No |
+| `CALL_AGENT_BARGE_IN_HANGOVER_FRAMES` | No | Silent 20ms frames before a voiced run ends | `10` (200ms) | No |
+| `CALL_AGENT_BARGE_IN_CONFIRM_MS` | No | Sustained voice that confirms an interruption | `600` | No |
+| `CALL_AGENT_BARGE_IN_ECHO_MARGIN` | No | How far inbound must exceed played agent audio to count as the customer | `0.55` | No |
+| `CALL_AGENT_BARGE_IN_MAX_PAUSE_MS` | No | Ambiguous-pause safety net | `2500` | No |
+| `CALL_AGENT_GREETING_CACHE_DIR` | No | Pre-rendered greeting audio | `<data dir>/greetings` | No |
 
 Generate secrets without putting them in shell history:
 
@@ -110,6 +129,7 @@ The installed Twilio SDK supports `timeout` on call creation; the ring timeout i
 
 ## 9. Complete execution sequence
 
+0. Answering-machine detection runs asynchronously alongside the call; a machine/fax verdict requests provider completion but never releases capacity itself.
 1. Import validation normalizes an E.164-compatible phone and bounds/sanitizes text.
 2. Enqueue checks suppression, lead DND/review state, idempotency key, and unresolved phone jobs in one transaction; it inserts `calls` and `call_jobs` rows.
 3. A coordinator atomically checks database-wide capacity and conditionally claims one queued job.
@@ -162,13 +182,84 @@ Monitor:
 
 Avoid logging transcripts, notes, full credentials, provider keys, or media tokens.
 
+## 12a. Call quality instrumentation
+
+Every media call writes numeric measurements into `call_events` under `metrics_*` event names. Payloads contain numbers, short enum-like strings, and timestamps only — never transcript text, phone numbers, credentials, or media tokens.
+
+| Event | Records |
+|---|---|
+| `metrics_bound` | Media stream bound; anchors the call clock |
+| `metrics_greeting` | Stream bind → first agent audio byte handed to Twilio |
+| `metrics_turn` | Caller's last voiced frame (EOT) → first agent audio byte; and the share of that spent in our own transport/pacing |
+| `metrics_provider_latency` | Deepgram's per-turn `LatencyReport`: STT, LLM first token, TTS time-to-first-byte, provider end-to-end |
+| `metrics_barge_in` / `metrics_barge_in_pause` | Every pause and its outcome (`commit`/`resume`/`timeout`) with the RMS, sustained voiced duration, elapsed ms, and whether agent audio was playing |
+| `metrics_provider_warning` / `metrics_provider_error` | Deepgram warning/error codes — a silent call caused by a rejected model id or speak provider shows up only here |
+| `metrics_call` | Per-call summary: media seconds, billable seconds, TTS characters, turns, dead-air gaps, barge-in tallies |
+| `metrics_acoustics` | RMS histograms split by whether agent audio was playing, plus the caller-over-agent level ratio in dB |
+
+Report percentiles across a batch:
+
+```bash
+python scripts/call_metrics.py --limit 200          # p50/p90/p99 per metric
+python scripts/call_metrics.py --call-id <uuid>     # one call
+python scripts/call_metrics.py --json               # machine-readable
+```
+
+The headline metric is `eot_to_first_audio_ms`. It is measured at the Twilio socket and includes the endpointing hold, so it is larger than Deepgram's `total_latency` by design — it is what the customer hears. Targets: p50 ≤ 800ms, p90 ≤ 1200ms; answer → greeting ≤ 500ms.
+
+To check measurements against what a human actually hears, set `CALL_AGENT_MEDIA_DUMP_DIR` and convert a capture:
+
+```bash
+python scripts/ulaw_to_wav.py "$CALL_AGENT_MEDIA_DUMP_DIR/<call_id>"   # stereo: L=caller, R=agent
+```
+
+This writes both sides of real customer conversations to disk. Treat the directory as call recordings: restricted permissions, deliberate retention, deleted when the measurement is done, and never left enabled in steady-state production.
+
+## 12b. Turn-taking and audio tuning
+
+These defaults were derived by replaying a real recorded call and by benchmarking the live Deepgram agent, not chosen by feel. Re-derive them the same way rather than adjusting by ear.
+
+**Barge-in.** The voice threshold is not fixed: it is `noise_floor x CALL_AGENT_BARGE_IN_NOISE_MULTIPLIER`, clamped between the configured minimum and 4000. The floor is measured over the first 500ms of the stream and then tracked continuously, but only while the agent is silent — inbound audio during agent speech is largely the agent's own echo.
+
+Two settings decide whether a customer is heard:
+
+- `CALL_AGENT_BARGE_IN_HANGOVER_FRAMES` — how long a gap may be before a voiced run is considered over. Too short and ordinary syllable gaps split one utterance into fragments that never reach the confirm threshold, so genuine interruptions are ignored entirely. This is what 3 frames (60ms) did.
+- `CALL_AGENT_BARGE_IN_CONFIRM_MS` — how much sustained voice confirms a real interruption. On real call audio, run lengths are bimodal: backchannels ("haan", "acha") at or under 400ms, real turns at or over 600ms. Keep this in that gap. Raising it makes the agent harder to interrupt; lowering it makes it stop for acknowledgements.
+
+`metrics_barge_in` events record the decision, the RMS, the live threshold, the sustained voiced duration, and whether agent audio was playing — enough to re-tune from a real batch instead of guessing.
+
+**The greeting.** Synthesising it after pickup cost 2.0 seconds of dead air at the start of every measured call — a websocket handshake, a settings round-trip, and speech synthesis, all after the customer said hello. Render it once instead:
+
+```bash
+python scripts/prerender_greeting.py          # render and cache
+python scripts/prerender_greeting.py --check  # is the cache current? (exit 1 if not)
+```
+
+**Re-run this after changing `DEEPGRAM_GREETING`, the voice, the TTS model, or `DEEPGRAM_SPEAK_LANGUAGE`.** The cache key covers all of them, so a stale file is ignored rather than played and the call silently falls back to the slow path. `--check` is suitable for a deploy gate.
+
+**Latency.** `scripts/call_metrics.py` reports the split. If `eot_to_first_audio_ms` regresses, check which stage moved: `tts_ttfb_ms` is the TTS model, `llm_first_token_ms` is the think model and prompt length, and `provider_signal_to_first_audio_ms` is our own transport and pacing.
+
 ## 13. Troubleshooting
 
 - **401 dashboard/API:** set both admin variables and send Basic credentials.
-- **403 Twilio callback:** verify auth token and exact public URL/proxy path.
+- **403 Twilio callback:** verify auth token and exact public URL/proxy path. `GET /health` and `/api/operations` now report `twilio_signature_failures`; a nonzero total across all three endpoints means `PUBLIC_BASE_URL` does not match the URL Twilio signed, and **no call will produce media** until it is corrected.
+- **Calls never end on their own:** confirm the agent registered `end_call` — `/api/calls/{id}` events include `agent_requested_end_call` in the logs and `metrics_call.media_end_reason`. A silent agent with no audio at all is usually a rejected Deepgram setting; check `metrics_provider_error` events for the cause.
+- **Voicemail reached:** `calls.answered_by` records Twilio's verdict. `unknown` is not treated as a machine by design.
+- **Agent talks over the customer / ignores interruptions:** inspect `metrics_barge_in` events. Many `resume` decisions with high `voiced_ms` means `CALL_AGENT_BARGE_IN_CONFIRM_MS` is too high; many `commit` decisions with `agent_playing: true` and low `rms` relative to `threshold` means echo is leaking past `CALL_AGENT_BARGE_IN_ECHO_MARGIN`.
+- **Agent interrupts itself:** speakerphone echo. Lower `CALL_AGENT_BARGE_IN_ECHO_MARGIN` toward 0 to filter more aggressively, at the cost of missing quiet customers.
+- **Long silence after the customer picks up:** the greeting cache is missing or stale. Run `python scripts/prerender_greeting.py --check`.
+- **Agent greets twice:** cached greeting audio is playing while the provider greeting is also configured. `get_agent_settings(greeting_already_played=True)` suppresses the provider one; this only happens if that flag is not being threaded through.
+- **Accent shifts mid-sentence:** `DEEPGRAM_SPEAK_LANGUAGE` is unset or wrong. Code-mixed Devanagari/Roman text makes the voice re-infer language per phrase unless it is pinned.
 - **Media closes with policy violation:** verify stream secret, clock synchronization, CallSid binding, and TwiML custom parameters.
 - **Calls remain reconciliation:** inspect `/api/operations`; verify Twilio credentials/network and provider state. Unknown-SID ambiguous dials require manual provider-log review.
-- **Queue does not advance:** inspect active/canceling jobs and provider terminal confirmation; capacity is intentionally not released on a timer alone.
+- **Queue does not advance / calls stuck in QUEUED:** `GET /api/operations` now reports `capacity`, including `capacity_occupied` and the oldest calls holding a slot. Something in that list is not finishing. Two safety nets clear it automatically — reconciliation gives up after `CALL_AGENT_RECONCILIATION_MAX_ATTEMPTS` failed provider lookups, and a sweep quarantines any call past its maximum-call deadline plus `CALL_AGENT_ABANDONED_JOB_GRACE_SECONDS`. Both move the call to `needs_reconciliation`: capacity is freed, but no outcome is invented, the phone stays blocked, and it is never redialed. To finish one off after checking the provider console:
+
+  ```bash
+  curl -u user:pass -X POST https://host/api/calls/<call_id>/resolve \
+       -H 'Content-Type: application/json' -d '{"status":"failed","note":"no record in Twilio"}'
+  ```
+
+  Capacity is still never released by a timer alone: automatic release requires repeated recorded failures to obtain proof, and the override requires a human.
 - **Extraction retries:** verify OpenAI key/model/quota. Raw transcripts remain durable. Permanent connected failures place leads in review.
 - **Database locked:** ensure all workers use the same supported local filesystem, directory permissions are correct, and transactions are not held by external tools.
 
