@@ -9,11 +9,15 @@ from dataclasses import asdict, is_dataclass
 from typing import Callable
 
 from deepgram import DeepgramClient
-from deepgram.agent.v1.types import AgentV1SendFunctionCallResponse
+from deepgram.agent.v1.types import AgentV1InjectAgentMessage, AgentV1SendFunctionCallResponse
 from deepgram.core.events import EventType
 
 from app.core.settings import AGENT_CLOSE_GRACE_SECONDS, AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS
-from app.core.settings import DEEPGRAM_FALLBACK_CLOSING
+from app.core.settings import (
+    DEEPGRAM_FALLBACK_CLOSING,
+    IDLE_CLOSING_MESSAGE,
+    IDLE_NUDGE_MESSAGE,
+)
 from app.integrations.audio_profiles import get_audio_profile
 from app.integrations.deepgram.config import (
     DEEPGRAM_API_KEY,
@@ -382,6 +386,51 @@ class ConversationEngine:
                 "deepgram_function_response_failed",
                 extra={"call_id": self.session.call_id, "error": type(exc).__name__},
             )
+
+    async def nudge_idle_customer(self) -> bool:
+        """Ask the agent to check whether the customer is still there.
+
+        Injected rather than played from a file so the model knows it said it:
+        a customer who does come back finds a conversation that still makes
+        sense, instead of an agent that has no idea it just spoke.
+        """
+        return await self._inject_agent_message(IDLE_NUDGE_MESSAGE, "idle_nudge")
+
+    async def close_for_silence(self) -> None:
+        """Say goodbye to a line nobody is answering, then end the call.
+
+        Armed before the injection, so the goodbye's own AgentAudioDone closes
+        the call through the ordinary path -- the same drain that keeps a
+        normal closing from being cut off. If the injection is refused there
+        is no audio and no AgentAudioDone, which is what the deadline is for;
+        with nothing spoken it falls through to the pre-rendered goodbye.
+        """
+        self.session.metadata.setdefault("end_call_reason", "no_response")
+        self._close_after_audio_done = True
+        await self._inject_agent_message(IDLE_CLOSING_MESSAGE, "idle_closing")
+        self._arm_close_deadline(AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS)
+
+    async def _inject_agent_message(self, message: str, reason: str) -> bool:
+        if not message or self.connection is None or self._deepgram_closed or self.closing_requested:
+            return False
+        try:
+            async with self._send_lock:
+                if self.connection is None or self._deepgram_closed:
+                    return False
+                await asyncio.to_thread(
+                    self.connection.send_inject_agent_message,
+                    AgentV1InjectAgentMessage(message=message),
+                )
+            logger.info("agent_message_injected", extra={"call_id": self.session.call_id, "reason": reason})
+            return True
+        except Exception as exc:
+            # Never fatal. Deepgram refuses an injection while the agent is
+            # already speaking, which is a legitimate "not now", not an error.
+            logger.info(
+                "agent_message_injection_failed",
+                extra={"call_id": self.session.call_id, "reason": reason, "error": type(exc).__name__},
+            )
+            return False
 
     def _arm_close_deadline(self, grace_seconds: float) -> None:
         """Hang up even if AgentAudioDone never arrives.

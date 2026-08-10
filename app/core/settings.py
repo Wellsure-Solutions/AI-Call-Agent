@@ -184,6 +184,27 @@ AGENT_PLAYBACK_TAIL_MS = max(0, int(os.getenv("CALL_AGENT_PLAYBACK_TAIL_MS", "40
 # nothing left to play. Short: it is a handoff between two tasks on the same
 # loop, not a network wait.
 AGENT_PLAYBACK_HANDOFF_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_HANDOFF_SECONDS", "2")))
+
+# Silence handling. A customer who answers and then says nothing -- put the
+# phone down, walked away, a voicemail AMD missed -- otherwise holds the call
+# until MAX_CALL_SECONDS. At a ceiling of one concurrent call that is the
+# whole outbound queue stalled behind somebody who is not there.
+#
+# Neither the clock nor the count runs while the agent is speaking or while
+# the customer is talking, so these are seconds of real silence.
+IDLE_NUDGE_SECONDS = max(3.0, float(os.getenv("CALL_AGENT_IDLE_NUDGE_SECONDS", "10")))
+IDLE_NUDGE_LIMIT = max(0, int(os.getenv("CALL_AGENT_IDLE_NUDGE_LIMIT", "3")))
+# Spoken by the agent itself, in its own voice and in context, rather than
+# played from a file -- an injected line the model knows it said keeps the
+# conversation coherent when the customer does come back.
+IDLE_NUDGE_MESSAGE = os.getenv("CALL_AGENT_IDLE_NUDGE_MESSAGE", "सर, आप line पर हैं?").strip()
+# Said once before hanging up on a line nobody is answering. Not the same as
+# the ordinary closing: there is no outcome to acknowledge and nobody has
+# agreed to anything.
+IDLE_CLOSING_MESSAGE = os.getenv(
+    "CALL_AGENT_IDLE_CLOSING_MESSAGE",
+    "लगता है आवाज़ नहीं आ रही। कोई बात नहीं सर, मैं बाद में call कर लूँगी। धन्यवाद।",
+).strip()
 # Jitter headroom: how much agent audio Twilio is allowed to hold ahead of
 # real time. Pacing exactly to real time keeps its buffer at about one 20ms
 # frame, so any hiccup writing to the socket -- a tunnel, a congested link, a

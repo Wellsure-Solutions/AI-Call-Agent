@@ -200,6 +200,17 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         # A refusal is the guard working; a rising count means the prompt has
         # stopped carrying the closing rule, which is otherwise only
         # observable by listening to calls.
+        # A call abandoned for silence would previously have run to the
+        # maximum-call deadline holding a concurrency slot, so the seconds
+        # saved are the throughput this bought.
+        abandoned = [c for c in calls if int(c.get("idle_gave_up", 0) or 0)]
+        report["idle"] = {
+            "nudges": sum(int(c.get("idle_nudges", 0) or 0) for c in calls),
+            "calls_nudged": sum(1 for c in calls if int(c.get("idle_nudges", 0) or 0)),
+            "abandoned_for_silence": len(abandoned),
+            "seconds_on_abandoned": round(sum(float(c.get("media_seconds", 0)) for c in abandoned), 1),
+        }
+
         refusals = sum(int(c.get("end_call_refusals", 0) or 0) for c in calls)
         report["closing"] = {
             "calls": len(calls),
@@ -348,6 +359,16 @@ def print_report(report: dict[str, Any]) -> None:
     if "rms" in report["barge_in"]:
         stats = report["barge_in"]["rms"]
         print(f"  caller RMS at decision: p50={_fmt(stats['p50'])} p90={_fmt(stats['p90'])} max={_fmt(stats['max'])}")
+
+    quiet = report.get("idle") or {}
+    if quiet.get("nudges") or quiet.get("abandoned_for_silence"):
+        print("\n=== Silent lines ===")
+        print(f"  nudged: {quiet['calls_nudged']} call(s), {quiet['nudges']} nudge(s) in total")
+        if quiet["abandoned_for_silence"]:
+            print(f"  ended for silence: {quiet['abandoned_for_silence']} call(s), "
+                  f"{quiet['seconds_on_abandoned']:.0f}s of media between them")
+            print("  each of these previously ran to the maximum-call deadline, holding a")
+            print("  concurrency slot for the whole time")
 
     closing = report.get("closing") or {}
     if closing.get("calls"):
