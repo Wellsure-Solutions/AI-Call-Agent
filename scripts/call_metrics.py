@@ -210,6 +210,9 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             # answers is the guard working, this is the guard being the only
             # thing that spoke.
             "spoken_for_the_model": sum(int(c.get("fallback_closings", 0) or 0) for c in calls),
+            # Wanted to speak the goodbye and had nothing rendered for the
+            # current voice. The customer heard silence, and nothing failed.
+            "no_closing_rendered": sum(int(c.get("closings_unavailable", 0) or 0) for c in calls),
         }
 
     for kind in ("metrics_provider_warning", "metrics_provider_error"):
@@ -280,6 +283,11 @@ def print_report(report: dict[str, Any]) -> None:
             f"{timeouts} timed out) -- customers spoke over the agent and were not heard"
         )
     closing = report.get("closing") or {}
+    if closing.get("no_closing_rendered"):
+        attention.append(
+            f"{closing['no_closing_rendered']} call(s) ended in silence because no goodbye is "
+            "rendered for the current voice -- run scripts/prerender_greeting.py"
+        )
     if closing.get("spoken_for_the_model"):
         attention.append(
             f"{closing['spoken_for_the_model']} call(s) ended on the pre-rendered goodbye -- "
@@ -352,6 +360,11 @@ def print_report(report: dict[str, Any]) -> None:
             print("  for a closing -- but the model still tried to drop the call.")
         else:
             print(f"  no hangup was attempted without a closing across {closing['calls']} call(s)")
+        unrendered = closing.get("no_closing_rendered") or 0
+        if unrendered:
+            print(f"  {unrendered} call(s) ended in SILENCE: the goodbye was due but nothing is")
+            print("  rendered for the current voice. Changing the voice, the model or the")
+            print("  wording changes the cache key. Fix: python scripts/prerender_greeting.py")
         spoken_for = closing.get("spoken_for_the_model") or 0
         if spoken_for:
             print(f"  {spoken_for} call(s) were closed by the pre-rendered goodbye because the")

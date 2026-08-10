@@ -176,6 +176,14 @@ AGENT_PLAYBACK_STALL_SECONDS = max(0.5, float(os.getenv("CALL_AGENT_PLAYBACK_STA
 # consonant. Not a substitute for the drain -- it is the last few hundred
 # milliseconds the drain cannot see.
 AGENT_PLAYBACK_TAIL_MS = max(0, int(os.getenv("CALL_AGENT_PLAYBACK_TAIL_MS", "400")))
+# How long the close may wait for the outbound pump to take everything the
+# agent generated before playback is measured at all. The AI stops accepting
+# audio on the provider's listener thread, which can be observed before the
+# audio callbacks queued ahead of that have reached the paced sender -- so
+# without this the drain can look at an empty sender and conclude there is
+# nothing left to play. Short: it is a handoff between two tasks on the same
+# loop, not a network wait.
+AGENT_PLAYBACK_HANDOFF_SECONDS = max(0.0, float(os.getenv("CALL_AGENT_PLAYBACK_HANDOFF_SECONDS", "2")))
 # Jitter headroom: how much agent audio Twilio is allowed to hold ahead of
 # real time. Pacing exactly to real time keeps its buffer at about one 20ms
 # frame, so any hiccup writing to the socket -- a tunnel, a congested link, a

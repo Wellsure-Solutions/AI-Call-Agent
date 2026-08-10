@@ -432,12 +432,20 @@ class ConversationEngine:
             return False
         audio = cached_closing_audio()
         if not audio:
-            # Nothing rendered. The call closes silently, exactly as before --
-            # a missing cache must never be the reason a call fails.
-            logger.info(
+            # Nothing rendered for the *current* voice. A missing cache must
+            # never fail a call, but it silently costs the customer their
+            # goodbye -- and the usual cause is a voice or wording change that
+            # invalidated a cache nobody re-rendered, which is invisible until
+            # somebody listens to a recording. Loud, and counted.
+            logger.warning(
                 "fallback_closing_unavailable",
-                extra={"call_id": self.session.call_id},
+                extra={
+                    "call_id": self.session.call_id,
+                    "remedy": "python scripts/prerender_greeting.py",
+                },
             )
+            if self.metrics is not None:
+                self.metrics.fallback_closing_unavailable()
             return False
         logger.info("fallback_closing_spoken", extra={"call_id": self.session.call_id})
         if self.metrics is not None:

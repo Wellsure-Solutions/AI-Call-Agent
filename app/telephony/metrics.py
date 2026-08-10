@@ -139,6 +139,7 @@ class CallMetrics:
         self._user_messages = 0
         self._end_call_refusals = 0
         self._fallback_closings = 0
+        self._closings_unavailable = 0
 
         # Barge-in accounting
         self._barge_in_commits = 0
@@ -343,6 +344,17 @@ class CallMetrics:
             self._fallback_closings += 1
         self._stamp("metrics_fallback_closing", {})
 
+    def fallback_closing_unavailable(self) -> None:
+        """We would have said goodbye, but nothing is rendered for this voice.
+
+        The customer got silence. The usual cause is a voice or wording change
+        that invalidated the cache and was never re-rendered -- invisible until
+        somebody listens to a recording, which is how it went unnoticed.
+        """
+        with self._lock:
+            self._closings_unavailable += 1
+        self._stamp("metrics_fallback_closing_unavailable", {})
+
     def provider_diagnostic(self, kind: str, code: str | None, description: str | None) -> None:
         """Record a Deepgram Warning/Error code so a silent call has a cause.
 
@@ -424,6 +436,7 @@ class CallMetrics:
                     "barge_in_timeouts": self._barge_in_timeouts,
                     "end_call_refusals": self._end_call_refusals,
                     "fallback_closings": self._fallback_closings,
+                    "closings_unavailable": self._closings_unavailable,
                 },
             )
             self._append_locked(

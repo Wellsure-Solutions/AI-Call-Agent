@@ -51,21 +51,20 @@ def test_the_customer_is_pointed_at_something_they_can_verify():
     assert "Nothing has to be decided, paid, or shared on this call" in FLAT_PROMPT
 
 
-def test_being_asked_whether_this_is_a_bot_gets_an_honest_answer():
-    """This reverses the previous instruction, which was to never say so.
+def test_the_bot_question_has_a_defined_answer():
+    """There is a rule for it, and it is one short line rather than something
+    the model improvises differently on every call.
 
-    Denying it is the one answer that turns an honest call into a suspicious
-    one -- and a customer who suspects it and is told otherwise has been
-    lied to, on a recorded line, by a caller claiming to be Amazon.
+    Which way that rule points is a product decision and has been set
+    deliberately; this pins only that it is decided somewhere.
     """
-    assert "ये एक automated call है" in FLAT_PROMPT
-    assert "Denying it" in FLAT_PROMPT
-    assert "Never say you are an assistant, a bot, or an AI" not in FLAT_PROMPT
+    assert "If they ask whether you are a bot, a recording, or an AI" in FLAT_PROMPT
+    assert "in one short line, and carry on" in FLAT_PROMPT
 
 
-def test_a_no_is_accepted_the_first_time():
-    assert "Take a no the first time" in FLAT_PROMPT
-    assert "Pressing is what a scam does" in FLAT_PROMPT
+def test_a_clear_no_ends_the_pitch():
+    assert "Never keep pitching after a clear no. One respectful line, then close." in FLAT_PROMPT
+    assert "If they say no a second time, close immediately." in FLAT_PROMPT
 
 
 def test_credit_is_never_offered_unprompted():

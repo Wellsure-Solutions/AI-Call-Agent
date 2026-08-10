@@ -37,8 +37,35 @@ coordinator = DurableCallCoordinator(
     abandoned_grace_seconds=ABANDONED_JOB_GRACE_SECONDS,
 )
 
+def warn_about_unrendered_audio() -> list[str]:
+    """Report pre-rendered phrases missing for the *current* voice settings.
+
+    The cache key covers the voice, the model and the text, so changing any of
+    them silently invalidates it. Nothing fails: the greeting falls back to
+    live synthesis and the fallback goodbye is simply not spoken. Both are
+    invisible from the outside -- a voice change once cost every call in a
+    batch its closing line, and it was only found by reading a transcript.
+    """
+    from app.integrations.deepgram.config import cached_closing_audio, cached_greeting_audio
+
+    missing = []
+    if cached_greeting_audio() is None:
+        missing.append("greeting (calls will wait on live synthesis, ~2s of dead air each)")
+    if cached_closing_audio() is None:
+        missing.append("closing (a call the model does not close will end in silence)")
+    for item in missing:
+        logger.warning(
+            "prerendered_audio_missing",
+            extra={"phrase": item, "remedy": "python scripts/prerender_greeting.py"},
+        )
+    return missing
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    for item in warn_about_unrendered_audio():
+        print(f"[startup] NOT RENDERED for the current voice: {item}")
+        print("[startup]   fix: python scripts/prerender_greeting.py")
     task=asyncio.create_task(coordinator.run())
     yield
     coordinator.stop(); await task

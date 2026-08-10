@@ -14,6 +14,7 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 from app.core.settings import (
     AGENT_PLAYBACK_DRAIN_SECONDS,
     AGENT_PLAYBACK_STALL_SECONDS,
+    AGENT_PLAYBACK_HANDOFF_SECONDS,
     AGENT_PLAYBACK_TAIL_MS,
     AMD_ENABLED,
     AMD_MODE,
@@ -597,6 +598,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         while the paced sender still held nearly all of it. Two calls in a row
         ended mid-word, and one of them played nothing at all.
         """
+        await self._await_close_signal()
         await self._drain_playback(service_socket=True)
         # A last short tail before the line drops. Playback is measured at our
         # socket and by mark acknowledgements; Twilio still has its own small
@@ -611,6 +613,26 @@ class TwilioAdapter(BaseTelephonyAdapter):
                 await self.websocket.close(code=1000, reason="agent_closing_call")
             except RuntimeError:
                 pass
+
+    async def _await_close_signal(self) -> None:
+        """Wait until the outbound pump holds everything the agent generated.
+
+        What starts this close is the AI refusing further audio, and the engine
+        sets that flag synchronously on Deepgram's listener thread -- before the
+        audio callbacks it queued ahead of it have been drained into the paced
+        sender. Measuring playback at that instant can therefore see an empty
+        sender and conclude, wrongly, that there is nothing left to play.
+
+        The close signal is queued behind that audio, so the pump reaching it
+        is exact proof the whole goodbye has been handed over. Bounded, because
+        a provider that died mid-turn never sends one.
+        """
+        if self._close_after_playback.is_set():
+            return
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                self._close_after_playback.wait(), timeout=AGENT_PLAYBACK_HANDOFF_SECONDS
+            )
 
     async def _drain_tick(self, pending_read: asyncio.Task | None) -> tuple[asyncio.Task | None, bool]:
         """Advance the drain by 50ms while servicing the Twilio socket.
