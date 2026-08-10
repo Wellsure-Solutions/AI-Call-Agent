@@ -28,10 +28,38 @@ from app.core.settings import (
     DEEPGRAM_THINK_TEMPERATURE,
     DEEPGRAM_EAGER_EOT_THRESHOLD,
     DEEPGRAM_EOT_THRESHOLD,
+    DEEPGRAM_KEYTERMS,
 )
 
 
-def _listen_provider_settings() -> dict[str, object]:
+MAX_KEYTERMS = 40
+
+
+def _keyterms_for(context: dict | None) -> list[str]:
+    """Campaign vocabulary, plus this lead's own business name.
+
+    The business name matters because the agent opens by asking whether it
+    has reached that business, and the customer's answer often repeats it.
+    Deduplicated case-insensitively while keeping the configured spelling,
+    and capped -- a long list dilutes the bias and eventually just makes
+    unlikely words easier to hallucinate out of line noise.
+    """
+    terms = list(DEEPGRAM_KEYTERMS)
+    business_name = (context or {}).get("business_name")
+    if isinstance(business_name, str) and business_name.strip():
+        terms.append(re.sub(r"\s+", " ", business_name).strip()[:60])
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for term in terms:
+        key = term.casefold()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(term)
+    return unique[:MAX_KEYTERMS]
+
+
+def _listen_provider_settings(context: dict | None = None) -> dict[str, object]:
     provider: dict[str, object] = {
         "type": "deepgram",
         "version": "v2",
@@ -39,6 +67,9 @@ def _listen_provider_settings() -> dict[str, object]:
         "language_hints": ["hi", "en"],
         "eot_threshold": DEEPGRAM_EOT_THRESHOLD,
     }
+    keyterms = _keyterms_for(context)
+    if keyterms:
+        provider["keyterms"] = keyterms
     if DEEPGRAM_EAGER_EOT_THRESHOLD is not None:
         provider["eager_eot_threshold"] = DEEPGRAM_EAGER_EOT_THRESHOLD
     return provider
@@ -155,7 +186,7 @@ def get_agent_settings(
         ),
         agent=AgentV1SettingsAgent(
             listen={
-                "provider": _listen_provider_settings()
+                "provider": _listen_provider_settings(context)
             },
             think={
                 "provider": {

@@ -102,6 +102,26 @@ DEEPGRAM_FALLBACK_CLOSING = os.getenv(
     "DEEPGRAM_FALLBACK_CLOSING",
     "आपका समय देने के लिए धन्यवाद सर। आपका दिन शुभ हो।",
 ).strip()
+# Vocabulary the recogniser is biased toward. Flux accepts these on the
+# listen provider and they cost nothing per call.
+#
+# The campaign's own words are exactly the ones a Hindi phone line garbles,
+# and the transcripts show it: "GST से लेते हैं" came back as "ऐसे से लेते
+# हैं". A misheard GST answer sends the agent down the wrong branch of the
+# pitch, so this is not cosmetic.
+#
+# Kept to genuine campaign terms. Biasing toward a word the customer is
+# unlikely to say makes it more likely to be hallucinated out of noise.
+DEEPGRAM_KEYTERMS = tuple(
+    term.strip()
+    for term in os.getenv(
+        "DEEPGRAM_KEYTERMS",
+        "GST,GST number,GST invoice,Amazon,Amazon Business,Amazon Pay Later,"
+        "business account,personal account,cashback,bulk discount,credit limit,"
+        "input credit,invoice,switch",
+    ).split(",")
+    if term.strip()
+)
 DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7"))
 # Eager end-of-turn starts the LLM before the user's turn is final. It can
 # reduce latency, but it also makes short pauses sound like interruptions.
