@@ -65,7 +65,7 @@ def test_an_unclear_answer_is_re_asked_exactly_once():
 def test_asking_for_a_callback_time_is_a_step_of_its_own():
     """It was previously conditional -- "only if it has not come up" -- and
     the model skipped it on every call."""
-    assert "Ask when it suits them for the team to call. Never skip this." in FLAT_PROMPT
+    assert "Never skip it" in FLAT_PROMPT
     assert "आपको किस time call करना ठीक रहेगा?" in FLAT_PROMPT
 
 
@@ -81,10 +81,24 @@ def test_a_customer_who_will_not_pick_a_time_is_accepted():
     assert "accept it and move on" in FLAT_PROMPT
 
 
-def test_the_step_gate_puts_confirmation_and_the_time_before_the_close():
-    gate = FLAT_PROMPT.split("STEP GATE")[1].split("###")[0]
-    assert gate.index("Get a real yes") < gate.index("Ask when it suits them")
-    assert gate.index("Ask when it suits them") < gate.index("Close.")
+def test_the_objectives_put_confirmation_and_the_time_before_the_close():
+    """The sequence is no longer a gate the model marches through, but these
+    three still have to happen in this order: agreeing, then a time, then the
+    goodbye. A time collected after the sign-off is a time nobody hears."""
+    objectives = FLAT_PROMPT.split("WHAT YOU ARE THERE TO DO")[1].split("###")[0]
+    assert objectives.index("get a real yes") < objectives.index("get a time")
+    assert objectives.index("get a time") < objectives.index("close")
+
+
+def test_the_call_is_driven_by_objectives_rather_than_a_fixed_sequence():
+    """The conveyor belt this replaced: the customer said "ठीक है, ठीक है"
+    and got the next benefit anyway, because the gate outranked reacting to
+    them."""
+    assert "The order below is the usual one, not a rule" in FLAT_PROMPT
+    assert "go where the conversation actually is" in FLAT_PROMPT
+    assert "Never give a second benefit to somebody who has not reacted to the first." in FLAT_PROMPT
+    for exit_ramp in ("go straight to the switch", "they have heard enough"):
+        assert exit_ramp in FLAT_PROMPT
 
 
 # ---------------------------------------------------------------------------
