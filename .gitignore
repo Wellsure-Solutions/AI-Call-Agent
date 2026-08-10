@@ -4,6 +4,9 @@ __pycache__/
 data/analytics.json
 data/call_agent.sqlite3
 data/calls.json
+data/call_agent.sqlite3-shm
+data/call_agent.sqlite3-wal
+data/call_results/
 data/campaigns.json
 data/leads.json
 data/responses.json
