@@ -237,6 +237,9 @@
             <button type="button" data-page="browser" data-tooltip="Browser Test Call" aria-label="Browser Test Call">
                 <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 8h18M7 6h.01M10 6h.01"/></svg></span><span class="nav-label">Browser Test Call</span>
             </button>
+            <button type="button" data-page="settings" data-tooltip="Settings" aria-label="Settings">
+                <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.63.68 1.1 1.32 1.1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></span><span class="nav-label">Settings</span>
+            </button>
         </nav>
         <div class="side-footer">
             <div class="agent-status" title="All systems operational">
@@ -325,6 +328,19 @@
                 <div id="chatLog" style="margin-top:18px;max-height:300px;overflow:auto" aria-live="polite"></div>
             </div>
         </section>
+
+        <section id="settings" class="page hidden">
+            <div class="card">
+                <div class="chart-head"><div><h3>Telephony provider</h3><div class="sub">Which carrier places outbound calls. Twilio cannot dial Indian numbers with an Indian caller ID, so +91 destinations need Exotel.</div></div></div>
+                <div id="providerNotice" class="notice" style="margin-top:14px">Applies to newly queued calls only. Calls already queued or in flight keep the provider they were created with.</div>
+                <div id="providerChoices" style="margin-top:16px"></div>
+                <div class="actions" style="margin-top:18px"><button id="saveProviderBtn" class="btn" type="button">Save provider</button><span id="providerSaveState" class="sub"></span></div>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <div class="chart-head"><div><h3>Recent changes</h3><div class="sub">Every provider change is recorded with its old and new value.</div></div></div>
+                <div id="providerHistory" class="tablewrap" style="margin-top:12px"></div>
+            </div>
+        </section>
     </main>
 </div>
 <div id="mobileScrim" class="mobile-scrim" aria-hidden="true"></div>
@@ -340,7 +356,8 @@ const pageCopy = {
     overview:['Dashboard Overview','Monitor outbound test calls, leads, and AI responses.'],
     leads:['Lead Upload','Import, validate, and prepare contacts for outbound calling.'],
     calls:['Calls','Track active calls, outcomes, transcripts, and follow-ups.'],
-    browser:['Browser Test Call','Speak with your AI agent directly through this browser.']
+    browser:['Browser Test Call','Speak with your AI agent directly through this browser.'],
+    settings:['Settings','Operator configuration for outbound calling.']
 };
 const uiIcons = {
     leads:'<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8-1v6m3-3h-6"/></svg>',
@@ -404,7 +421,84 @@ async function refresh() {
     if (liveResult.status === 'fulfilled') liveCalls = liveResult.value.calls || [];
     setConnection(results.every(result => result.status === 'fulfilled'));
     renderStats(stats); renderLiveCalls(); renderCalls(); renderLeads(); renderLiveSummary();
+    loadTelephonySettings();
 }
+
+// ---------------------------------------------------------------------------
+// Telephony provider settings
+// ---------------------------------------------------------------------------
+let telephonySettings = null;
+
+async function loadTelephonySettings() {
+    try {
+        const response = await fetch('/api/settings/telephony');
+        if (!response.ok) throw new Error('Unable to load telephony settings.');
+        telephonySettings = await response.json();
+    } catch (error) {
+        $('providerChoices').innerHTML = `<div class="notice bad">${escapeHtml(error.message)}</div>`;
+        return;
+    }
+    renderProviderChoices();
+    renderProviderHistory();
+}
+
+function providerLabel(name) {
+    return { twilio:'Twilio', exotel:'Exotel', auto:'Automatic by destination' }[name] || name;
+}
+
+function renderProviderChoices() {
+    const settings = telephonySettings;
+    if (!settings) return;
+    const byName = Object.fromEntries((settings.providers || []).map(item => [item.name, item]));
+    const anyConfigured = (settings.providers || []).some(item => item.configured);
+
+    $('providerChoices').innerHTML = (settings.selectable || []).map(name => {
+        const state = byName[name];
+        // `auto` is not a provider, so it has no credentials of its own -- it
+        // is usable as long as at least one real provider is.
+        const usable = name === 'auto' ? anyConfigured : Boolean(state && state.configured);
+        const detail = name === 'auto'
+            ? '+91 destinations go to Exotel, everything else to Twilio. Falls back if the preferred carrier is unconfigured.'
+            : (usable
+                ? `Configured &middot; calls show <b>${escapeHtml(state.caller_id || 'no caller ID')}</b>`
+                : `Not configured &middot; missing ${escapeHtml((state && state.missing || []).join(', ') || 'credentials')}`);
+        return `<label class="notice" style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px;${usable ? '' : 'opacity:.65'}">
+            <input type="radio" name="telephonyProvider" value="${escapeHtml(name)}" ${settings.active === name ? 'checked' : ''} ${usable ? '' : 'disabled'} style="margin-top:3px">
+            <span><b>${escapeHtml(providerLabel(name))}</b>${settings.active === name ? ' &mdash; active' : ''}<br><span class="sub">${detail}</span></span>
+        </label>`;
+    }).join('');
+}
+
+function renderProviderHistory() {
+    const changes = (telephonySettings && telephonySettings.recent_changes) || [];
+    if (!changes.length) {
+        $('providerHistory').innerHTML = '<div class="sub">No provider changes recorded yet.</div>';
+        return;
+    }
+    $('providerHistory').innerHTML = `<table><thead><tr><th>When</th><th>From</th><th>To</th><th>By</th></tr></thead><tbody>` +
+        changes.map(row => `<tr><td>${escapeHtml(row.timestamp)}</td><td>${escapeHtml(row.old_value || '\u2014')}</td><td>${escapeHtml(row.new_value)}</td><td>${escapeHtml(row.actor)}</td></tr>`).join('') +
+        `</tbody></table>`;
+}
+
+$('saveProviderBtn').onclick = async () => {
+    const chosen = document.querySelector('input[name="telephonyProvider"]:checked');
+    if (!chosen) { toast('Choose a provider first.'); return; }
+    $('providerSaveState').textContent = 'Saving...';
+    try {
+        const response = await fetch('/api/settings/telephony', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ provider:chosen.value }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Unable to save provider.');
+        $('providerSaveState').textContent = '';
+        toast(`Provider set to ${providerLabel(data.active)}. Newly queued calls only.`);
+        await loadTelephonySettings();
+    } catch (error) {
+        $('providerSaveState').textContent = '';
+        toast(error.message);
+    }
+};
 function renderStats(s) {
     const primary = [
         { label:'Total leads', value:s.total_leads, icon:'leads', tone:'', note:'Contacts ready for outreach' },

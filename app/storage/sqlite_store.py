@@ -219,7 +219,11 @@ class SQLiteCallStore(JsonCallStore):
         now = utcnow()
         with self.transaction(immediate=True) as db:
             row = db.execute("SELECT value FROM settings WHERE key=?", (ACTIVE_PROVIDER_KEY,)).fetchone()
-            old = row["value"] if row else None
+            # The value that was actually in force, not the raw row. With no
+            # row yet the effective provider is the default, and recording
+            # NULL there would make the audit trail disagree with what the
+            # operator saw in the UI before they changed it.
+            old = row["value"] if row else DEFAULT_PROVIDER
             db.execute(
                 "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",

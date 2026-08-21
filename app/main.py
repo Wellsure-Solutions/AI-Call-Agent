@@ -19,6 +19,7 @@ from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
 from app.telephony.exotel_routes import configure as configure_exotel, router as exotel_router
+from app.telephony.providers import SELECTABLE_PROVIDERS, provider_status_report
 from app.telephony.twilio_routes import OutboundCallRequest, callback_auth_failure_health, configure as configure_twilio, media_router, router as twilio_router, start_outbound_call
 
 logger = logging.getLogger(__name__)
@@ -325,6 +326,54 @@ async def operations():
         # is not finishing.
         "capacity": await asyncio.to_thread(answer_store.capacity_snapshot),
     }
+
+
+@app.get("/api/settings/telephony")
+async def get_telephony_settings():
+    """The active provider and what each one can actually do.
+
+    Returns configuration *state*, never configuration values: whether each
+    provider's credentials are present, which of them are missing by name, and
+    the caller ID it would present -- a published business number, not a
+    secret.
+    """
+    return {
+        "active": await asyncio.to_thread(answer_store.active_provider_setting),
+        "selectable": list(SELECTABLE_PROVIDERS),
+        "providers": await asyncio.to_thread(provider_status_report),
+        "recent_changes": await asyncio.to_thread(answer_store.list_settings_events, 10),
+        "note": "Applies to newly queued calls only. Calls already queued or in flight keep the provider they were created with.",
+    }
+
+
+@app.post("/api/settings/telephony")
+async def set_telephony_settings(payload: dict):
+    """Change the active provider, failing closed on an unusable one.
+
+    An operator who selects a provider with no credentials would otherwise
+    find out through a wall of failed calls, so the check happens here rather
+    than at dial time. `auto` requires at least one usable provider, since it
+    resolves to a real one per destination.
+    """
+    requested = str((payload or {}).get("provider") or "").strip().lower()
+    if requested not in SELECTABLE_PROVIDERS:
+        raise HTTPException(422, f"provider must be one of {sorted(SELECTABLE_PROVIDERS)}")
+
+    report = {item["name"]: item for item in await asyncio.to_thread(provider_status_report)}
+    if requested == "auto":
+        if not any(item["configured"] for item in report.values()):
+            raise HTTPException(422, "auto needs at least one configured provider; none are")
+    else:
+        state = report.get(requested, {})
+        if not state.get("configured"):
+            missing = ", ".join(state.get("missing") or ["unknown settings"])
+            raise HTTPException(422, f"{requested} cannot place calls: {missing} not set")
+
+    previous = await asyncio.to_thread(answer_store.active_provider_setting)
+    await asyncio.to_thread(answer_store.set_active_provider, requested)
+    # Names only. Never the credentials themselves.
+    logger.warning("telephony_provider_changed", extra={"old": previous, "new": requested})
+    return {"active": requested, "previous": previous, "applies_to": "newly_queued_calls"}
 
 
 @app.post("/api/calls/{call_id}/resolve")
