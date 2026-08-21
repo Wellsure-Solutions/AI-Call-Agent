@@ -94,9 +94,24 @@ class TwilioProvider:
     supports_amd = True
 
     def __init__(self, client=None, from_number: str | None = None, public_base_url: str | None = None) -> None:
-        self._client = client or Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        self._explicit_client = client
         self.from_number = TWILIO_FROM_NUMBER if from_number is None else from_number
         self.public_base_url = PUBLIC_BASE_URL if public_base_url is None else public_base_url
+
+    @property
+    def _client(self):
+        """Built on first use, not in __init__.
+
+        `is_configured()` and `caller_id()` are called on every enqueue to
+        resolve the provider, and neither needs an SDK client. Constructing
+        one there would set up an HTTP client per candidate per queued call,
+        and would make configuration reporting depend on the SDK tolerating
+        empty credentials in its constructor -- which it does today, and need
+        not tomorrow.
+        """
+        if self._explicit_client is None:
+            self._explicit_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        return self._explicit_client
 
     # ------------------------------------------------------------------
     # Control plane
