@@ -1,6 +1,7 @@
 # Exotel as a second telephony provider — design note
 
-**Status: for review. No implementation code has been written yet.**
+**Status: reviewed and implemented.** §9 records the decisions taken; §1.4 has an open
+measurement to complete on the first real calls.
 
 Scope: add Exotel alongside Twilio so `+91` destinations can be dialled from a real Indian
 ExoPhone. Twilio stays fully supported and unchanged in behaviour; operators pick the active
@@ -8,8 +9,8 @@ provider at runtime from the dashboard.
 
 Everything below was checked against the current code and against the Exotel documentation
 fetched on 2026-08-21. Where the prompt, the code, and the Exotel docs disagree, the disagreement
-is called out rather than smoothed over. **Six items need your decision — they are collected in
-§9.**
+is called out rather than smoothed over. Six items needed a decision; **§9 records what was
+decided and how each was implemented.**
 
 ---
 
@@ -37,9 +38,9 @@ This is consistent with Exotel's classic *Connect Two Numbers* API, where `From`
 **first** and `To` the leg dialled second. AgentStream has no second human leg — the second leg is
 the bot socket — so `from` is the only number dialled, i.e. the customer.
 
-Getting this backwards dials our own ExoPhone and bills for it. `ExotelProvider.dial()` will
-therefore map `to_number → from`, `EXOTEL_CALLER_ID → callerid`, and I will put that mapping behind
-a named constant with a comment, plus a unit test that asserts the request body puts the
+Getting this backwards dials our own ExoPhone and bills for it. `ExotelProvider.dial()`
+therefore maps `to_number → from`, `EXOTEL_CALLER_ID → callerid`, with the mapping spelled out in a comment
+and a unit test asserting the request body puts the
 destination in `from` and the ExoPhone in `callerid`.
 
 ### 1.2 Exotel cannot give us mu-law on the inbound leg — the fallback path is mandatory
@@ -80,7 +81,7 @@ decision, deliberately. `app/telephony/audio/local_vad.py`'s own docstring:
 would fail at import time — taking the whole app down, not just Exotel. Adding `audioop-lts` as a
 dependency to work around that contradicts "no new heavy dependencies".
 
-**Decision: no `audioop`.** A new `app/telephony/audio/g711.py` will hold both directions as table
+**Decision: no `audioop`.** `app/telephony/audio/g711.py` holds both directions as table
 lookups, reusing the decode table that already exists in `local_vad.py` and adding the matching
 encode table (the same G.711 algorithm `tests/fixtures.py::linear_to_mulaw` already implements, so
 the round-trip is testable against an independent implementation already in the tree). Cost is one
@@ -103,16 +104,27 @@ Disputed: the minimum. The docs say "Minimum chunk size: 3.2k [100ms data]". At 
 for undersized chunks is soft, not a rejection: "platform will wait for 20ms before sending next
 chunk".
 
-Plan: `PacedSender` is **not modified**. It keeps pacing internally at 160-byte / 20 ms mu-law
+`PacedSender` is **not modified**. It keeps pacing internally at 160-byte / 20 ms mu-law
 frames, so its real-time anchor, `buffered_seconds`, and the drain maths stay exactly as tuned. The
 Exotel adapter adds a small outbound aggregation buffer: it accumulates `EXOTEL_SEND_CHUNK_MS`
 worth of paced frames, transcodes, and emits one `media` message that is a multiple of 320 bytes by
 construction. Marks are sent per wire chunk rather than every 5 frames.
 
-Default `EXOTEL_SEND_CHUNK_MS = 100` (→ 800 mu-law bytes → 1600 bytes on the wire, a clean multiple
-of 320). This matches the blog's guidance and the docs' stated *intent* ("[100ms data]"), while the
-strict byte-minimum reading would need 200 ms. See §9(b) — I would rather verify this on the first
-real call than pay 200 ms of added barge-in latency on a guess.
+**Decided: start at 3200 bytes** (`EXOTEL_SEND_CHUNK_BYTES`, expressed in wire bytes since that is
+how the constraint is stated). That satisfies both readings of the minimum, and undershooting risks
+jitter artefacts. Barge-in responsiveness is not hostage to it either way, because Exotel supports
+`clear`, which empties its buffer immediately on a confirmed interruption.
+
+Whether to keep 3200 or drop to 1600 is a measurement, not a reading. Place a handful of real calls
+at each and compare `eot_to_first_audio_ms` and `tts_ttfb_ms`; keep 1600 only if it wins *and* shows
+no audio degradation on a capture. The procedure is step 8 of `docs/exotel-first-call.md`.
+
+| Chunk size | `eot_to_first_audio_ms` p50 / p90 | `tts_ttfb_ms` p50 | Audio verdict |
+|---|---|---|---|
+| 3200 bytes (200 ms) | _to be measured_ | _to be measured_ | _to be measured_ |
+| 1600 bytes (100 ms) | _to be measured_ | _to be measured_ | _to be measured_ |
+
+Fill this in from the first batch rather than leaving the default unexamined.
 
 **Inbound is re-framed, and this is the important half.** Exotel chooses its own inbound chunk size
 and we do not control it. Every barge-in constant in the repo is expressed in 20 ms frames —
@@ -199,7 +211,7 @@ embedded in the URL. `_valid_signature` cannot be reused. See §5.
 
 ## 2. The provider interface
 
-New package `app/telephony/providers/`, holding the control plane only. The media plane stays in
+`app/telephony/providers/` holds the control plane only. The media plane stays in
 `app/telephony/adapters/`.
 
 ```python
@@ -222,7 +234,7 @@ class TelephonyProvider(Protocol):
     def caller_id(self) -> str: ...                          # for the settings UI
 ```
 
-`TwilioProvider` wraps the existing `twilio.rest.Client` calls lifted out of `TwilioAdapter`
+`TwilioProvider` wraps the `twilio.rest.Client` calls lifted out of `TwilioAdapter`
 (`connect()`'s REST body, `fetch_status`, `update_status`, `build_twiml`). `ExotelProvider` uses
 `httpx` with Basic auth. No Exotel SDK: there is no officially maintained one.
 
@@ -246,7 +258,7 @@ because it is a judgement call, not a documented guarantee.
 
 ### Media plane
 
-`BaseTelephonyAdapter` is untouched. A new `StreamingMediaAdapter` sits between it and the two
+`BaseTelephonyAdapter` is untouched. `StreamingMediaAdapter` sits between it and the two
 telephony adapters, holding the shared, hard-won logic verbatim — soft barge-in (pause / echo
 rejection / confirm / resume / timeout), `PacedSender` lifecycle, mark bookkeeping,
 `audio_currently_playing`, `_drain_playback` / `_drain_tick` / `_await_close_signal` /
@@ -257,7 +269,7 @@ rejection / confirm / resume / timeout), `PacedSender` lifecycle, mark bookkeepi
 barge-in algorithm and every constant are moved as-is, not re-tuned. `ExotelAdapter` adds the
 transcode + re-framing at its socket boundary and nothing else.
 
-One existing test conflicts with this shape — see §9(a).
+One existing test conflicted with this shape — see §9(a).
 
 ---
 
@@ -348,7 +360,7 @@ Three separate mechanisms, deliberately not collapsed into one.
 
 ### 6.1 The setting lives in SQLite
 
-New `settings` table, created in the same idempotent `BEGIN IMMEDIATE` migration as everything else:
+A `settings` table, created in the same idempotent `BEGIN IMMEDIATE` migration as everything else:
 
 ```sql
 CREATE TABLE IF NOT EXISTS settings(
@@ -421,11 +433,11 @@ invent a fake call row. No credentials are ever logged or returned; the endpoint
 
 ## 7. Routing and configuration
 
-New `app/telephony/exotel_routes.py` mounted at `/exotel`, mirroring the Twilio routes minus TwiML:
+`app/telephony/exotel_routes.py` is mounted at `/exotel`, mirroring the Twilio routes minus TwiML:
 `POST /exotel/status/{call_id}`, and a **separate** `WS /exotel/media-stream` (§1.5). Registered in
 `app/main.py` next to the existing `include_router` calls. No `/exotel/amd/*` (§1.7).
 
-New settings, following the existing `_env` pattern and the fail-closed-on-missing-secret
+Settings added, following the existing `_env` pattern and the fail-closed-on-missing-secret
 convention:
 
 ```
@@ -439,10 +451,12 @@ EXOTEL_CALLBACK_ALLOWED_IPS=         # optional, empty = disabled
 CALL_AGENT_DEFAULT_PROVIDER=twilio   # seed only; the database is authoritative once set
 ```
 
-`check_startup_configuration()` gains Exotel checks that only fire when Exotel is the active
+`check_startup_configuration()` reports Twilio as before; Exotel gaps surface through the
+settings endpoint's fail-closed check rather than as startup noise on a Twilio-only deployment,
+which would otherwise warn when Exotel is the active
 provider, so a Twilio-only deployment gets no new noise.
 
-`guide.md` gets the env table rows, an Exotel subsection under §8 (provider setup, ExoPhone → box
+`guide.md` has the env table rows, an Exotel subsection under §8 (provider setup, ExoPhone → box
 wiring, the seed-vs-database rule), §9 execution-sequence deltas (no TwiML step; SID binds at dial;
 AMD absent), and §13 troubleshooting entries.
 
@@ -459,53 +473,59 @@ transcripts, phone numbers, credentials, or media tokens.
 
 ---
 
-## 9. Decisions I need from you
+## 9. Decisions taken
 
-**(a) One existing test blocks the clean media-plane split.**
-`tests/test_turn_taking.py::test_twilio_outbound_pump_clears_playback_on_interruption` greps
-`twilio_adapter.py` for the literal `elif message_type == "interrupt":` and checks
-`await self.clear_playback()` follows it. The outbound pump is identical for both providers, so it
-belongs in `StreamingMediaAdapter` — which removes that literal from `twilio_adapter.py` and fails
-the test. You said every existing Twilio test must pass unchanged; this one asserts file contents,
-not behaviour.
-  - **(a1) — my recommendation:** move the pump to the base class and repoint that test's path to
-    the base-class file. Two-line test edit, identical guarantee, no duplication. It is the only
-    existing test that would need touching.
-  - (a2) Keep a per-provider pump in each adapter so the text stays put. Test passes untouched, at
-    the cost of ~30 duplicated lines of dispatch across two adapters — the exact drift risk the
-    refactor exists to remove.
+**(a) The pump moved to the shared base class.** `StreamingMediaAdapter` owns the outbound pump;
+`tests/test_turn_taking.py` was repointed at that file with a comment noting the assertion is on
+file contents, not behaviour, and that converting it to a behavioural test is a separate change
+that should not land inside a provider refactor. It was the only existing test that needed
+touching. `TwilioAdapter` keeps `_send_to_twilio` and `_complete_twilio_call` as thin aliases so
+other callers and tests are unaffected.
 
-  (`tests/test_audio_transport.py`'s source-grep test passes unchanged either way: `send_audio` /
-  `receive_audio` stay in `twilio_adapter.py`, and no `audioop` is introduced anywhere.)
+**(b) Chunk size starts at 3200 bytes, to be decided by measurement.** See §1.4 for the table to
+fill in and `docs/exotel-first-call.md` step 8 for the procedure.
 
-**(b) Outbound chunk size: 100 ms or 200 ms?** Exotel's stated minimum is self-inconsistent at
-8 kHz (§1.4). I propose 100 ms (1600 bytes) as the default, configurable, and verified on the first
-real call — 200 ms would add up to 200 ms to first-audio and to barge-in `clear` responsiveness.
-Say the word if you would rather start strictly compliant at 200 ms and tune down.
+**(c) `auto` is built.** A third value of the setting, not a layer over it: an explicit selection is
+authoritative and is never overridden by destination. `resolve_provider(phone_number)` is called
+once, at enqueue, and slots into the same persistence path. An unconfigured preferred provider
+falls back rather than failing the enqueue.
 
-**(c) `auto` destination routing — I recommend building it.** It falls out cleanly: provider
-resolution already happens exactly once at enqueue, so `resolve_provider(phone_number) -> str`
-called from that one site is genuinely a single function and one extra radio option. `+91` → Exotel,
-everything else → Twilio, falling back to the configured default when the preferred provider is
-unconfigured. It does not complicate the per-call persistence at all — it *is* the per-call
-persistence path. But it is your call, and I will drop it without argument if you would rather ship
-the manual toggle first.
+**(d) Exotel 4xx is `rejected`, with the HTTP-200 guard.** `_parse_call` raises `ExotelDialError`
+— deliberately not an `httpx.HTTPStatusError` — when a 200 carries an error payload or an
+unparseable body, so `classify_dial_error` files it as ambiguous. Ambiguous is the default for
+everything not positively identified as a 4xx. Nothing blind-redials.
 
-**(d) Exotel 4xx → `rejected`.** Matches Twilio's semantics; see the caveat at the end of §2.
-Confirm you are happy treating a 4xx as a definite refusal.
+**(e) The SID binding is restored in the media route.** The token proves the URL was not forged;
+the database proves the stream belongs to that call. `/exotel/media-stream` checks the start
+event's `call_sid` against the SID bound at dial time *and* against the call's persisted provider,
+then `claim_media` re-checks it inside the conditional UPDATE that enforces exclusive ownership.
+The reasoning is written into `callback_urls.exotel_stream_token` and the route, explicitly warning
+against collapsing the two halves.
 
-**(e) Stream token omits the SID for Exotel** (§4), because the URL must exist before the SID does.
-Correlation is still enforced by `claim_media`'s conditional UPDATE. Confirm this is an acceptable
-narrowing.
+**(f) `settings_events` is a separate table.** `call_events.call_id` stays NOT NULL and keeps its
+foreign key.
 
-**(f) `settings_events` as a new table** for the settings audit trail, rather than relaxing
-`call_events.call_id`'s NOT NULL foreign key. This is the one addition beyond the `provider` column
-and the settings row that your constraints section did not explicitly authorise, so I am asking
-rather than assuming.
+**Two additions requested during review, both implemented:**
 
----
+- **Codec tested against reference vectors, not round-trips.** `tests/test_g711_codec.py` pins the
+  tables against landmark values derived by hand from the G.711 definition, against `audioop` where
+  it still exists, and against the independent encoder in `tests/fixtures.py`. This immediately
+  earned its keep: the first draft had the sign convention inverted at the extremes (`0x00` is the
+  most *negative* code, not the most positive), which a round-trip test would have passed. It also
+  surfaced two real properties now pinned explicitly — mu-law's redundant negative zero (`0x7F`)
+  cannot round-trip byte-for-byte and becomes `0xFF`, the other spelling of silence, exactly as
+  `audioop` does; and our encoder differs from `audioop`'s on ~0.6% of samples because `audioop`
+  quantises to 14 bits first, while ours is the exact inverse of the decode table the barge-in path
+  already uses.
 
-## 10. Implementation order once approved
+- **The metrics clock is carried through the re-framer.** `CallMetrics.observe_inbound` takes an
+  optional `at`; `ExotelAdapter` stamps each chunk at arrival and assigns each 20 ms sub-frame
+  `arrival - (frames_remaining × 20ms)`, so a caller who stops speaking mid-chunk is not recorded as
+  having stopped at the chunk boundary. Two tests cover it: one asserts the sub-frame timestamps
+  span the chunk in audio order, and one drives the same audio through both adapters and asserts
+  they report comparable latency.
+
+## 10. Implementation order
 
 1. Extract the provider interface with Twilio behind it — no behaviour change, tests green.
 2. Add the `provider` column, per-call persistence, and the settings store — still Twilio-only,
@@ -514,12 +534,11 @@ rather than assuming.
 4. Dashboard settings UI.
 5. Docs — `guide.md` updates and the first-real-call checklist.
 
-Each is a separate reviewable commit. Tests listed in the brief are written alongside the commit
-that makes them meaningful, and `python -m compileall -q app main.py`, `pytest -q`, and
-`git diff --check` run before each push.
+Each landed as a separate commit, with `python -m compileall -q app main.py`, `pytest -q` and
+`git diff --check` green at each step.
 
-Baseline for comparison: **231 passed** on `claude/exotel-provider-integration-69k50x` at
-`8d9cafe`, before any change.
+Test counts: **231** at `8d9cafe` before any change, 241 after (a), 261 after (b), 368 after (c),
+384 after (d). No existing test changed except the one repoint in §9(a).
 
 ---
 
