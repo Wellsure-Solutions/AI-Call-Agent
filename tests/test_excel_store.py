@@ -11,9 +11,10 @@ from app.core.models import CallSession
 class FakeExtractor:
     def extract(self, session):
         return {
-            "Amazon_business_account": "yes",
-            "account_creation_interest": "no",
+            "interest_status": "yes",
+            "primary_reason": "no_time",
             "callback_approved": "unknown",
+            "callback_time": "not_provided",
             "do_not_call_requested": "no",
         }
 
@@ -35,7 +36,9 @@ def test_call_result_service_saves_xlsx_with_openpyxl(tmp_path):
     values = [cell.value for cell in sheet[2]]
     assert values[0] == "call-2"
     assert values[4] == "completed"
+    # Column order follows ANSWER_FIELDS, so this reads the first two campaign
+    # answers rather than naming them -- the campaign changes, the shape does not.
     assert values[5] == "yes"
-    assert values[6] == "no"
+    assert values[6] == "no_time"
     assert "malik" in values[-1]
     workbook.close()

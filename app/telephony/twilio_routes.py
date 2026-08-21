@@ -202,7 +202,7 @@ async def media_stream(websocket: WebSocket):
     # final flush still happens on an errored or hung-up call.
     # A cache hit removes the provider round-trip from the start of the call
     # entirely; a miss silently falls back to Deepgram synthesising it.
-    greeting = cached_greeting_audio()
+    greeting = cached_greeting_audio(session.metadata)
     metrics, writer = _build_metrics(call_id, "cached" if greeting else "provider")
     dump = MediaDump.create(MEDIA_DUMP_DIR, call_id)
     if metrics is not None:

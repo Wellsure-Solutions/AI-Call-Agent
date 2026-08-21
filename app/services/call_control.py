@@ -99,7 +99,11 @@ _TERMINAL_ASSISTANT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bteam will reach out",
         r"\bteam jald hi",
         r"\bphir baat karte",
-        r"\bthank you[,\s]+(?:and\s+)?(?:goodbye|good bye)",
+        # "thank you, goodbye" and the variants the seller script actually
+        # produces -- "thank you for your time, goodbye". With no end_call
+        # tool registered, matching here is the only thing that ends a call,
+        # so a closing this misses runs on to the maximum-call deadline.
+        r"\bthank you\b[^.!?]{0,40}?[,\s]+(?:and\s+)?(?:goodbye|good bye)",
         r"\bthanks[,\s]+(?:and\s+)?(?:goodbye|good bye)",
     )
 )

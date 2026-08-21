@@ -20,7 +20,7 @@ def listen(context=None) -> dict:
 
 def test_the_campaign_vocabulary_reaches_the_recogniser():
     terms = listen()["keyterms"]
-    for word in ("GST", "Amazon Business", "cashback", "input credit"):
+    for word in ("Wellsure", "Amazon", "Seller Central", "returns", "commission"):
         assert word in terms, word
 
 
@@ -52,9 +52,9 @@ def test_whitespace_and_newlines_in_lead_data_are_flattened():
 
 def test_a_duplicate_business_name_is_not_sent_twice():
     """Deduplicated case-insensitively, keeping the configured spelling."""
-    terms = _keyterms_for({"business_name": "amazon business"})
-    assert sum(1 for t in terms if t.casefold() == "amazon business") == 1
-    assert "Amazon Business" in terms
+    terms = _keyterms_for({"business_name": "wellsure"})
+    assert sum(1 for t in terms if t.casefold() == "wellsure") == 1
+    assert "Wellsure" in terms, "the configured spelling wins over the lead's"
 
 
 def test_the_list_stays_short_enough_to_be_worth_something():

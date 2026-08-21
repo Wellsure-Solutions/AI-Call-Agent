@@ -17,10 +17,10 @@ def test_extracts_sales_qualification_answers_with_openai(monkeypatch):
             return types.SimpleNamespace(
                 output_text=json.dumps(
                     {
-                        "Amazon_business_account": "no",
-                        "account_creation_interest": "yes",
+                        "interest_status": "yes",
+                        "primary_reason": "unknown",
                         "callback_approved": "yes",
-                        "callback_time": "kal shaam 5 baje",
+                        "callback_time": "provided",
                         "do_not_call_requested": "no",
                     }
                 )
@@ -52,11 +52,9 @@ def test_extracts_sales_qualification_answers_with_openai(monkeypatch):
     assert captured["text"]["format"]["strict"] is True
     assert "Do not rely on keywords only" in captured["input"][0]["content"]
     assert answers == {
-        "Amazon_business_account": "no",
-        "account_creation_interest": "yes",
+        "interest_status": "yes",
+        "primary_reason": "unknown",
         "callback_approved": "yes",
-        # The time the customer actually named. Recorded verbatim so the
-        # onboarding team calls when they said, rather than "tomorrow".
-        "callback_time": "kal shaam 5 baje",
+        "callback_time": "provided",
         "do_not_call_requested": "no",
     }

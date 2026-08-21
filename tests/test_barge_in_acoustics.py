@@ -5,6 +5,7 @@ import pytest
 from tests import fixtures
 from app.core.settings import (
     BARGE_IN_CONFIRM_MS,
+    BARGE_IN_NOISE_MULTIPLIER,
     BARGE_IN_ECHO_MARGIN,
     BARGE_IN_HANGOVER_FRAMES,
     BARGE_IN_VOICE_ENERGY_THRESHOLD,
@@ -25,10 +26,20 @@ def settle(floor: AdaptiveNoiseFloor, frames: list[bytes], agent_playing: bool =
 
 
 def test_the_floor_falls_to_a_quiet_line():
-    floor = AdaptiveNoiseFloor(initial_floor=500.0)
+    """Built exactly as the adapter builds it, so the configured multiplier
+    and minimum are the ones under test rather than the class defaults."""
+    floor = AdaptiveNoiseFloor(
+        initial_floor=500.0,
+        multiplier=BARGE_IN_NOISE_MULTIPLIER,
+        minimum=BARGE_IN_VOICE_ENERGY_THRESHOLD,
+    )
     settle(floor, fixtures.quiet_line(3000))
     assert floor.floor < 120, "a quiet line must pull the floor down"
-    assert floor.threshold == BARGE_IN_VOICE_ENERGY_THRESHOLD, "clamped at the configured minimum"
+    assert floor.threshold >= BARGE_IN_VOICE_ENERGY_THRESHOLD, (
+        "a quiet line must never drive the threshold below the configured floor, "
+        "or line noise starts reading as speech"
+    )
+    assert floor.threshold < 800, "and it must stay far below a real utterance"
 
 
 def test_the_floor_rises_on_a_noisy_line_so_noise_stops_reading_as_speech():

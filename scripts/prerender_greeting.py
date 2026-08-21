@@ -36,7 +36,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.settings import (  # noqa: E402
     DEEPGRAM_API_KEY,
     DEEPGRAM_FALLBACK_CLOSING,
-    DEEPGRAM_GREETING,
     DEEPGRAM_LISTEN_MODEL,
     GREETING_CACHE_DIR,
 )
@@ -44,6 +43,7 @@ from app.integrations.deepgram.config import (  # noqa: E402
     _speak_provider_settings,
     closing_fingerprint_for_current_config,
     greeting_fingerprint_for_current_config,
+    resolve_greeting,
 )
 from app.telephony.audio.greeting_cache import cache_path, load_greeting, save_greeting  # noqa: E402
 from app.telephony.audio.local_vad import _MULAW_DECODE_TABLE  # noqa: E402
@@ -175,7 +175,10 @@ def main() -> int:
     args = parser.parse_args()
 
     phrases = (
-        ("greeting", DEEPGRAM_GREETING, greeting_fingerprint_for_current_config()),
+        # The resolved text, never the raw setting: rendering the raw one
+        # would bake an unsubstituted "{Business Name}" into the cache and
+        # play it to every caller.
+        ("greeting", resolve_greeting(None), greeting_fingerprint_for_current_config()),
         ("closing", DEEPGRAM_FALLBACK_CLOSING, closing_fingerprint_for_current_config()),
     )
     # Worst status wins, so a missing closing still fails --check even when
