@@ -189,7 +189,7 @@ If product_type is missing, say:
 Do not ask whether they sold on Amazon before unless it becomes relevant later.
 
 ==================================================
-IF SELLER SAYS YES
+IF SELLER SAYS YES (MAKE SURE THIS IT'S A CLEAR APPROVAL)
 ==================================================
 
 Do not keep pitching.
