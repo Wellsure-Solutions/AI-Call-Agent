@@ -133,6 +133,17 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 TWILIO_FRAME_MS = int(_env("TWILIO_FRAME_MS", "20"))
 
 # ============================================================
+# TELEPHONY PROVIDER SELECTION
+# ============================================================
+
+# Seed value only. It is written into the `settings` table the first time the
+# database is opened and is *ignored from then on* -- once an operator saves a
+# choice in the dashboard, the database is authoritative. Changing this
+# variable on an existing deployment does nothing; change the provider in the
+# dashboard instead. See guide.md §8.
+DEFAULT_TELEPHONY_PROVIDER = _env("DEFAULT_PROVIDER", "twilio").strip().lower()
+
+# ============================================================
 # ANSWERING MACHINE DETECTION
 # ============================================================
 

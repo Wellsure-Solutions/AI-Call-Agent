@@ -5,6 +5,7 @@ import csv
 import json
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
@@ -13,8 +14,17 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from app.storage.json_store import EXPORT_HEADERS, JsonCallStore, Workbook
+from app.telephony.providers import DEFAULT_PROVIDER, PROVIDER_NAMES, SELECTABLE_PROVIDERS, get_provider
 
 PROVIDER_TERMINAL = frozenset({"completed", "failed", "busy", "no-answer", "canceled"})
+ACTIVE_PROVIDER_KEY = "active_telephony_provider"
+
+# How long a worker may serve a cached copy of the active-provider setting.
+# Short enough that workers cannot meaningfully disagree after an operator
+# saves a change, long enough to keep a SQLite read off the enqueue path in a
+# batch. Never cached for the life of the process, and never read anywhere
+# except at enqueue.
+PROVIDER_SETTING_TTL_SECONDS = 2.0
 LIFECYCLE_TERMINAL = frozenset({"COMPLETED", "FAILED", "CANCELED", "BUSY", "NO_ANSWER", "HUNG_UP"})
 CAPACITY_STATES = ("claimed", "active", "canceling")
 UNRESOLVED_JOB_STATES = ("queued", "claimed", "active", "canceling", "needs_reconciliation")
@@ -42,6 +52,9 @@ class SQLiteCallStore(JsonCallStore):
     def __init__(self, database_path: Path, legacy_data_dir: Path | None = None) -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        # (value, monotonic_read_at). Bounded by PROVIDER_SETTING_TTL_SECONDS
+        # so workers cannot disagree for long after a change is saved.
+        self._provider_setting_cache: tuple[str, float] | None = None
         super().__init__(legacy_data_dir or self.database_path.parent)
         self._initialize_schema()
         self.migrate_legacy()
@@ -124,7 +137,145 @@ class SQLiteCallStore(JsonCallStore):
         db.execute("CREATE INDEX IF NOT EXISTS calls_deadlines ON calls(provider_terminal_at,ring_deadline,max_call_deadline)")
         db.execute("CREATE INDEX IF NOT EXISTS calls_reconcile ON calls(reconciliation_status,next_reconciliation_at)")
         db.execute("CREATE INDEX IF NOT EXISTS extraction_claim ON extraction_jobs(state,next_attempt_at,lease_expires_at)")
-        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','2')")
+        self._migrate_schema_v3(db)
+
+    def _migrate_schema_v3(self, db: sqlite3.Connection) -> None:
+        """Per-call telephony provider, plus the operator settings store.
+
+        Additive and idempotent, guarded the same way v2 is, so repeated
+        startup and simultaneous workers converge.
+
+        `NOT NULL DEFAULT 'twilio'` *is* the backfill: SQLite applies the
+        default to every existing row as part of the ALTER, so legacy rows --
+        which are all Twilio by definition -- are correct atomically, with no
+        separate UPDATE pass that could be interrupted half-done.
+        """
+        existing = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+        if "provider" not in existing:
+            db.execute(f"ALTER TABLE calls ADD COLUMN provider TEXT NOT NULL DEFAULT '{DEFAULT_PROVIDER}'")
+        db.execute("""CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)""")
+        # Settings changes are audited, but call_events.call_id is NOT NULL
+        # and references calls(call_id): a settings change has no call to hang
+        # off. Relaxing that foreign key to make room would weaken a
+        # constraint that protects the call history, so the audit trail gets
+        # its own table instead.
+        db.execute("""CREATE TABLE IF NOT EXISTS settings_events(
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,key TEXT NOT NULL,
+            old_value TEXT,new_value TEXT NOT NULL,actor TEXT NOT NULL DEFAULT 'operator',
+            timestamp TEXT NOT NULL)""")
+        db.execute("CREATE INDEX IF NOT EXISTS calls_provider ON calls(provider)")
+        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','3')")
+
+    # ------------------------------------------------------------------
+    # Operator settings: the active telephony provider
+    # ------------------------------------------------------------------
+    def seed_setting(self, key: str, value: str) -> None:
+        """Insert a setting only if it does not already exist.
+
+        This is how CALL_AGENT_DEFAULT_PROVIDER gets in: as a *seed*, not as
+        an override. Once an operator has saved a choice, the database is
+        authoritative and the environment variable is ignored forever after.
+        ON CONFLICT DO NOTHING makes two workers racing at startup converge on
+        whichever wrote first rather than fighting.
+        """
+        with self.transaction(immediate=True) as db:
+            db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+                (key, value, utcnow()),
+            )
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        row = self._one("SELECT value FROM settings WHERE key=?", (key,))
+        return row["value"] if row else default
+
+    def active_provider_setting(self) -> str:
+        """The stored selection: a provider name, or 'auto'.
+
+        Read fresh (through a short TTL) rather than cached at construction:
+        multiple Uvicorn workers share this database and each runs its own
+        coordinator, so a value captured once at startup would let workers
+        disagree about the active provider indefinitely.
+        """
+        now = time.monotonic()
+        cached = self._provider_setting_cache
+        if cached is not None and now - cached[1] < PROVIDER_SETTING_TTL_SECONDS:
+            return cached[0]
+        value = self.get_setting(ACTIVE_PROVIDER_KEY, DEFAULT_PROVIDER)
+        if value not in SELECTABLE_PROVIDERS:
+            value = DEFAULT_PROVIDER
+        self._provider_setting_cache = (value, now)
+        return value
+
+    def set_active_provider(self, value: str, actor: str = "operator") -> str:
+        """Store the operator's selection and audit the change.
+
+        Validation of *whether that provider can dial* is the API layer's job
+        -- it owns the credential check and the 422. This enforces only that
+        the value is one the system understands.
+        """
+        if value not in SELECTABLE_PROVIDERS:
+            raise ValueError(f"provider must be one of {sorted(SELECTABLE_PROVIDERS)}")
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (ACTIVE_PROVIDER_KEY,)).fetchone()
+            old = row["value"] if row else None
+            db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (ACTIVE_PROVIDER_KEY, value, now),
+            )
+            # Old value, new value, timestamp. Never a credential -- the only
+            # thing recorded is which carrier was selected.
+            db.execute(
+                "INSERT INTO settings_events(key,old_value,new_value,actor,timestamp) VALUES(?,?,?,?,?)",
+                (ACTIVE_PROVIDER_KEY, old, value, actor[:60], now),
+            )
+        self._provider_setting_cache = None
+        return value
+
+    def list_settings_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._rows("SELECT * FROM settings_events ORDER BY event_id DESC LIMIT ?", (min(limit, 200),))
+
+    def resolve_provider(self, phone_number: str) -> str:
+        """Which carrier this number should be dialled on. Called once, at
+        enqueue, and nowhere else.
+
+        Twilio cannot originate to India with an Indian caller ID, so `auto`
+        sends +91 to Exotel and everything else to Twilio. An explicit
+        selection is authoritative and is never overridden by destination --
+        `auto` is a third value of the setting, not a layer on top of it.
+
+        Falls back rather than failing the enqueue when the preferred provider
+        is unconfigured: refusing to queue the call would turn a
+        misconfiguration into lost work, and the call still has to go
+        somewhere. The fallback is recorded on the call row like any other
+        resolution, so the operator sees which carrier was actually used.
+        """
+        selected = self.active_provider_setting()
+        if selected != "auto":
+            return selected if self._provider_is_configured(selected) else self._fallback_provider(selected)
+        preferred = "exotel" if str(phone_number).startswith("+91") else DEFAULT_PROVIDER
+        if self._provider_is_configured(preferred):
+            return preferred
+        return self._fallback_provider(preferred)
+
+    def _fallback_provider(self, unavailable: str) -> str:
+        for candidate in (DEFAULT_PROVIDER, *PROVIDER_NAMES):
+            if candidate != unavailable and self._provider_is_configured(candidate):
+                return candidate
+        # Nothing is configured. Return the default so the call is still
+        # queued and fails visibly at dial time with a real provider error,
+        # rather than being silently rejected at the door.
+        return DEFAULT_PROVIDER
+
+    @staticmethod
+    def _provider_is_configured(name: str) -> bool:
+        try:
+            configured, _missing = get_provider(name).is_configured()
+        except Exception:
+            return False
+        return configured
 
     @staticmethod
     def normalize_phone(value: Any) -> str:
@@ -250,8 +401,14 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("DELETE FROM suppression_list")
             return deleted
 
-    def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", notes: str = "", idempotency_key: str | None = None) -> dict[str, Any]:
+    def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", notes: str = "", idempotency_key: str | None = None, provider: str | None = None) -> dict[str, Any]:
         phone = self.normalize_phone(phone_number)
+        # Resolved exactly once, here, and written to the call row below.
+        # Every later stage -- dial, media, status callback, reconciliation,
+        # the operator resolve endpoint -- reads it from the row rather than
+        # re-reading the setting, so flipping the toggle mid-flight cannot
+        # make the coordinator query the wrong carrier about a live call.
+        provider = provider or self.resolve_provider(phone)
         now, call_id = utcnow(), str(uuid4())
         with self.transaction(immediate=True) as db:
             if idempotency_key:
@@ -269,10 +426,10 @@ class SQLiteCallStore(JsonCallStore):
             unresolved = db.execute("SELECT call_id FROM call_jobs j JOIN calls c USING(call_id) WHERE c.phone_number=? AND j.queue_state IN (?,?,?,?,?) LIMIT 1", (phone, *UNRESOLVED_JOB_STATES)).fetchone()
             if unresolved:
                 return self._call_from_db(db, unresolved[0])
-            db.execute("""INSERT INTO calls(call_id,lead_id,phone_number,business_name,category,notes,lifecycle_state,extraction_status,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'QUEUED','not_required',?,?)""", (call_id, lead_id, phone, self.clean_text(business_name, 200), self.clean_text(category, 100), self.clean_text(notes, 1000), now, now))
+            db.execute("""INSERT INTO calls(call_id,lead_id,phone_number,business_name,category,notes,lifecycle_state,extraction_status,provider,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,'QUEUED','not_required',?,?,?)""", (call_id, lead_id, phone, self.clean_text(business_name, 200), self.clean_text(category, 100), self.clean_text(notes, 1000), provider, now, now))
             db.execute("INSERT INTO call_jobs(job_id,call_id,queue_state,idempotency_key,created_at,updated_at) VALUES(?,?,'queued',?,?,?)", (call_id, call_id, idempotency_key, now, now))
-            self._event(db, call_id, "queued", now)
+            self._event(db, call_id, "queued", now, {"provider": provider})
             if lead_id:
                 db.execute("UPDATE leads SET status='queued',last_call_id=?,updated_at=? WHERE lead_id=?", (call_id, now, lead_id))
             return self._call_from_db(db, call_id)

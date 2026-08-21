@@ -12,8 +12,8 @@ from fastapi.responses import FileResponse, Response
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
-from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
-from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
+from app.storage.sqlite_store import ACTIVE_PROVIDER_KEY, ActiveDataError, SQLiteCallStore, SuppressedError
+from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DEFAULT_TELEPHONY_PROVIDER, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
 from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
@@ -27,6 +27,9 @@ answer_store = SQLiteCallStore(DATABASE_PATH, DATA_DIR)
 call_result_service = CallResultService(answer_extractor, answer_store, timeout=EXTRACTION_TIMEOUT_SECONDS, max_attempts=EXTRACTION_MAX_ATTEMPTS)
 call_manager = CallManager()
 configure_twilio(answer_store, call_result_service)
+# Seed only: does nothing once the row exists, so an operator's saved choice
+# always wins over the environment.
+answer_store.seed_setting(ACTIVE_PROVIDER_KEY, DEFAULT_TELEPHONY_PROVIDER)
 coordinator = DurableCallCoordinator(
     answer_store, MAX_CONCURRENT_CALLS, START_INTERVAL_SECONDS,
     ring_timeout=RING_TIMEOUT_SECONDS, max_call_seconds=MAX_CALL_SECONDS,
