@@ -133,6 +133,46 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 TWILIO_FRAME_MS = int(_env("TWILIO_FRAME_MS", "20"))
 
 # ============================================================
+# EXOTEL
+# ============================================================
+#
+# Exotel is a licensed Indian carrier, which is the whole reason it is here:
+# Twilio cannot originate calls to India with an Indian caller ID
+# (https://www.twilio.com/en-us/guidelines/in/voice), so a +91 ExoPhone is the
+# only way to show a local number to an Indian seller.
+
+EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID", "")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY", "")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN", "")
+EXOTEL_SUBDOMAIN = _env("EXOTEL_SUBDOMAIN", "api.in.exotel.com")
+
+# The ExoPhone, E.164. Note this is Exotel's `callerid`, NOT its `from`:
+# on /calls/connect, `from` is the number being *dialled*. Twilio's to/from do
+# not map across directly and getting it backwards dials your own ExoPhone.
+EXOTEL_CALLER_ID = os.getenv("EXOTEL_CALLER_ID", "")
+
+# Bytes of 16-bit PCM per outbound websocket message.
+#
+# Exotel requires a multiple of 320 (which is exactly one 20ms frame at 8 kHz
+# 16-bit, so our mu-law frame grid lines up with theirs). Its stated minimum
+# is "3.2k [100ms data]", which is self-inconsistent at 8 kHz -- 3200 bytes is
+# 200ms there, and the arithmetic only works at 16 kHz. Starting at 3200
+# satisfies both readings; undershooting risks jitter artefacts, and the
+# barge-in path is not hostage to this either way because Exotel supports
+# `clear`. Lower it only against measured eot_to_first_audio_ms and
+# tts_ttfb_ms from real calls -- see docs/exotel-adapter.md.
+EXOTEL_SEND_CHUNK_BYTES = int(_env("EXOTEL_SEND_CHUNK_BYTES", "3200"))
+
+# Optional comma-separated IP allowlist for Exotel status callbacks. Empty
+# disables the check, because Exotel publishes its ranges only on request.
+# The HMAC query token is the primary control; this is defence in depth.
+EXOTEL_CALLBACK_ALLOWED_IPS = tuple(
+    item.strip()
+    for item in _env("EXOTEL_CALLBACK_ALLOWED_IPS", "").split(",")
+    if item.strip()
+)
+
+# ============================================================
 # TELEPHONY PROVIDER SELECTION
 # ============================================================
 

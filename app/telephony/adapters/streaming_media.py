@@ -1,0 +1,684 @@
+from __future__ import annotations
+
+"""The media plane shared by every streaming telephony carrier.
+
+Everything here was `TwilioAdapter` and is moved verbatim: soft barge-in and
+its echo rejection, the paced sender's lifecycle, mark bookkeeping, the drain
+that plays a goodbye out before hanging up, and the idle watcher. The
+constants behind those decisions were derived by replaying real recorded call
+audio -- see `guide.md` §12b -- and nothing here re-tunes them.
+
+What a subclass supplies is only the wire: how a frame is framed, what the
+messages are called, and how to ask the carrier to end the call. Twilio and
+Exotel differ on all three (`streamSid` vs `stream_sid`, mu-law vs 16-bit PCM,
+REST hangup vs REST hangup at a different URL) and on nothing else that
+matters up here.
+
+Subclasses must implement:
+    send_audio, receive_audio, clear_playback, _send_mark,
+    _request_provider_hangup
+
+and must deliver 8 kHz mu-law in 20 ms / 160-byte frames from
+`receive_audio()` regardless of what their carrier actually puts on the wire.
+That is not incidental: `BARGE_IN_HANGOVER_FRAMES` is literally "10 x 20ms",
+and `VoicedDurationTracker` is built with `frame_ms=TWILIO_FRAME_MS`. Feeding
+it a different frame size silently rescales every barge-in constant.
+"""
+
+import asyncio
+import json
+import logging
+import time
+from collections import deque
+from contextlib import suppress
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+from app.core.settings import (
+    AGENT_PLAYBACK_DRAIN_SECONDS,
+    AGENT_PLAYBACK_HANDOFF_SECONDS,
+    AGENT_PLAYBACK_STALL_SECONDS,
+    AGENT_PLAYBACK_TAIL_MS,
+    BARGE_IN_CONFIRM_MS,
+    BARGE_IN_ECHO_MARGIN,
+    BARGE_IN_HANGOVER_FRAMES,
+    BARGE_IN_MAX_PAUSE_MS,
+    BARGE_IN_NOISE_MULTIPLIER,
+    BARGE_IN_VOICE_ENERGY_THRESHOLD,
+    IDLE_NUDGE_LIMIT,
+    IDLE_NUDGE_SECONDS,
+    PLAYBACK_LEAD_MS,
+    TWILIO_FRAME_MS,
+)
+from app.telephony.adapters.base import BaseTelephonyAdapter
+from app.telephony.audio import idle_watcher as idle
+from app.telephony.audio.audio_bridge import AudioBridge
+from app.telephony.audio.local_vad import AdaptiveNoiseFloor, VoicedDurationTracker, rms_energy
+from app.telephony.audio.media_dump import MediaDump
+from app.telephony.audio.paced_sender import PacedSender
+from app.telephony.call_session import CallSession
+from app.telephony.metrics import CallMetrics
+
+logger = logging.getLogger(__name__)
+
+# How far back to look for the agent level an inbound frame might be an echo
+# of. Acoustic echo on a speakerphone arrives delayed by the room and the
+# handset's own buffering, so comparing against only the frame being played
+# right now misses it.
+ECHO_WINDOW_FRAMES = 20  # 400ms
+
+
+class StreamingMediaAdapter(BaseTelephonyAdapter):
+    """Carrier-independent media handling for a bidirectional audio socket."""
+
+    # Send a mark roughly this often while agent audio is playing, so the
+    # carrier's echoed-back "mark" events give a ground-truth read on whether
+    # audio is genuinely still playing -- not just "how much did we hand to
+    # the socket".
+    MARK_EVERY_N_FRAMES = 5  # 5 * 20ms = ~100ms
+
+    def __init__(
+        self,
+        audio_bridge: AudioBridge | None = None,
+        metrics: CallMetrics | None = None,
+        media_dump: MediaDump | None = None,
+    ) -> None:
+        super().__init__()
+        # Instrumentation only. Both are optional and neither influences a
+        # playback, pacing, or barge-in decision anywhere in this class.
+        self.metrics = metrics
+        self.media_dump = media_dump
+        # Pre-rendered greeting bytes, played the instant the stream binds so
+        # the customer is not listening to silence while Deepgram connects.
+        self.pending_greeting: bytes | None = None
+
+        self.call_sid: str | None = None
+        self.stream_sid: str | None = None
+        self.websocket: WebSocket | None = None  # set once the carrier's stream connects
+
+        self.audio_bridge = audio_bridge
+        self.client_task: asyncio.Task | None = None
+        self.closing_requested = False
+        self.ring_timeout = 45
+
+        # -- Soft barge-in state -------------------------------------------
+        # A carrier's buffer-then-clear semantics (unlike a browser socket)
+        # are exactly why this lives here rather than in the shared
+        # AudioBridge. See AudioBridge.hard_interrupt and PacedSender.
+        self._paced_sender: PacedSender | None = None
+        # The threshold is derived from the line's measured noise floor
+        # rather than fixed. A single constant cannot be right across Indian
+        # PSTN lines: too low and noise confirms a barge-in with nobody
+        # speaking, too high and a softly-spoken customer is never heard.
+        self._noise_floor = AdaptiveNoiseFloor(
+            multiplier=BARGE_IN_NOISE_MULTIPLIER,
+            minimum=BARGE_IN_VOICE_ENERGY_THRESHOLD,
+        )
+        self._vad_tracker = VoicedDurationTracker(
+            energy_threshold=BARGE_IN_VOICE_ENERGY_THRESHOLD,
+            frame_ms=TWILIO_FRAME_MS,
+            hangover_frames=BARGE_IN_HANGOVER_FRAMES,
+            threshold_provider=lambda: self._noise_floor.threshold,
+        )
+        # Recent agent output levels, for rejecting the agent's own voice
+        # coming back through a speakerphone. One frame is not enough --
+        # acoustic echo arrives delayed, so this keeps a short window.
+        self._recent_agent_rms: deque[float] = deque(maxlen=ECHO_WINDOW_FRAMES)
+        self._pause_started_at: float | None = None
+        self._frames_since_pause = 0
+        self._last_caller_rms = 0.0
+        self._pending_marks: set[str] = set()
+        self._next_mark_id = 0
+        self._frames_since_mark = 0
+        # Raised by the outbound pump when the agent has finished; the receive
+        # loop acts on it, because that is where the socket -- and therefore
+        # mark acknowledgements -- is read.
+        self._close_after_playback = asyncio.Event()
+        self._completed_via_api = False
+        self._idle_watcher = idle.IdleWatcher(IDLE_NUDGE_SECONDS, IDLE_NUDGE_LIMIT)
+
+    def attach(self, session: CallSession) -> None:
+        super().attach(session)
+        if self.audio_bridge is None:
+            # hard_interrupt=False: a phone leg pauses and confirms via local
+            # VAD instead of hard-cutting on Deepgram's first
+            # UserStartedSpeaking.
+            self.audio_bridge = AudioBridge(session, hard_interrupt=False)
+        elif getattr(self.audio_bridge, "hard_interrupt", False):
+            # A caller-supplied bridge used to be able to leave the default
+            # (hard) mode in place, and one did: every real phone call ran
+            # in hard-cut mode, so the soft barge-in path below never
+            # executed and any customer sound during the closing line
+            # discarded the queued goodbye. This adapter is what implements
+            # the soft path, so it owns the invariant rather than trusting
+            # whoever constructed the bridge to remember.
+            logger.warning(
+                "forcing_soft_interrupt_for_telephony",
+                extra={"call_id": session.call_id},
+            )
+            self.audio_bridge.hard_interrupt = False
+
+    # ------------------------------------------------------------------
+    # Wire framing -- the only thing a carrier subclass has to supply
+    # ------------------------------------------------------------------
+    async def send_audio(self, mulaw_frame: bytes) -> bool:
+        raise NotImplementedError
+
+    async def receive_audio(self) -> bytes | None:
+        """Must yield 8 kHz mu-law in 160-byte / 20ms frames, or None at end
+        of stream, whatever the carrier actually sends."""
+        raise NotImplementedError
+
+    async def clear_playback(self) -> None:
+        """Drop audio the carrier has buffered but not yet played."""
+        raise NotImplementedError
+
+    async def _send_mark(self) -> None:
+        raise NotImplementedError
+
+    async def _request_provider_hangup(self) -> None:
+        """Ask the carrier to end the call. Called at most once."""
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    async def disconnect(self) -> None:
+        if self.websocket is not None:
+            await self.websocket.close()
+
+    async def hangup(self) -> None:
+        self.closing_requested = True
+        await self._drain_playback()
+        await self._complete_provider_call()
+        if self.websocket is not None:
+            try:
+                await self.websocket.close(code=1000, reason="agent_closing_call")
+            except RuntimeError:
+                pass
+
+    async def answer(self) -> None:
+        # Nothing to do on a phone leg: by the time start() runs the carrier
+        # has already connected the call and opened this WebSocket. This
+        # exists only to mirror BrowserAdapter's call pattern inside start().
+        return
+
+    async def _on_frame_sent(self) -> None:
+        self._frames_since_mark += 1
+        if self._frames_since_mark >= self.MARK_EVERY_N_FRAMES:
+            self._frames_since_mark = 0
+            await self._send_mark()
+
+    @property
+    def audio_currently_playing(self) -> bool:
+        """True if the carrier still has agent audio queued or (per unresolved
+        marks) actually playing -- confirmed via mark round-trips rather
+        than assumed from what we've handed to the socket."""
+        return bool(self._pending_marks) or (
+            self._paced_sender is not None and self._paced_sender.has_buffered_audio
+        )
+
+    # ------------------------------------------------------------------
+    # Call loop -- mirrors BrowserAdapter.start() exactly
+    # ------------------------------------------------------------------
+    async def start(self) -> None:
+        if self.session is None or self.audio_bridge is None:
+            raise RuntimeError(f"{type(self).__name__} must be attached to a CallSession before start().")
+        if self.websocket is None or self.stream_sid is None:
+            raise RuntimeError(f"{type(self).__name__}.start() called before the stream was bound.")
+
+        await self.answer()
+        # Start the outbound pump as soon as the stream is bound. The AI
+        # still starts only after inbound media arrives, but this task must be
+        # waiting before Deepgram can emit the greeting/audio; otherwise early
+        # audio can sit unsent while the receive loop is busy forwarding caller
+        # media.
+        self.client_task = asyncio.create_task(self._run_outbound_pump())
+        close_status = "completed"
+        try:
+            while not self.closing_requested:
+                audio = await self.receive_audio()
+                if audio:
+                    self._process_barge_in_signal(audio)
+                    if not self.audio_bridge.started:
+                        # Start Deepgram only after the carrier has delivered
+                        # actual media from an answered call. Starting earlier
+                        # can make Deepgram close with CLIENT_MESSAGE_TIMEOUT
+                        # before any caller audio arrives during high-volume
+                        # batches.
+                        await self.audio_bridge.start()
+                    accepted = await self.audio_bridge.receive_telephony_audio(audio)
+                    if not accepted or self._close_after_playback.is_set():
+                        # An agent that said goodbye and hung up is a
+                        # completed call. Only a provider that stopped
+                        # accepting audio without ever asking to close is a
+                        # disconnection -- and the two map to opposite
+                        # lifecycle states, AI_FINISHED against FAILED.
+                        agent_closed = self._close_after_playback.is_set()
+                        close_status = "completed" if agent_closed else "ai_disconnected"
+                        logger.info(
+                            "telephony_stream_closing",
+                            extra={"call_id": self.session.call_id, "close_status": close_status},
+                        )
+                        # Everything the agent generated may still be queued.
+                        # The close belongs here rather than in the outbound
+                        # pump because this loop owns the socket, and mark
+                        # acknowledgements -- the only proof the customer
+                        # actually heard the goodbye -- arrive on it.
+                        await self._close_after_goodbye()
+                        break
+                else:
+                    break  # carrier sent "stop" -- call ended on the caller's side
+        except WebSocketDisconnect:
+            close_status = "client_disconnected"
+            logger.info("Media stream disconnected for call %s", self.session.call_id)
+        except Exception as exc:
+            close_status = "error"
+            logger.exception("Media stream error for call %s: %s", self.session.call_id, exc)
+        finally:
+            if close_status in {"ai_disconnected", "error"}:
+                await self._complete_provider_call()
+            if self.client_task is not None:
+                self.client_task.cancel()
+            await self.audio_bridge.stop(close_status)
+
+    async def stop(self) -> None:
+        self.closing_requested = True
+        if self.audio_bridge is not None:
+            await self.audio_bridge.stop()
+
+    async def _run_outbound_pump(self) -> None:
+        assert self.audio_bridge is not None
+        self._paced_sender = PacedSender(
+            self.send_audio,
+            on_frame_sent=self._on_frame_sent,
+            lead_seconds=PLAYBACK_LEAD_MS / 1000.0,
+        )
+        if self.pending_greeting:
+            # Queued before the sender task even starts, so the first frame
+            # goes out on the next tick rather than after a websocket
+            # handshake, a settings round-trip, and speech synthesis.
+            self._paced_sender.feed(self.pending_greeting)
+        sender_task = asyncio.create_task(self._paced_sender.run())
+        try:
+            while True:
+                message_type, data = await self.audio_bridge.next_output()
+                if message_type == "audio" and isinstance(data, bytes):
+                    # Feed the paced sender rather than sending straight to
+                    # the carrier -- it re-slices this into fixed 20ms frames
+                    # and drains them at real-time rate.
+                    self._paced_sender.feed(data)
+                elif message_type == "pause":
+                    self._begin_soft_pause()
+                elif message_type == "interrupt":
+                    # Either AudioBridge is in hard_interrupt mode, or our
+                    # own local VAD just confirmed a genuine barge-in via
+                    # commit_interruption(). Either way: drop whatever
+                    # hasn't been sent yet and clear whatever the carrier has
+                    # already buffered.
+                    self._paced_sender.discard()
+                    self._end_soft_pause()
+                    await self.clear_playback()
+                elif message_type == "control" and isinstance(data, str):
+                    # The AI is finished. Nothing is torn down here on purpose:
+                    # this task owns the paced sender, and everything the agent
+                    # generated is still sitting in it. Closing from here meant
+                    # breaking out of this loop, which closed that sender and
+                    # discarded the goodbye -- and the receive loop then
+                    # cancelled this task mid-drain anyway. The receive loop
+                    # performs the close instead; this only tells it to.
+                    self._close_after_playback.set()
+                # "text" (live transcript, meant for a browser UI) has no
+                # destination on a phone call's audio-only WebSocket --
+                # intentionally dropped here. If you want transcripts out of
+                # a phone call, log them or push to your own event stream
+                # instead of trying to send them down this socket.
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self.closing_requested = True
+            logger.exception("Outbound audio pump failed for call %s: %s", self.session.call_id if self.session else "unknown", exc)
+        finally:
+            if self._paced_sender is not None:
+                self._paced_sender.close()
+            sender_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await sender_task
+
+    # ------------------------------------------------------------------
+    # Soft barge-in: pace, pause, decide (via local VAD on caller audio),
+    # then act. Deepgram's UserStartedSpeaking only ever *pauses* playback
+    # here; committing to a real interruption is decided purely from how
+    # long the caller has sustained voiced audio -- never from what
+    # Deepgram thinks was said, so Hindi/Hinglish STT variance never
+    # enters the decision.
+    # ------------------------------------------------------------------
+    def _begin_soft_pause(self) -> None:
+        if self._paced_sender is None:
+            return
+        self._paced_sender.pause()
+        self._vad_tracker.reset()
+        self._pause_started_at = time.monotonic()
+        self._frames_since_pause = 0
+        if self.metrics is not None:
+            self.metrics.barge_in_pause(self.audio_currently_playing)
+
+    def _end_soft_pause(self) -> None:
+        self._pause_started_at = None
+        self._frames_since_pause = 0
+        self._vad_tracker.reset()
+
+    def _is_probable_echo(self, caller_frame: bytes) -> bool:
+        """True if this inbound frame is most likely our own audio returning.
+
+        Only ever consulted while agent audio is playing, because that is the
+        only time echo can exist. The test is relative, not absolute: echo is
+        an attenuated copy of what we just sent, so a frame that fails to
+        exceed the recent agent level by a margin is treated as echo. A real
+        customer speaking into their handset is close to the microphone and
+        clears that margin comfortably; the agent leaking out of a
+        speakerphone and back in does not.
+
+        Deliberately conservative. Rejecting a real interruption is the worse
+        failure, so the margin is well under unity -- only clear echo is
+        filtered, and anything ambiguous still reaches the duration test.
+
+        The reference level is the window's *mean*, not its peak. Speech
+        swings widely between a stressed vowel and the gap after a word, so
+        the loudest frame in 400ms is far above what the window is actually
+        playing at -- and using it silently raised the bar on the customer
+        by that whole margin, for the whole window, every time the agent hit
+        a vowel. That is the defect this filter was observed failing on.
+        """
+        if not self.audio_currently_playing or not self._recent_agent_rms:
+            return False
+        agent_level = sum(self._recent_agent_rms) / len(self._recent_agent_rms)
+        if agent_level <= 0:
+            return False
+        return rms_energy(caller_frame) < agent_level * BARGE_IN_ECHO_MARGIN
+
+    def _record_barge_in(self, decision: str) -> None:
+        """Log why this pause ended, with the evidence that decided it.
+
+        Every one of these is either a customer whose interruption was
+        honoured or a customer who got talked over -- and from the outside
+        the two are indistinguishable without the RMS, the sustained voiced
+        duration, and whether agent audio was playing at the time.
+        """
+        if self.metrics is None or self._pause_started_at is None:
+            return
+        self.metrics.barge_in_decision(
+            decision,
+            threshold=self._noise_floor.threshold,
+            rms=self._last_caller_rms,
+            voiced_ms=self._vad_tracker.voiced_ms,
+            elapsed_ms=(time.monotonic() - self._pause_started_at) * 1000,
+            frames=self._frames_since_pause,
+            agent_playing=self.audio_currently_playing,
+        )
+
+    def _process_barge_in_signal(self, caller_frame: bytes) -> None:
+        """Called for every caller frame while a soft pause is active, to
+        decide whether to resume the agent (backchannel/noise) or commit to
+        a real interruption (sustained voice)."""
+        if self._pause_started_at is None or self._paced_sender is None:
+            return
+
+        self._frames_since_pause += 1
+        if self._is_probable_echo(caller_frame):
+            # The agent's own voice returning through a speakerphone. It is
+            # loud, sustained, and perfectly correlated with agent speech --
+            # everything the duration test looks for. Left unfiltered the
+            # agent interrupts itself, which is indistinguishable from a
+            # customer barging in, so it must never count as voice.
+            #
+            # It is still counted as *silence* rather than skipped. Returning
+            # here left `voiced_ms` frozen and `_frames_since_pause` growing
+            # against a resume check that was never reached, so a pause the
+            # customer never spoke in could only end on the 2.5s ambiguity
+            # timeout -- 2.5 seconds of dead air, which is the robotic
+            # failure the pause exists to avoid. Observed on a real call: the
+            # single barge-in decision in the batch was a timeout.
+            self._vad_tracker.observe_unvoiced(rms_energy(caller_frame))
+        else:
+            self._vad_tracker.observe(caller_frame)
+        self._last_caller_rms = self._vad_tracker.last_energy
+
+        if self._vad_tracker.voiced_ms >= BARGE_IN_CONFIRM_MS:
+            # Sustained voice long enough: this is a genuine interruption.
+            self._record_barge_in("commit")
+            self._end_soft_pause()
+            self.audio_bridge.commit_interruption()
+            return
+
+        # Give the tracker's own hangover window a real chance to run
+        # before treating voiced_ms == 0 as "this run of sound already
+        # ended" -- otherwise a single silent frame right after the pause
+        # began (before we've even had a chance to observe the caller
+        # speech that triggered it) would resume instantly.
+        if (
+            self._vad_tracker.voiced_ms == 0
+            and self._frames_since_pause >= self._vad_tracker.hangover_frames
+        ):
+            # Backchannel, cough, or noise: resume from exactly where the
+            # ticker paused. Nothing was lost.
+            self._record_barge_in("resume")
+            self._end_soft_pause()
+            self._paced_sender.resume()
+            return
+
+        elapsed_ms = (time.monotonic() - self._pause_started_at) * 1000
+        if elapsed_ms >= BARGE_IN_MAX_PAUSE_MS:
+            # Safety net: the signal has stayed ambiguous too long. Fail
+            # open rather than leave the line silently paused.
+            self._record_barge_in("timeout")
+            self._end_soft_pause()
+            self._paced_sender.resume()
+
+    @property
+    def buffered_playback_seconds(self) -> float:
+        """Real-time duration of agent audio still waiting to be sent."""
+        if self._paced_sender is None:
+            return 0.0
+        return self._paced_sender.buffered_seconds
+
+    async def _close_after_goodbye(self) -> None:
+        """Play out whatever the agent already generated, then hang up.
+
+        The ordering here is the entire fix. The carrier was previously told to
+        complete the call the instant the AI stopped accepting audio, which is
+        one 20ms frame after the provider finished *sending* the goodbye --
+        while the paced sender still held nearly all of it. Two calls in a row
+        ended mid-word, and one of them played nothing at all.
+        """
+        await self._await_close_signal()
+        await self._drain_playback(service_socket=True)
+        # A last short tail before the line drops. Playback is measured at our
+        # socket and by mark acknowledgements; the carrier still has its own
+        # small buffer downstream of both, and cutting at the exact instant the
+        # last mark returns clips the final consonant.
+        if AGENT_PLAYBACK_TAIL_MS:
+            await asyncio.sleep(AGENT_PLAYBACK_TAIL_MS / 1000.0)
+        self.closing_requested = True
+        await self._complete_provider_call()
+        if self.websocket is not None:
+            try:
+                await self.websocket.close(code=1000, reason="agent_closing_call")
+            except RuntimeError:
+                pass
+
+    async def _observe_idle(self, caller_voiced: bool, agent_playing: bool) -> None:
+        """Act on a line that has gone quiet.
+
+        Deliberately suspended once a close is under way: nudging somebody
+        during the goodbye, or while the drain is playing it out, would talk
+        over the last thing they hear.
+        """
+        if self.audio_bridge is None or self.closing_requested or self._close_after_playback.is_set():
+            return
+        decision = self._idle_watcher.observe(caller_voiced=caller_voiced, agent_playing=agent_playing)
+        if decision == idle.NOTHING:
+            return
+        if decision == idle.NUDGE:
+            logger.info(
+                "idle_nudge",
+                extra={"call_id": self.session.call_id if self.session else "unknown",
+                       "nudge": self._idle_watcher.nudges},
+            )
+            if self.metrics is not None:
+                self.metrics.idle_nudge(self._idle_watcher.nudges)
+            await self.audio_bridge.nudge_idle_customer()
+            return
+        # Nobody is there. Say so once and end the call rather than hold a
+        # concurrency slot and carrier minutes for a line with nobody on it.
+        logger.info(
+            "idle_giving_up",
+            extra={"call_id": self.session.call_id if self.session else "unknown",
+                   "nudges": self._idle_watcher.max_nudges},
+        )
+        if self.metrics is not None:
+            self.metrics.idle_gave_up()
+        await self.audio_bridge.close_for_silence()
+
+    async def _await_close_signal(self) -> None:
+        """Wait until the outbound pump holds everything the agent generated.
+
+        What starts this close is the AI refusing further audio, and the engine
+        sets that flag synchronously on Deepgram's listener thread -- before the
+        audio callbacks it queued ahead of it have been drained into the paced
+        sender. Measuring playback at that instant can therefore see an empty
+        sender and conclude, wrongly, that there is nothing left to play.
+
+        The close signal is queued behind that audio, so the pump reaching it
+        is exact proof the whole goodbye has been handed over. Bounded, because
+        a provider that died mid-turn never sends one.
+        """
+        if self._close_after_playback.is_set():
+            return
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                self._close_after_playback.wait(), timeout=AGENT_PLAYBACK_HANDOFF_SECONDS
+            )
+
+    async def _drain_tick(self, pending_read: asyncio.Task | None) -> tuple[asyncio.Task | None, bool]:
+        """Advance the drain by 50ms while servicing the media socket.
+
+        Marks are the only evidence the customer actually heard the audio, and
+        they arrive on this socket -- sleeping through the drain instead of
+        reading would leave every mark unresolved, so playback would never
+        report finished and the drain would always run to its stall bound.
+
+        The read is kept as a long-lived task rather than cancelled on each
+        tick, so a partially-received frame is never dropped. Returns the
+        still-pending read and whether the customer is gone.
+        """
+        if pending_read is None:
+            pending_read = asyncio.create_task(self.receive_audio())
+        done, _ = await asyncio.wait({pending_read}, timeout=0.05)
+        if pending_read not in done:
+            return pending_read, False
+        try:
+            # "stop" means the caller's side ended: there is nobody left to
+            # hear the rest, and waiting on marks that can never come back
+            # would hold the concurrency slot for nothing.
+            gone = pending_read.result() is None
+        except (WebSocketDisconnect, RuntimeError):
+            gone = True
+        return None, gone
+
+    async def _drain_playback(
+        self,
+        timeout: float = AGENT_PLAYBACK_DRAIN_SECONDS,
+        service_socket: bool = False,
+    ) -> None:
+        """Wait until the customer has actually heard everything queued.
+
+        `audio_currently_playing` is the honest signal: it is true while the
+        paced sender still holds frames *and* while the carrier has
+        unacknowledged marks, which are echoed back only once the audio
+        preceding them has played. Polling it is the only way to distinguish
+        "we finished generating" from "they finished hearing".
+
+        How long to wait comes from the audio itself. Pacing is real time, so
+        the queued bytes state exactly how many seconds are left, and the wait
+        is re-derived from them on every pass. A fixed timeout cannot work
+        here: it is either shorter than a long closing line -- which hangs up
+        mid-goodbye, the reported bug -- or long enough for one, in which case
+        every dead line holds a concurrency slot for that whole duration.
+
+        Two bounds keep it terminating. Playback that stops making progress is
+        a line that is no longer draining, so the wait ends a few seconds
+        after the last frame left; and `timeout` caps the whole thing for the
+        case where nothing ever moves at all.
+        """
+        hard_deadline = time.monotonic() + max(0.0, timeout)
+        remaining = self.buffered_playback_seconds
+        # Enough to play what is queued, plus the mark round-trip after it.
+        stall_deadline = time.monotonic() + remaining + AGENT_PLAYBACK_STALL_SECONDS
+        pending_read: asyncio.Task | None = None
+        try:
+            while self.audio_currently_playing:
+                now = time.monotonic()
+                if now >= hard_deadline:
+                    self._log_drain_gave_up("playback_drain_hit_cap", timeout)
+                    return
+                queued = self.buffered_playback_seconds
+                if queued < remaining - 0.01:
+                    remaining = queued
+                    stall_deadline = now + queued + AGENT_PLAYBACK_STALL_SECONDS
+                elif now >= stall_deadline:
+                    self._log_drain_gave_up("playback_drain_stalled", queued)
+                    return
+                if not service_socket:
+                    await asyncio.sleep(0.05)
+                    continue
+                pending_read, caller_gone = await self._drain_tick(pending_read)
+                if caller_gone:
+                    self._log_drain_gave_up("playback_drain_caller_left", queued)
+                    if self._paced_sender is not None:
+                        self._paced_sender.discard()
+                    self._pending_marks.clear()
+                    return
+        finally:
+            if pending_read is not None:
+                pending_read.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending_read
+
+    def _log_drain_gave_up(self, event: str, seconds: float) -> None:
+        """Every one of these is a customer who was cut off mid-sentence."""
+        logger.info(
+            event,
+            extra={
+                "call_id": self.session.call_id if self.session else "unknown",
+                "unplayed_seconds": round(self.buffered_playback_seconds, 2),
+                "seconds": round(seconds, 2),
+            },
+        )
+
+    async def _complete_provider_call(self) -> None:
+        """Ask the carrier to end the call. Safe to call more than once.
+
+        Both the close path and the teardown `finally` can reach this on the
+        same call, and a second REST hangup on an already-completed call just
+        raises -- noise in the log that reads like a real failure.
+        """
+        if not self.call_sid or self._completed_via_api:
+            return
+        self._completed_via_api = True
+        try:
+            await self._request_provider_hangup()
+        except Exception as exc:
+            logger.warning("Unable to complete call %s: %s", self.call_sid, exc)
+
+    # ------------------------------------------------------------------
+    # Shared JSON helper
+    # ------------------------------------------------------------------
+    async def _send_json(self, message: dict) -> bool:
+        if self.websocket is None:
+            return False
+        try:
+            await self.websocket.send_text(json.dumps(message))
+            return True
+        except (WebSocketDisconnect, RuntimeError):
+            return False

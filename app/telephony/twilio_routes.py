@@ -99,9 +99,20 @@ def _record_signature_failure(endpoint: str, call_id: str) -> None:
     )
 
 
-def signature_failure_health() -> dict[str, Any]:
-    """Surfaced on /api/operations and /health so a total outage is visible."""
+def callback_auth_failure_health() -> dict[str, Any]:
+    """Surfaced on /api/operations and /health so a total outage is visible.
+
+    Counts rejected callbacks from *any* carrier: a Twilio signature that did
+    not verify, or an Exotel callback whose HMAC token was wrong or expired.
+    The endpoint name in `by_endpoint` says which.
+    """
     return dict(_signature_failures, by_endpoint=dict(_signature_failures["by_endpoint"]))
+
+
+# Retained name. `/health` and `/api/operations` still publish the old
+# `twilio_signature_failures` key alongside the new one so existing dashboards
+# and alerts keep working; both are the same snapshot.
+signature_failure_health = callback_auth_failure_health
 
 def stream_token(call_id: str, sid: str, expiry: int) -> str:
     if not STREAM_SECRET: return ""

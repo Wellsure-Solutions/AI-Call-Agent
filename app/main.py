@@ -18,7 +18,8 @@ from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
-from app.telephony.twilio_routes import OutboundCallRequest, configure as configure_twilio, media_router, router as twilio_router, signature_failure_health, start_outbound_call
+from app.telephony.exotel_routes import configure as configure_exotel, router as exotel_router
+from app.telephony.twilio_routes import OutboundCallRequest, callback_auth_failure_health, configure as configure_twilio, media_router, router as twilio_router, start_outbound_call
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ answer_store = SQLiteCallStore(DATABASE_PATH, DATA_DIR)
 call_result_service = CallResultService(answer_extractor, answer_store, timeout=EXTRACTION_TIMEOUT_SECONDS, max_attempts=EXTRACTION_MAX_ATTEMPTS)
 call_manager = CallManager()
 configure_twilio(answer_store, call_result_service)
+configure_exotel(answer_store, call_result_service)
 # Seed only: does nothing once the row exists, so an operator's saved choice
 # always wins over the environment.
 answer_store.seed_setting(ACTIVE_PROVIDER_KEY, DEFAULT_TELEPHONY_PROVIDER)
@@ -122,6 +124,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Autonomous Calling Agent", lifespan=lifespan)
 app.include_router(twilio_router)
+app.include_router(exotel_router)
 app.include_router(media_router)
 
 BATCH_CONCURRENCY_LIMIT = MAX_CONCURRENT_CALLS
@@ -310,10 +313,13 @@ async def operations():
     return {
         "coordinator": coordinator.health(),
         "reconciliation": await asyncio.to_thread(answer_store.list_reconciliation, 100),
-        # Any nonzero total here means Twilio callbacks are being rejected --
-        # almost always a PUBLIC_BASE_URL that does not match the URL Twilio
-        # signed. Nothing else in the system reports that condition.
-        "twilio_signature_failures": signature_failure_health(),
+        # Any nonzero total here means provider callbacks are being
+        # rejected -- for Twilio almost always a PUBLIC_BASE_URL that does not
+        # match the URL it signed, for Exotel a wrong or expired callback
+        # token. Nothing else in the system reports that condition.
+        "callback_auth_failures": callback_auth_failure_health(),
+        # Retained key, same snapshot, so existing dashboards keep working.
+        "twilio_signature_failures": callback_auth_failure_health(),
         # What is currently occupying the queue. When calls sit in QUEUED and
         # nothing starts, this is the answer: something in capacity_occupied
         # is not finishing.
@@ -364,7 +370,8 @@ async def health_check():
         "status": "ok",
         "data_dir": str(DATA_DIR),
         "coordinator": coordinator.health(),
-        "twilio_signature_failures": signature_failure_health(),
+        "callback_auth_failures": callback_auth_failure_health(),
+        "twilio_signature_failures": callback_auth_failure_health(),
     }
 
 
