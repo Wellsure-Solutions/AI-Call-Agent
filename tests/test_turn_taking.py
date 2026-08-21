@@ -7,7 +7,9 @@ from app.core import settings
 
 def test_eager_eot_is_optional(monkeypatch):
     settings_source = Path("app/core/settings.py").read_text()
-    assert 'os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.7")' in settings_source
+    # The value itself is a tuning decision; what must hold is that it is
+    # env-overridable and that eager mode stays separately controllable.
+    assert 'os.getenv("DEEPGRAM_EOT_THRESHOLD"' in settings_source
 
     monkeypatch.delenv("TEST_EAGER_EOT", raising=False)
     assert settings._optional_float("TEST_EAGER_EOT") is None

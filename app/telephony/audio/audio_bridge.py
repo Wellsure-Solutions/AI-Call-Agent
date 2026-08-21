@@ -68,6 +68,12 @@ class AudioBridge:
     async def receive_telephony_audio(self, frame: bytes) -> bool:
         return await self.engine.receive_audio(frame)
 
+    async def nudge_idle_customer(self) -> bool:
+        return await self.engine.nudge_idle_customer()
+
+    async def close_for_silence(self) -> None:
+        await self.engine.close_for_silence()
+
     async def close_ai(self) -> None:
         await self.engine.stop()
         self._started = False

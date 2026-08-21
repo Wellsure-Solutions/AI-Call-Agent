@@ -24,14 +24,36 @@ class FakeClient:
         self.calls = FakeCalls()
 
 
-def place_call() -> dict:
+def place_call(monkeypatch=None, *, enabled: bool = True) -> dict:
+    """Place one outbound call and return the kwargs Twilio was given.
+
+    AMD is opt-in (AMD_ENABLED defaults off), so a test that wants the
+    detection kwargs has to ask for them -- otherwise it is asserting against
+    a feature nobody turned on.
+    """
+    import asyncio
+
+    from app.telephony.adapters import twilio_adapter as adapter_module
+
     client = FakeClient()
     adapter = TwilioAdapter(client=client)
     adapter.attach(CallSession(call_id="call-amd", phone_number="+919000000001", direction="twilio"))
-    import asyncio
 
-    asyncio.run(adapter.connect())
+    previous = adapter_module.AMD_ENABLED
+    adapter_module.AMD_ENABLED = enabled
+    try:
+        asyncio.run(adapter.connect())
+    finally:
+        adapter_module.AMD_ENABLED = previous
     return client.calls.created
+
+
+def test_detection_is_off_unless_it_is_turned_on():
+    """It costs latency on every human call, so it must not arrive by
+    accident -- and a test asserting its kwargs must enable it explicitly."""
+    created = place_call(enabled=False)
+    assert "machine_detection" not in created
+    assert "async_amd" not in created
 
 
 def test_detection_runs_asynchronously_so_humans_do_not_wait_for_it():

@@ -139,6 +139,9 @@ class CallMetrics:
         self._user_messages = 0
         self._end_call_refusals = 0
         self._fallback_closings = 0
+        self._closings_unavailable = 0
+        self._idle_nudges = 0
+        self._idle_gave_up = False
 
         # Barge-in accounting
         self._barge_in_commits = 0
@@ -343,6 +346,34 @@ class CallMetrics:
             self._fallback_closings += 1
         self._stamp("metrics_fallback_closing", {})
 
+    def idle_nudge(self, index: int) -> None:
+        """The line went quiet and the agent asked whether anyone is there."""
+        with self._lock:
+            self._idle_nudges += 1
+        self._stamp("metrics_idle_nudge", {"nudge": int(index)})
+
+    def idle_gave_up(self) -> None:
+        """Nobody answered any nudge, so the call was ended.
+
+        Every one of these is a call that would previously have run to the
+        maximum-call deadline holding a concurrency slot, so the count is
+        also the throughput this bought.
+        """
+        with self._lock:
+            self._idle_gave_up = True
+        self._stamp("metrics_idle_gave_up", {})
+
+    def fallback_closing_unavailable(self) -> None:
+        """We would have said goodbye, but nothing is rendered for this voice.
+
+        The customer got silence. The usual cause is a voice or wording change
+        that invalidated the cache and was never re-rendered -- invisible until
+        somebody listens to a recording, which is how it went unnoticed.
+        """
+        with self._lock:
+            self._closings_unavailable += 1
+        self._stamp("metrics_fallback_closing_unavailable", {})
+
     def provider_diagnostic(self, kind: str, code: str | None, description: str | None) -> None:
         """Record a Deepgram Warning/Error code so a silent call has a cause.
 
@@ -424,6 +455,9 @@ class CallMetrics:
                     "barge_in_timeouts": self._barge_in_timeouts,
                     "end_call_refusals": self._end_call_refusals,
                     "fallback_closings": self._fallback_closings,
+                    "closings_unavailable": self._closings_unavailable,
+                    "idle_nudges": self._idle_nudges,
+                    "idle_gave_up": int(self._idle_gave_up),
                 },
             )
             self._append_locked(

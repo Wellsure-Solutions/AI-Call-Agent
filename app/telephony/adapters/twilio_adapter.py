@@ -14,7 +14,10 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 from app.core.settings import (
     AGENT_PLAYBACK_DRAIN_SECONDS,
     AGENT_PLAYBACK_STALL_SECONDS,
+    AGENT_PLAYBACK_HANDOFF_SECONDS,
     AGENT_PLAYBACK_TAIL_MS,
+    IDLE_NUDGE_LIMIT,
+    IDLE_NUDGE_SECONDS,
     AMD_ENABLED,
     AMD_MODE,
     AMD_SILENCE_TIMEOUT_MS,
@@ -37,6 +40,7 @@ from app.core.settings import (
 from app.integrations.twilio_media import decode_media_payload, encode_media_payload
 from app.telephony.adapters.base import BaseTelephonyAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
+from app.telephony.audio import idle_watcher as idle
 from app.telephony.audio.local_vad import AdaptiveNoiseFloor, VoicedDurationTracker, rms_energy
 from app.telephony.audio.media_dump import MediaDump
 from app.telephony.audio.paced_sender import PacedSender
@@ -134,6 +138,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         # mark acknowledgements -- is read.
         self._close_after_playback = asyncio.Event()
         self._completed_via_api = False
+        self._idle_watcher = idle.IdleWatcher(IDLE_NUDGE_SECONDS, IDLE_NUDGE_LIMIT)
 
     def attach(self, session: CallSession) -> None:
         super().attach(session)
@@ -258,10 +263,16 @@ class TwilioAdapter(BaseTelephonyAdapter):
 
             if event == "media":
                 frame = decode_media_payload(msg["media"]["payload"])
+                playing = self.audio_currently_playing
+                energy = rms_energy(frame)
                 # The floor must be learned continuously, not only while a
                 # pause is active -- by the time a barge-in candidate opens,
                 # the threshold has to already be right.
-                self._noise_floor.observe(rms_energy(frame), self.audio_currently_playing)
+                self._noise_floor.observe(energy, playing)
+                # Reuses the energy already computed above rather than a
+                # second pass over the frame; this runs on every inbound
+                # frame for the whole call.
+                await self._observe_idle(energy >= self._noise_floor.threshold, playing)
                 if self.metrics is not None:
                     self.metrics.observe_inbound(frame)
                 if self.media_dump is not None:
@@ -597,6 +608,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         while the paced sender still held nearly all of it. Two calls in a row
         ended mid-word, and one of them played nothing at all.
         """
+        await self._await_close_signal()
         await self._drain_playback(service_socket=True)
         # A last short tail before the line drops. Playback is measured at our
         # socket and by mark acknowledgements; Twilio still has its own small
@@ -611,6 +623,59 @@ class TwilioAdapter(BaseTelephonyAdapter):
                 await self.websocket.close(code=1000, reason="agent_closing_call")
             except RuntimeError:
                 pass
+
+    async def _observe_idle(self, caller_voiced: bool, agent_playing: bool) -> None:
+        """Act on a line that has gone quiet.
+
+        Deliberately suspended once a close is under way: nudging somebody
+        during the goodbye, or while the drain is playing it out, would talk
+        over the last thing they hear.
+        """
+        if self.audio_bridge is None or self.closing_requested or self._close_after_playback.is_set():
+            return
+        decision = self._idle_watcher.observe(caller_voiced=caller_voiced, agent_playing=agent_playing)
+        if decision == idle.NOTHING:
+            return
+        if decision == idle.NUDGE:
+            logger.info(
+                "idle_nudge",
+                extra={"call_id": self.session.call_id if self.session else "unknown",
+                       "nudge": self._idle_watcher.nudges},
+            )
+            if self.metrics is not None:
+                self.metrics.idle_nudge(self._idle_watcher.nudges)
+            await self.audio_bridge.nudge_idle_customer()
+            return
+        # Nobody is there. Say so once and end the call rather than hold a
+        # concurrency slot and Twilio minutes for a line with nobody on it.
+        logger.info(
+            "idle_giving_up",
+            extra={"call_id": self.session.call_id if self.session else "unknown",
+                   "nudges": self._idle_watcher.max_nudges},
+        )
+        if self.metrics is not None:
+            self.metrics.idle_gave_up()
+        await self.audio_bridge.close_for_silence()
+
+    async def _await_close_signal(self) -> None:
+        """Wait until the outbound pump holds everything the agent generated.
+
+        What starts this close is the AI refusing further audio, and the engine
+        sets that flag synchronously on Deepgram's listener thread -- before the
+        audio callbacks it queued ahead of it have been drained into the paced
+        sender. Measuring playback at that instant can therefore see an empty
+        sender and conclude, wrongly, that there is nothing left to play.
+
+        The close signal is queued behind that audio, so the pump reaching it
+        is exact proof the whole goodbye has been handed over. Bounded, because
+        a provider that died mid-turn never sends one.
+        """
+        if self._close_after_playback.is_set():
+            return
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                self._close_after_playback.wait(), timeout=AGENT_PLAYBACK_HANDOFF_SECONDS
+            )
 
     async def _drain_tick(self, pending_read: asyncio.Task | None) -> tuple[asyncio.Task | None, bool]:
         """Advance the drain by 50ms while servicing the Twilio socket.

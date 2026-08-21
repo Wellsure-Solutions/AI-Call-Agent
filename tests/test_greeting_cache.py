@@ -6,7 +6,7 @@ import pytest
 
 from tests import fixtures
 from app.core import settings
-from app.integrations.deepgram.config import get_agent_settings
+from app.integrations.deepgram.config import get_agent_settings, resolve_greeting
 from app.telephony.audio.greeting_cache import (
     greeting_fingerprint,
     load_greeting,
@@ -73,7 +73,7 @@ def test_an_implausibly_long_file_is_rejected(tmp_path):
 def test_the_provider_greeting_is_suppressed_when_we_play_our_own():
     """Both would otherwise be spoken, and the customer would hear the
     agent introduce itself twice."""
-    assert agent(get_agent_settings(None, "twilio"))["greeting"] == settings.DEEPGRAM_GREETING
+    assert agent(get_agent_settings(None, "twilio"))["greeting"] == resolve_greeting(None)
     assert agent(get_agent_settings(None, "twilio", greeting_already_played=True))["greeting"] is None
 
 
@@ -82,8 +82,9 @@ def test_the_model_is_told_what_the_customer_already_heard():
     it has not spoken yet, so it opens by greeting again."""
     prompt = agent(get_agent_settings(None, "twilio", greeting_already_played=True))["think"]["prompt"]
     assert "ALREADY SPOKEN" in prompt
-    assert settings.DEEPGRAM_GREETING in prompt
+    assert resolve_greeting(None) in prompt
     assert "Do not greet again" in prompt
+    assert "{Business Name}" not in prompt, "a placeholder here would be spoken aloud"
 
 
 def test_the_note_is_absent_when_the_provider_speaks_the_greeting():

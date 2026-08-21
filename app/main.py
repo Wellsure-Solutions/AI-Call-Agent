@@ -37,8 +37,82 @@ coordinator = DurableCallCoordinator(
     abandoned_grace_seconds=ABANDONED_JOB_GRACE_SECONDS,
 )
 
+def warn_about_unrendered_audio() -> list[str]:
+    """Report pre-rendered phrases missing for the *current* voice settings.
+
+    The cache key covers the voice, the model and the text, so changing any of
+    them silently invalidates it. Nothing fails: the greeting falls back to
+    live synthesis and the fallback goodbye is simply not spoken. Both are
+    invisible from the outside -- a voice change once cost every call in a
+    batch its closing line, and it was only found by reading a transcript.
+    """
+    from app.integrations.deepgram.config import cached_closing_audio, cached_greeting_audio
+
+    missing = []
+    if cached_greeting_audio() is None:
+        missing.append("greeting (calls will wait on live synthesis, ~2s of dead air each)")
+    if cached_closing_audio() is None:
+        missing.append("closing (a call the model does not close will end in silence)")
+    for item in missing:
+        logger.warning(
+            "prerendered_audio_missing",
+            extra={"phrase": item, "remedy": "python scripts/prerender_greeting.py"},
+        )
+    return missing
+
+
+def check_startup_configuration() -> list[str]:
+    """Settings whose absence breaks calls without any error appearing.
+
+    Every one of these has already cost a call. STREAM_SECRET is the reason
+    this function exists: a settings rename left it reading empty,
+    `valid_stream_token` rejects every media stream when the secret is blank,
+    and each outbound call dropped two seconds after the customer answered --
+    with a clean 200 on every webhook and nothing in the log. Browser calls
+    carry no media token, so they kept working and hid it.
+
+    Reported rather than raised. A server that refuses to boot is worse than
+    one that boots and says loudly what will not work.
+    """
+    from app.core.settings import (
+        DEEPGRAM_API_KEY,
+        PUBLIC_BASE_URL,
+        STREAM_SECRET,
+        TWILIO_ACCOUNT_SID,
+        TWILIO_AUTH_TOKEN,
+        TWILIO_FROM_NUMBER,
+    )
+
+    problems = []
+    if not STREAM_SECRET:
+        problems.append(
+            "STREAM_SECRET is empty -- every Twilio media stream will be rejected "
+            "and every outbound call will drop seconds after being answered"
+        )
+    if not DEEPGRAM_API_KEY:
+        problems.append("DEEPGRAM_API_KEY is not set -- the agent cannot speak or listen")
+    if not TWILIO_AUTH_TOKEN:
+        problems.append("TWILIO_AUTH_TOKEN is not set -- webhook signatures cannot be verified")
+    for name, value in (
+        ("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID),
+        ("TWILIO_FROM_NUMBER", TWILIO_FROM_NUMBER),
+        ("PUBLIC_BASE_URL", PUBLIC_BASE_URL),
+    ):
+        if not value:
+            problems.append(f"{name} is not set -- outbound calls cannot be placed")
+
+    for problem in problems:
+        logger.error("startup_configuration_problem", extra={"problem": problem})
+    return problems
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    for problem in check_startup_configuration():
+        print(f"[startup] MISCONFIGURED: {problem}")
+    for item in warn_about_unrendered_audio():
+        print(f"[startup] NOT RENDERED for the current voice: {item}")
+        print("[startup]   fix: python scripts/prerender_greeting.py")
     task=asyncio.create_task(coordinator.run())
     yield
     coordinator.stop(); await task

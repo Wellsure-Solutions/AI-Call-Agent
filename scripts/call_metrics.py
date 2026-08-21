@@ -200,6 +200,17 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         # A refusal is the guard working; a rising count means the prompt has
         # stopped carrying the closing rule, which is otherwise only
         # observable by listening to calls.
+        # A call abandoned for silence would previously have run to the
+        # maximum-call deadline holding a concurrency slot, so the seconds
+        # saved are the throughput this bought.
+        abandoned = [c for c in calls if int(c.get("idle_gave_up", 0) or 0)]
+        report["idle"] = {
+            "nudges": sum(int(c.get("idle_nudges", 0) or 0) for c in calls),
+            "calls_nudged": sum(1 for c in calls if int(c.get("idle_nudges", 0) or 0)),
+            "abandoned_for_silence": len(abandoned),
+            "seconds_on_abandoned": round(sum(float(c.get("media_seconds", 0)) for c in abandoned), 1),
+        }
+
         refusals = sum(int(c.get("end_call_refusals", 0) or 0) for c in calls)
         report["closing"] = {
             "calls": len(calls),
@@ -210,6 +221,9 @@ def build_report(events: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             # answers is the guard working, this is the guard being the only
             # thing that spoke.
             "spoken_for_the_model": sum(int(c.get("fallback_closings", 0) or 0) for c in calls),
+            # Wanted to speak the goodbye and had nothing rendered for the
+            # current voice. The customer heard silence, and nothing failed.
+            "no_closing_rendered": sum(int(c.get("closings_unavailable", 0) or 0) for c in calls),
         }
 
     for kind in ("metrics_provider_warning", "metrics_provider_error"):
@@ -280,6 +294,11 @@ def print_report(report: dict[str, Any]) -> None:
             f"{timeouts} timed out) -- customers spoke over the agent and were not heard"
         )
     closing = report.get("closing") or {}
+    if closing.get("no_closing_rendered"):
+        attention.append(
+            f"{closing['no_closing_rendered']} call(s) ended in silence because no goodbye is "
+            "rendered for the current voice -- run scripts/prerender_greeting.py"
+        )
     if closing.get("spoken_for_the_model"):
         attention.append(
             f"{closing['spoken_for_the_model']} call(s) ended on the pre-rendered goodbye -- "
@@ -341,6 +360,16 @@ def print_report(report: dict[str, Any]) -> None:
         stats = report["barge_in"]["rms"]
         print(f"  caller RMS at decision: p50={_fmt(stats['p50'])} p90={_fmt(stats['p90'])} max={_fmt(stats['max'])}")
 
+    quiet = report.get("idle") or {}
+    if quiet.get("nudges") or quiet.get("abandoned_for_silence"):
+        print("\n=== Silent lines ===")
+        print(f"  nudged: {quiet['calls_nudged']} call(s), {quiet['nudges']} nudge(s) in total")
+        if quiet["abandoned_for_silence"]:
+            print(f"  ended for silence: {quiet['abandoned_for_silence']} call(s), "
+                  f"{quiet['seconds_on_abandoned']:.0f}s of media between them")
+            print("  each of these previously ran to the maximum-call deadline, holding a")
+            print("  concurrency slot for the whole time")
+
     closing = report.get("closing") or {}
     if closing.get("calls"):
         print("\n=== Closing the call ===")
@@ -352,6 +381,11 @@ def print_report(report: dict[str, Any]) -> None:
             print("  for a closing -- but the model still tried to drop the call.")
         else:
             print(f"  no hangup was attempted without a closing across {closing['calls']} call(s)")
+        unrendered = closing.get("no_closing_rendered") or 0
+        if unrendered:
+            print(f"  {unrendered} call(s) ended in SILENCE: the goodbye was due but nothing is")
+            print("  rendered for the current voice. Changing the voice, the model or the")
+            print("  wording changes the cache key. Fix: python scripts/prerender_greeting.py")
         spoken_for = closing.get("spoken_for_the_model") or 0
         if spoken_for:
             print(f"  {spoken_for} call(s) were closed by the pre-rendered goodbye because the")

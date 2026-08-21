@@ -1,79 +1,91 @@
 from __future__ import annotations
 
-import json
+"""How a call ends now that no end_call tool is registered.
+
+The tool was removed with the seller campaign. A call therefore ends exactly
+one way from the agent's side: it speaks a line that `is_terminal_assistant_text`
+recognises, and the engine closes on the AgentAudioDone that follows.
+
+That makes these patterns load-bearing in a way they were not before. A
+closing they miss does not end the call -- it runs on to the maximum-call
+deadline holding a concurrency slot. A closing they match too eagerly hangs
+up on a customer mid-conversation. Both directions are pinned here.
+"""
+
 import types
 
+from app.core.prompts import PROMPT
 from app.integrations.deepgram.config import get_agent_settings
 from app.services.call_control import (
-    END_CALL_FUNCTION,
-    END_CALL_FUNCTION_SCHEMA,
+    END_CALL_REASONS,
     is_closing_call_message,
     is_terminal_assistant_text,
     normalize_end_call_reason,
 )
-from app.core.prompts import PROMPT
 
 
 def think_block(settings) -> dict:
     return settings.dict()["agent"]["think"]
 
 
-def test_the_end_call_function_is_actually_registered_on_the_agent():
-    """The whole hangup path was previously dead because nothing registered a
-    function: the detector existed, the tool did not."""
-    functions = think_block(get_agent_settings({"business_name": "Test"}, "twilio"))["functions"]
-    assert [f["name"] for f in functions] == [END_CALL_FUNCTION]
+# ---------------------------------------------------------------------------
+# Every closing the script can produce must be recognised
+# ---------------------------------------------------------------------------
+def closings_in_prompt() -> list[str]:
+    """The quoted lines the prompt tells the model to end on."""
+    import re
+
+    lines = re.findall(r'"([^"\n]*(?:goodbye|Goodbye)[^"\n]*)"', PROMPT)
+    assert lines, "the prompt must contain at least one quoted closing"
+    return lines
 
 
-def test_the_end_call_function_is_client_side():
-    """No `endpoint` is what makes Deepgram hand the call back to us rather
-    than trying to reach an HTTP service that does not exist."""
-    assert "endpoint" not in END_CALL_FUNCTION_SCHEMA
+def test_every_closing_the_prompt_teaches_is_recognised():
+    """The one that motivated this: "Sure sir. Thank you for your time,
+    goodbye." was not matched, so that call could only end on the deadline."""
+    missed = [line for line in closings_in_prompt() if not is_terminal_assistant_text(line)]
+    assert not missed, f"these closings would never end a call: {missed}"
 
 
-def test_the_function_is_registered_for_browser_calls_too():
-    assert think_block(get_agent_settings(None, "browser"))["functions"]
+def test_the_silence_closing_is_recognised_too():
+    """Spoken by the idle path, and it has to close the call like any other."""
+    from app.core.settings import IDLE_CLOSING_MESSAGE
+
+    assert is_terminal_assistant_text(IDLE_CLOSING_MESSAGE)
 
 
-def test_the_prompt_tells_the_model_the_tool_exists_and_when_to_use_it():
-    """A registered tool the prompt never mentions is still a dead path."""
-    assert END_CALL_FUNCTION in PROMPT
-    for reason in ("not_interested", "do_not_call", "wrong_number", "voicemail"):
-        assert reason in PROMPT
+def test_mid_call_speech_does_not_hang_up_on_the_seller():
+    """A false positive drops the line mid-conversation, so the patterns stay
+    biased toward missing a closure rather than inventing one."""
+    for line in (
+        "Thank you sir, aap batayiye kya concern hai?",
+        "Samajh gayi sir, thank you. Aapko returns ka concern hai?",
+        "Hamari team aapko call karegi, thank you so much for listening",
+        "Sorry sir, ek baar repeat karenge?",
+        "Koi particular reason hai jiski wajah se aap Amazon par start nahi karna chahte?",
+        "",
+    ):
+        assert is_terminal_assistant_text(line) is False, line
 
 
-def test_the_prompt_forbids_speaking_the_tool_name_aloud():
-    """Everything the model emits is synthesised to audio, so a leaked tool
-    name is heard by the customer."""
-    # Normalised because the instruction wraps across lines in the prompt.
-    flattened = " ".join(PROMPT.lower().split())
-    assert 'never say the words "end call" or "end_call" out loud' in flattened
-
-
-def test_every_reason_the_prompt_names_exists_in_the_schema():
-    """A reason the prompt teaches but the schema rejects would make the model
-    produce an argument the enum refuses."""
-    enum = set(END_CALL_FUNCTION_SCHEMA["parameters"]["properties"]["reason"]["enum"])
-    for reason in ("completed", "not_interested", "do_not_call", "wrong_number", "callback_later", "voicemail"):
-        assert reason in enum
-        assert reason in PROMPT
-
-
-def test_a_function_call_message_is_recognised_as_terminal():
-    assert is_closing_call_message(types.SimpleNamespace(name=END_CALL_FUNCTION)) is True
-
-
+# ---------------------------------------------------------------------------
+# The provider close signal
+# ---------------------------------------------------------------------------
 def test_the_legacy_closing_marker_is_still_recognised():
-    assert is_closing_call_message(types.SimpleNamespace(type="ConversationText"), "assistant: _closing_call()") is True
+    assert is_closing_call_message(
+        types.SimpleNamespace(type="ConversationText"), "assistant: _closing_call()"
+    ) is True
 
 
-def test_ordinary_conversation_is_not_treated_as_terminal():
-    assert is_closing_call_message(types.SimpleNamespace(type="ConversationText", content="Namaste ji")) is False
+def test_ordinary_conversation_is_not_a_close_signal():
+    assert is_closing_call_message(
+        types.SimpleNamespace(type="ConversationText", content="Namaste ji")
+    ) is False
 
 
 def test_reason_parsing_never_raises_on_model_produced_arguments():
-    """The arguments are a JSON string the model wrote, so every one of these
-    is reachable. None of them may stop a hangup."""
+    """Still reachable: the reason is recorded on the session for the idle
+    close and for reconciliation, and none of these may raise."""
     assert normalize_end_call_reason('{"reason": "not_interested"}') == "not_interested"
     assert normalize_end_call_reason('{"reason": "NOT_INTERESTED"}') == "not_interested"
     assert normalize_end_call_reason('{"reason": "made up"}') == "other"
@@ -84,39 +96,29 @@ def test_reason_parsing_never_raises_on_model_produced_arguments():
     assert normalize_end_call_reason("") == "unspecified"
 
 
+def test_the_reason_vocabulary_is_still_bounded():
+    assert "not_interested" in END_CALL_REASONS
+    assert "do_not_call" in END_CALL_REASONS
+
+
 # ---------------------------------------------------------------------------
-# The Devanagari backstop. The prompt mandates Devanagari, so the previous
-# romanized-only list could never fire on a real call.
+# What the settings message carries
 # ---------------------------------------------------------------------------
-def test_devanagari_closings_are_detected():
-    assert is_terminal_assistant_text("ठीक है सर, आपका दिन शुभ हो!") is True
-    assert is_terminal_assistant_text("धन्यवाद जी, नमस्ते") is True
-    assert is_terminal_assistant_text("हमारी team आपको कॉल करेंगे") is True
+def test_no_function_is_registered_on_the_agent():
+    """Deliberate: the seller campaign closes on spoken text alone. Pinned so
+    that re-adding a tool is a decision somebody makes on purpose, with the
+    text-based close reconsidered at the same time.
+    """
+    assert "functions" not in think_block(get_agent_settings(None, "twilio"))
 
 
-def test_romanized_closings_still_work():
-    assert is_terminal_assistant_text("Aapka din shubh ho!") is True
-    assert is_terminal_assistant_text("The team will reach out soon.") is True
+def test_settings_still_serialize_for_both_transports():
+    import json
 
-
-def test_mid_call_devanagari_does_not_trigger_a_hangup():
-    """A false positive hangs up on a customer mid-sentence, so the backstop
-    must stay biased toward missing a closure rather than inventing one."""
-    for line in (
-        "क्या आप Amazon पे shopping करते हैं?",
-        "धन्यवाद, तो सर मैं आपको benefits बताती हूँ",
-        "जी हाँ, GST invoice मिलता है",
-        "Business account पर दस प्रतिशत cashback मिलता है",
-        "नमस्ते सर, मैं Shruti बोल रही हूँ",
-        "",
-    ):
-        assert is_terminal_assistant_text(line) is False, line
-
-
-def test_settings_still_serialize_with_the_function_attached():
-    """Deepgram rejects unknown fields, so the settings object has to survive
-    the SDK's own serialization with functions present."""
-    payload = json.dumps(get_agent_settings({"business_name": "Sharma Electronics"}, "twilio").dict(), default=str)
-    assert END_CALL_FUNCTION in payload
-    # The untrusted-lead-data framing must survive alongside it.
-    assert "UNTRUSTED LEAD DATA" in payload
+    for transport in ("twilio", "browser"):
+        payload = json.dumps(
+            get_agent_settings({"business_name": "Sharma Electronics"}, transport).dict(),
+            default=str,
+        )
+        assert "UNTRUSTED LEAD DATA" in payload
+        assert "Sharma Electronics" in payload
