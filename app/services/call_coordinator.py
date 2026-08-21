@@ -3,15 +3,72 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from twilio.base.exceptions import TwilioRestException
 from uuid import uuid4
 
 from app.services.answer_extractor import AnswerExtractor
 from app.storage.sqlite_store import PROVIDER_TERMINAL, SQLiteCallStore
-from app.telephony.adapters.twilio_adapter import TwilioAdapter
 from app.telephony.call_session import CallSession
+from app.telephony.callback_urls import media_stream_url, status_callback_url
+from app.telephony.providers import DEFAULT_PROVIDER, get_provider
+from app.telephony.providers.base import DialResult
 
 logger = logging.getLogger(__name__)
+
+
+class _LegacyAdapterProvider:
+    """Adapts the old duck-typed `adapter_factory` to `TelephonyProvider`.
+
+    The coordinator used to build a `TwilioAdapter` and call
+    `connect()`/`fetch_status()`/`update_status()` on it, and tests inject
+    fakes with exactly that shape. Those fakes are the cheapest way to drive
+    the queue without a carrier, so the entry point is kept rather than
+    rewritten -- this shim translates, and implements the same
+    rejected/ambiguous rule the coordinator used to apply inline.
+
+    Only used when a caller explicitly passes `adapter_factory`. Production
+    goes through the real providers, keyed on the call's persisted provider.
+    """
+
+    name = "legacy"
+    supports_amd = False
+
+    def __init__(self, factory, ring_timeout: int) -> None:
+        self._factory = factory
+        self._ring_timeout = ring_timeout
+        self.adapter = None
+
+    async def dial(self, *, call_id: str, to_number: str, ring_timeout: int,
+                   stream_url: str = "", status_callback_url: str = "") -> DialResult:
+        session = CallSession(call_id=call_id, phone_number=to_number, direction="twilio")
+        adapter = self._factory()
+        self.adapter = adapter
+        adapter.ring_timeout = ring_timeout
+        adapter.attach(session)
+        await adapter.connect()
+        return DialResult(getattr(adapter, "call_sid", None), None)
+
+    async def fetch_status(self, provider_sid: str) -> str:
+        return await self._factory().fetch_status(provider_sid)
+
+    async def request_terminal(self, provider_sid: str, requested: str) -> None:
+        await self._factory().update_status(provider_sid, requested)
+
+    def terminal_request_for(self, status: str) -> str:
+        from app.telephony.providers.twilio_provider import TWILIO_PRE_ANSWER
+        from app.telephony.providers.base import terminal_request_for
+
+        return terminal_request_for(status, TWILIO_PRE_ANSWER)
+
+    async def abandon(self, provider_sid: str) -> None:
+        """Hang up a call we placed but could not correlate."""
+        adapter = self.adapter
+        if adapter is not None and getattr(adapter, "call_sid", None):
+            await adapter.hangup()
+
+    def classify_dial_error(self, error: Exception) -> str:
+        from app.telephony.providers.twilio_provider import classify_twilio_error
+
+        return classify_twilio_error(error)
 
 
 class DurableCallCoordinator:
@@ -19,8 +76,9 @@ class DurableCallCoordinator:
 
     def __init__(self, store: SQLiteCallStore, maximum: int, start_interval: float, *, ring_timeout: int = 45,
                  max_call_seconds: int = 900, extraction_timeout: float = 30, extraction_retry_delay: float = 5,
-                 extractor: AnswerExtractor | None = None, adapter_factory=TwilioAdapter,
-                 reconciliation_max_attempts: int = 8, abandoned_grace_seconds: float = 300.0) -> None:
+                 extractor: AnswerExtractor | None = None, adapter_factory=None,
+                 reconciliation_max_attempts: int = 8, abandoned_grace_seconds: float = 300.0,
+                 provider_factory=get_provider) -> None:
         self.store = store
         self.maximum = maximum
         self.start_interval = start_interval
@@ -30,6 +88,7 @@ class DurableCallCoordinator:
         self.extraction_retry_delay = extraction_retry_delay
         self.extractor = extractor or AnswerExtractor()
         self.adapter_factory = adapter_factory
+        self.provider_factory = provider_factory
         self.reconciliation_max_attempts = reconciliation_max_attempts
         self.abandoned_grace_seconds = abandoned_grace_seconds
         self.quarantined = 0
@@ -85,47 +144,77 @@ class DurableCallCoordinator:
         elif not action and not extraction:
             await self._sleep(0.25)
 
+    def _provider_for(self, call: dict):
+        """Resolve the control plane for one call.
+
+        Keyed on the provider persisted on the *call row*, never on the
+        currently-selected setting. An operator flipping the toggle mid-flight
+        must not make this ask Exotel about a Twilio CallSid: that lookup
+        fails, burns every reconciliation attempt, and quarantines a healthy
+        call while it holds a capacity slot -- at the default concurrency of
+        one, a full queue stall.
+        """
+        if self.adapter_factory is not None:
+            return _LegacyAdapterProvider(self.adapter_factory, self.ring_timeout)
+        return self.provider_factory(call.get("provider") or DEFAULT_PROVIDER)
+
     async def _dial(self, call: dict) -> None:
-        adapter = None
+        provider = self._provider_for(call)
+        sid: str | None = None
         try:
-            session = CallSession(call_id=call["call_id"], phone_number=call["phone_number"], direction="twilio",
-                metadata={key: call.get(key) for key in ("lead_id", "business_name", "category", "notes")})
-            adapter = self.adapter_factory()
-            adapter.ring_timeout = self.ring_timeout
-            adapter.attach(session)
-            await adapter.connect()
-            sid = adapter.call_sid
+            result = await provider.dial(
+                call_id=call["call_id"],
+                to_number=call["phone_number"],
+                ring_timeout=self.ring_timeout,
+                stream_url=media_stream_url(getattr(provider, "name", DEFAULT_PROVIDER), call["call_id"]),
+                status_callback_url=status_callback_url(getattr(provider, "name", DEFAULT_PROVIDER), call["call_id"]),
+            )
+            sid = result.provider_sid
             if not sid or not await asyncio.to_thread(self.store.bind_call_sid, call["call_id"], sid, self.ring_timeout, self.max_call_seconds):
                 await asyncio.to_thread(self.store.mark_dial_ambiguous, call["call_id"], "sid_binding_conflict")
                 if sid:
-                    await adapter.hangup()
+                    await self._abandon(provider, sid, call)
                 return
         except Exception as error:
-            # Twilio transport/API exceptions can be ambiguous after submission. Never blind-redial.
+            # Transport/API exceptions can be ambiguous after submission, and
+            # only the provider knows which of its own failures are proven
+            # refusals. Never blind-redial.
             try:
-                if isinstance(error, TwilioRestException) and isinstance(error.status, int) and 400 <= error.status < 500:
+                if provider.classify_dial_error(error) == "rejected":
                     await asyncio.to_thread(self.store.mark_dial_rejected, call["call_id"], type(error).__name__)
                 else:
                     await asyncio.to_thread(self.store.mark_dial_ambiguous, call["call_id"], type(error).__name__)
-                if adapter is not None and adapter.call_sid:
-                    try:
-                        await adapter.hangup()
-                    except Exception:
-                        logger.exception("uncorrelated_provider_hangup_failed", extra={"call_id": call.get("call_id")})
+                if sid:
+                    await self._abandon(provider, sid, call)
             except Exception:
                 logger.exception("dial_failure_persistence_failed", extra={"call_id": call.get("call_id")})
 
+    @staticmethod
+    async def _abandon(provider, sid: str, call: dict) -> None:
+        """End a call we placed but could not correlate to a durable row."""
+        try:
+            abandon = getattr(provider, "abandon", None)
+            if abandon is not None:
+                await abandon(sid)
+            else:
+                await provider.request_terminal(sid, "completed")
+        except Exception:
+            logger.exception("uncorrelated_provider_hangup_failed", extra={"call_id": call.get("call_id")})
+
     async def _reconcile(self, call: dict) -> None:
         try:
-            adapter = self.adapter_factory()
-            status = await adapter.fetch_status(call["call_sid"])
+            provider = self._provider_for(call)
+            status = await provider.fetch_status(call["call_sid"])
             if status in PROVIDER_TERMINAL:
                 await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, status,
                                         None, self.reconciliation_max_attempts)
                 return
-            # Ringing/queued calls are canceled; connected calls are completed.
-            requested = "canceled" if status in {"queued", "ringing", "initiated"} else "completed"
-            await adapter.update_status(call["call_sid"], requested)
+            # Pre-answer calls are canceled; connected calls are completed.
+            # Which status words mean "not answered yet" is carrier-specific
+            # (Twilio says `ringing`, Exotel has no such status), so the
+            # provider owns the mapping.
+            requested = provider.terminal_request_for(status)
+            await provider.request_terminal(call["call_sid"], requested)
             # Capacity remains occupied pending terminal webhook or a later terminal lookup.
             await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None,
                                     "Provider termination requested", self.reconciliation_max_attempts)

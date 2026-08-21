@@ -32,6 +32,7 @@ from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
+from app.telephony.providers.twilio_provider import TwilioProvider
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.integrations.deepgram.config import cached_greeting_audio
 from app.telephony.audio.media_dump import MediaDump
@@ -127,7 +128,7 @@ async def twiml_webhook(call_id: str, request: Request):
     if not call or not sid or not await asyncio.to_thread(_repo().bind_call_sid, call_id, sid, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS): raise HTTPException(409, "Call correlation failed")
     expiry = int(time.time()) + 300
     ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
-    xml = TwilioAdapter.build_twiml(f"{ws_base}/media-stream", {"call_id":call_id,"expiry":str(expiry),"token":stream_token(call_id,sid,expiry)})
+    xml = TwilioProvider.build_twiml(f"{ws_base}/media-stream", {"call_id":call_id,"expiry":str(expiry),"token":stream_token(call_id,sid,expiry)})
     return PlainTextResponse(xml, media_type="application/xml")
 
 @router.post("/status/{call_id}")
@@ -168,7 +169,7 @@ async def amd_webhook(call_id: str, request: Request):
         return Response(status_code=200)
     if answered_by in AMD_TERMINAL_VERDICTS and sid:
         try:
-            await TwilioAdapter().update_status(sid, "completed")
+            await TwilioProvider().request_terminal(sid, "completed")
         except Exception:
             # The deadline reconciler still owns this call and will retry;
             # failing the webhook would only make Twilio redeliver it.

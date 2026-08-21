@@ -9,7 +9,6 @@ from contextlib import suppress
 
 from fastapi import WebSocket, WebSocketDisconnect
 from twilio.rest import Client
-from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.core.settings import (
     AGENT_PLAYBACK_DRAIN_SECONDS,
@@ -46,6 +45,7 @@ from app.telephony.audio.media_dump import MediaDump
 from app.telephony.audio.paced_sender import PacedSender
 from app.telephony.call_session import CallSession
 from app.telephony.metrics import CallMetrics
+from app.telephony.providers.twilio_provider import build_call_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -164,35 +164,31 @@ class TwilioAdapter(BaseTelephonyAdapter):
     # Outbound call placement (REST) -- audio isn't live yet after this
     # ------------------------------------------------------------------
     async def connect(self) -> None:
+        """Place the outbound call.
+
+        The REST body itself is built by `TwilioProvider` -- the coordinator
+        dials through the provider, and this stays as the adapter-shaped entry
+        point so a caller holding an adapter can still place a call. Both go
+        through the same builder so they cannot drift.
+
+        `AMD_ENABLED` is read here, from this module, and passed down
+        explicitly rather than re-read inside the provider: this is the flag
+        this module's callers see and override.
+        """
         if self.session is None:
             raise RuntimeError("TwilioAdapter.connect() called before attach(session)")
         to_number = self.session.phone_number
         if not to_number:
             raise ValueError("TwilioAdapter.connect() requires session.phone_number to be set")
 
-        create_kwargs: dict[str, object] = dict(
-            to=to_number,
-            from_=self.from_number,
-            url=f"{self.public_base_url}/twilio/twiml/{self.session.call_id}",
-            status_callback=f"{self.public_base_url}/twilio/status/{self.session.call_id}",
-            status_callback_event=["initiated", "ringing", "answered", "completed"],
-            timeout=self.ring_timeout,
-            trim="trim-silence",
+        create_kwargs = build_call_kwargs(
+            call_id=self.session.call_id,
+            to_number=to_number,
+            from_number=self.from_number,
+            public_base_url=self.public_base_url,
+            ring_timeout=self.ring_timeout,
+            amd_enabled=AMD_ENABLED,
         )
-        if AMD_ENABLED:
-            # async_amd=True is load-bearing, not a tuning choice: without it
-            # Twilio holds the call before running our TwiML until detection
-            # completes, so every human answer would pay the detection delay.
-            create_kwargs.update(
-                machine_detection=AMD_MODE,
-                async_amd="true",
-                async_amd_status_callback=f"{self.public_base_url}/twilio/amd/{self.session.call_id}",
-                async_amd_status_callback_method="POST",
-                machine_detection_timeout=AMD_TIMEOUT_SECONDS,
-                machine_detection_speech_threshold=AMD_SPEECH_THRESHOLD_MS,
-                machine_detection_speech_end_threshold=AMD_SPEECH_END_THRESHOLD_MS,
-                machine_detection_silence_timeout=AMD_SILENCE_TIMEOUT_MS,
-            )
         call = await asyncio.to_thread(self._client.calls.create, **create_kwargs)
         self.call_sid = call.sid
         self.session.metadata["call_sid"] = self.call_sid
@@ -788,22 +784,7 @@ class TwilioAdapter(BaseTelephonyAdapter):
         except Exception as exc:
             logger.warning("Unable to complete Twilio call %s: %s", self.call_sid, exc)
 
-    async def fetch_status(self, call_sid: str) -> str:
-        call = await asyncio.to_thread(self._client.calls(call_sid).fetch)
-        return str(call.status).lower()
-
-    async def update_status(self, call_sid: str, status: str) -> None:
-        await asyncio.to_thread(self._client.calls(call_sid).update, status=status)
-
-    # ------------------------------------------------------------------
-    # TwiML builder -- used by the /twilio/twiml webhook route
-    # ------------------------------------------------------------------
-    @staticmethod
-    def build_twiml(stream_ws_url: str, parameters: dict[str, str] | None = None) -> str:
-        response = VoiceResponse()
-        connect = Connect()
-        stream = connect.stream(url=stream_ws_url)
-        for name, value in (parameters or {}).items():
-            stream.parameter(name=name, value=value)
-        response.append(connect)
-        return str(response)
+    # `fetch_status`, `update_status`, and `build_twiml` moved to
+    # `app/telephony/providers/twilio_provider.py`. They were the control
+    # plane: the coordinator and the TwiML route wanted them, and neither
+    # wants ~600 lines of barge-in tuning dragged along to get at them.
