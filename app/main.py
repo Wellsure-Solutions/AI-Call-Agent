@@ -61,8 +61,55 @@ def warn_about_unrendered_audio() -> list[str]:
     return missing
 
 
+def check_startup_configuration() -> list[str]:
+    """Settings whose absence breaks calls without any error appearing.
+
+    Every one of these has already cost a call. STREAM_SECRET is the reason
+    this function exists: a settings rename left it reading empty,
+    `valid_stream_token` rejects every media stream when the secret is blank,
+    and each outbound call dropped two seconds after the customer answered --
+    with a clean 200 on every webhook and nothing in the log. Browser calls
+    carry no media token, so they kept working and hid it.
+
+    Reported rather than raised. A server that refuses to boot is worse than
+    one that boots and says loudly what will not work.
+    """
+    from app.core.settings import (
+        DEEPGRAM_API_KEY,
+        PUBLIC_BASE_URL,
+        STREAM_SECRET,
+        TWILIO_ACCOUNT_SID,
+        TWILIO_AUTH_TOKEN,
+        TWILIO_FROM_NUMBER,
+    )
+
+    problems = []
+    if not STREAM_SECRET:
+        problems.append(
+            "STREAM_SECRET is empty -- every Twilio media stream will be rejected "
+            "and every outbound call will drop seconds after being answered"
+        )
+    if not DEEPGRAM_API_KEY:
+        problems.append("DEEPGRAM_API_KEY is not set -- the agent cannot speak or listen")
+    if not TWILIO_AUTH_TOKEN:
+        problems.append("TWILIO_AUTH_TOKEN is not set -- webhook signatures cannot be verified")
+    for name, value in (
+        ("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID),
+        ("TWILIO_FROM_NUMBER", TWILIO_FROM_NUMBER),
+        ("PUBLIC_BASE_URL", PUBLIC_BASE_URL),
+    ):
+        if not value:
+            problems.append(f"{name} is not set -- outbound calls cannot be placed")
+
+    for problem in problems:
+        logger.error("startup_configuration_problem", extra={"problem": problem})
+    return problems
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    for problem in check_startup_configuration():
+        print(f"[startup] MISCONFIGURED: {problem}")
     for item in warn_about_unrendered_audio():
         print(f"[startup] NOT RENDERED for the current voice: {item}")
         print("[startup]   fix: python scripts/prerender_greeting.py")

@@ -2,6 +2,38 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+load_dotenv()
+
+
+def _env(name: str, default=None):
+    """Read a setting, still accepting its historical CALL_AGENT_ name.
+
+    This module was reorganised and dropped the CALL_AGENT_ prefix from most
+    variables. Nothing failed loudly when it did: a deployment whose .env
+    still used the old names simply got the defaults, silently.
+
+    That cost a production outage. CALL_AGENT_STREAM_SECRET stopped being
+    read, STREAM_SECRET fell back to "", and `valid_stream_token` returns
+    False whenever the secret is empty -- so every media stream was rejected
+    and every outbound call dropped about two seconds after the customer
+    picked up. Browser calls kept working, because they carry no media token.
+
+    Reading both names costs nothing and means an old .env, a new one, or a
+    mixture all behave the same. A blank value counts as unset: an empty
+    secret or an empty number is never what anybody meant.
+    """
+    for candidate in (name, f"CALL_AGENT_{name}", *_EXTRA_ALIASES.get(name, ())):
+        value = os.getenv(candidate)
+        if value is not None and value.strip() != "":
+            return value
+    return default
+
+
+# Renames that were not a straight prefix drop, so the rule above misses them.
+_EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
+    "BARGE_IN_VOICE_ENERGY_THRESHOLD": ("CALL_AGENT_BARGE_IN_ENERGY_THRESHOLD",),
+}
+
 
 def _optional_float(name: str) -> float | None:
     value = os.getenv(name)
@@ -11,13 +43,10 @@ def _optional_float(name: str) -> float | None:
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
+    raw = _env(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-load_dotenv()
 
 # ============================================================
 # PATHS / STORAGE
@@ -36,7 +65,7 @@ DATABASE_PATH = Path(
     os.getenv("CALL_AGENT_DATABASE_PATH", DATA_DIR / "calls.sqlite3")
 )
 GREETING_CACHE_DIR = Path(
-    os.getenv("GREETING_CACHE_DIR", DATA_DIR / "greeting_cache")
+    _env("GREETING_CACHE_DIR", DATA_DIR / "greeting_cache")
 )
 
 # ============================================================
@@ -61,27 +90,27 @@ ADMIN_PASSWORD = (
 # CALL COORDINATOR
 # ============================================================
 
-MAX_CONCURRENT_CALLS = int(os.getenv("MAX_CONCURRENT_CALLS", "5"))
-START_INTERVAL_SECONDS = float(os.getenv("START_INTERVAL_SECONDS", "2"))
+MAX_CONCURRENT_CALLS = int(_env("MAX_CONCURRENT_CALLS", "5"))
+START_INTERVAL_SECONDS = float(_env("START_INTERVAL_SECONDS", "2"))
 
-RING_TIMEOUT_SECONDS = int(os.getenv("RING_TIMEOUT_SECONDS", "45"))
-MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "900"))
+RING_TIMEOUT_SECONDS = int(_env("RING_TIMEOUT_SECONDS", "45"))
+MAX_CALL_SECONDS = int(_env("MAX_CALL_SECONDS", "900"))
 
 EXTRACTION_TIMEOUT_SECONDS = float(
-    os.getenv("EXTRACTION_TIMEOUT_SECONDS", "30")
+    _env("EXTRACTION_TIMEOUT_SECONDS", "30")
 )
 EXTRACTION_MAX_ATTEMPTS = int(
-    os.getenv("EXTRACTION_MAX_ATTEMPTS", "3")
+    _env("EXTRACTION_MAX_ATTEMPTS", "3")
 )
 EXTRACTION_RETRY_DELAY_SECONDS = float(
-    os.getenv("EXTRACTION_RETRY_DELAY_SECONDS", "2")
+    _env("EXTRACTION_RETRY_DELAY_SECONDS", "2")
 )
 
 RECONCILIATION_MAX_ATTEMPTS = int(
-    os.getenv("RECONCILIATION_MAX_ATTEMPTS", "5")
+    _env("RECONCILIATION_MAX_ATTEMPTS", "5")
 )
 ABANDONED_JOB_GRACE_SECONDS = int(
-    os.getenv("ABANDONED_JOB_GRACE_SECONDS", "120")
+    _env("ABANDONED_JOB_GRACE_SECONDS", "120")
 )
 
 # ============================================================
@@ -101,26 +130,26 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 # Twilio Media Streams use 20 ms frames.
-TWILIO_FRAME_MS = int(os.getenv("TWILIO_FRAME_MS", "20"))
+TWILIO_FRAME_MS = int(_env("TWILIO_FRAME_MS", "20"))
 
 # ============================================================
 # ANSWERING MACHINE DETECTION
 # ============================================================
 
 AMD_ENABLED = _env_bool("AMD_ENABLED", False)
-AMD_MODE = os.getenv("AMD_MODE", "Enable")
+AMD_MODE = _env("AMD_MODE", "Enable")
 
 AMD_TIMEOUT_SECONDS = int(
-    os.getenv("AMD_TIMEOUT_SECONDS", "30")
+    _env("AMD_TIMEOUT_SECONDS", "30")
 )
 AMD_SPEECH_THRESHOLD_MS = int(
-    os.getenv("AMD_SPEECH_THRESHOLD_MS", "2400")
+    _env("AMD_SPEECH_THRESHOLD_MS", "2400")
 )
 AMD_SPEECH_END_THRESHOLD_MS = int(
-    os.getenv("AMD_SPEECH_END_THRESHOLD_MS", "1200")
+    _env("AMD_SPEECH_END_THRESHOLD_MS", "1200")
 )
 AMD_SILENCE_TIMEOUT_MS = int(
-    os.getenv("AMD_SILENCE_TIMEOUT_MS", "5000")
+    _env("AMD_SILENCE_TIMEOUT_MS", "5000")
 )
 
 # ============================================================
@@ -129,22 +158,22 @@ AMD_SILENCE_TIMEOUT_MS = int(
 
 # Maximum time allowed for queued goodbye audio to drain.
 AGENT_PLAYBACK_DRAIN_SECONDS = float(
-    os.getenv("AGENT_PLAYBACK_DRAIN_SECONDS", "15")
+    _env("AGENT_PLAYBACK_DRAIN_SECONDS", "15")
 )
 
 # Extra allowance after queued audio progress stops / mark round-trip.
 AGENT_PLAYBACK_STALL_SECONDS = float(
-    os.getenv("AGENT_PLAYBACK_STALL_SECONDS", "2.5")
+    _env("AGENT_PLAYBACK_STALL_SECONDS", "2.5")
 )
 
 # Small tail so Twilio does not clip the final consonant.
 AGENT_PLAYBACK_TAIL_MS = int(
-    os.getenv("AGENT_PLAYBACK_TAIL_MS", "250")
+    _env("AGENT_PLAYBACK_TAIL_MS", "250")
 )
 
 # Small real-time lead for paced outbound audio.
 PLAYBACK_LEAD_MS = int(
-    os.getenv("PLAYBACK_LEAD_MS", "60")
+    _env("PLAYBACK_LEAD_MS", "60")
 )
 
 # How long the close may wait for the outbound pump to take everything the
@@ -155,7 +184,7 @@ PLAYBACK_LEAD_MS = int(
 # there is nothing left to play. It is a handoff between two tasks on the
 # same event loop, not a network wait.
 AGENT_PLAYBACK_HANDOFF_SECONDS = float(
-    os.getenv("AGENT_PLAYBACK_HANDOFF_SECONDS", "2")
+    _env("AGENT_PLAYBACK_HANDOFF_SECONDS", "2")
 )
 
 # ============================================================
@@ -170,25 +199,25 @@ AGENT_PLAYBACK_HANDOFF_SECONDS = float(
 # and the agent stops mid-sentence, which is the behaviour this campaign
 # specifically does not want.
 BARGE_IN_CONFIRM_MS = int(
-    os.getenv("BARGE_IN_CONFIRM_MS", "600")
+    _env("BARGE_IN_CONFIRM_MS", "600")
 )
 
 # Maximum temporary pause while deciding whether sound is real speech/noise.
 BARGE_IN_MAX_PAUSE_MS = int(
-    os.getenv("BARGE_IN_MAX_PAUSE_MS", "900")
+    _env("BARGE_IN_MAX_PAUSE_MS", "900")
 )
 
 # Adaptive noise threshold controls.
 BARGE_IN_NOISE_MULTIPLIER = float(
-    os.getenv("BARGE_IN_NOISE_MULTIPLIER", "2.2")
+    _env("BARGE_IN_NOISE_MULTIPLIER", "2.2")
 )
 BARGE_IN_VOICE_ENERGY_THRESHOLD = float(
-    os.getenv("BARGE_IN_VOICE_ENERGY_THRESHOLD", "180")
+    _env("BARGE_IN_VOICE_ENERGY_THRESHOLD", "180")
 )
 
 # A caller frame below recent agent RMS * this margin is treated as probable echo.
 BARGE_IN_ECHO_MARGIN = float(
-    os.getenv("BARGE_IN_ECHO_MARGIN", "0.65")
+    _env("BARGE_IN_ECHO_MARGIN", "0.65")
 )
 
 # Consecutive silent frames before a voiced run is considered over.
@@ -201,7 +230,7 @@ BARGE_IN_ECHO_MARGIN = float(
 # talk over the agent indefinitely without being heard. At 10 frames (200ms)
 # the same audio yields one run per real utterance.
 BARGE_IN_HANGOVER_FRAMES = int(
-    os.getenv("BARGE_IN_HANGOVER_FRAMES", "10")
+    _env("BARGE_IN_HANGOVER_FRAMES", "10")
 )
 
 
@@ -213,13 +242,13 @@ BARGE_IN_HANGOVER_FRAMES = int(
 # Small grace after the agent has explicitly spoken a terminal closing.
 # This gives final TTS/audio events time to settle before shutdown.
 AGENT_CLOSE_GRACE_SECONDS = float(
-    os.getenv("AGENT_CLOSE_GRACE_SECONDS", "1.5")
+    _env("AGENT_CLOSE_GRACE_SECONDS", "1.5")
 )
 
 # When the model requests closing before a spoken final line is observed,
 # allow extra time for the fallback closing path to produce/play speech.
 AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS = float(
-    os.getenv("AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS", "3.0")
+    _env("AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS", "3.0")
 )
 
 
@@ -232,24 +261,22 @@ AGENT_CLOSE_UNSPOKEN_GRACE_SECONDS = float(
 # Neither the clock nor the count runs while the agent is speaking or while
 # the seller is talking, so these are seconds of real silence.
 IDLE_NUDGE_SECONDS = float(
-    os.getenv("IDLE_NUDGE_SECONDS", "10")
+    _env("IDLE_NUDGE_SECONDS", "10")
 )
 IDLE_NUDGE_LIMIT = int(
-    os.getenv("IDLE_NUDGE_LIMIT", "3")
+    _env("IDLE_NUDGE_LIMIT", "3")
 )
 
 # Spoken by the agent itself, in its own voice and in context, rather than
 # played from a file -- an injected line the model knows it said keeps the
 # conversation coherent if the seller does come back.
-IDLE_NUDGE_MESSAGE = os.getenv(
-    "IDLE_NUDGE_MESSAGE",
+IDLE_NUDGE_MESSAGE = _env("IDLE_NUDGE_MESSAGE",
     "Hello sir, aap line par hain?",
 ).strip()
 
 # Said once before hanging up on a line nobody is answering. Not the ordinary
 # closing: there is no outcome to acknowledge and nobody agreed to anything.
-IDLE_CLOSING_MESSAGE = os.getenv(
-    "IDLE_CLOSING_MESSAGE",
+IDLE_CLOSING_MESSAGE = _env("IDLE_CLOSING_MESSAGE",
     "Lagta hai awaaz nahi aa rahi. Koi baat nahi sir, main baad mein call kar leti hoon. Thank you, goodbye.",
 ).strip()
 
@@ -260,21 +287,21 @@ IDLE_CLOSING_MESSAGE = os.getenv(
 
 # Secret used to sign short-lived Media Stream tokens.
 # Keep the real value in .env.
-STREAM_SECRET = os.getenv("STREAM_SECRET", "")
+STREAM_SECRET = _env("STREAM_SECRET", "")
 
 # Optional diagnostic media capture directory.
 MEDIA_DUMP_DIR = Path(
-    os.getenv("MEDIA_DUMP_DIR", DATA_DIR / "media_dumps")
+    _env("MEDIA_DUMP_DIR", DATA_DIR / "media_dumps")
 )
 
 # Operational metrics. Safe defaults keep the feature enabled only when
 # explicitly requested in .env.
 METRICS_ENABLED = _env_bool("METRICS_ENABLED", False)
 METRICS_FLUSH_SECONDS = float(
-    os.getenv("METRICS_FLUSH_SECONDS", "5")
+    _env("METRICS_FLUSH_SECONDS", "5")
 )
 METRICS_SILENCE_GAP_MS = int(
-    os.getenv("METRICS_SILENCE_GAP_MS", "700")
+    _env("METRICS_SILENCE_GAP_MS", "700")
 )
 
 # Twilio async Answering Machine Detection may return several machine verdicts.
@@ -288,8 +315,7 @@ _AMD_TERMINAL_DEFAULT = (
 )
 AMD_TERMINAL_VERDICTS = {
     item.strip().lower()
-    for item in os.getenv(
-        "AMD_TERMINAL_VERDICTS",
+    for item in _env("AMD_TERMINAL_VERDICTS",
         _AMD_TERMINAL_DEFAULT,
     ).split(",")
     if item.strip()
