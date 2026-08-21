@@ -318,3 +318,25 @@ def test_a_stream_with_no_start_event_is_refused(client, store):
     exotel_call(store, "+919000004006", "EX-M6")
 
     assert not connect_media(client, {"event": "connected"})
+
+
+# ---------------------------------------------------------------------------
+# Mounting
+# ---------------------------------------------------------------------------
+def test_the_exotel_routes_are_mounted_on_the_real_app():
+    """A missing include_router would leave every other test in this file
+    passing, because they mount the router themselves.
+
+    Asserted by reachability rather than by inspecting `app.routes`: this
+    FastAPI version keeps included routers opaque there, so a route-list check
+    would silently prove nothing.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+
+    with TestClient(main.app, raise_server_exceptions=False) as probe:
+        # Unauthenticated on purpose -- the operator middleware guards `/api/`
+        # and `/twilio/outbound`, not carrier callbacks. 403 means the route
+        # ran and rejected the missing token; 404 would mean it is not there.
+        assert probe.post("/exotel/status/probe", data={}).status_code == 403

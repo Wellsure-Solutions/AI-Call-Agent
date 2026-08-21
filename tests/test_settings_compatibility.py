@@ -128,3 +128,34 @@ def test_a_correctly_configured_server_reports_nothing(monkeypatch):
     ):
         monkeypatch.setattr(live, name, "set")
     assert main.check_startup_configuration() == []
+
+
+# ---------------------------------------------------------------------------
+# Media capture must be off unless somebody asked for it
+# ---------------------------------------------------------------------------
+def test_media_capture_is_disabled_unless_explicitly_configured(monkeypatch):
+    """`MediaDump.create()` treats a None directory as its only "off" switch.
+
+    This setting defaulted to `<data dir>/media_dumps`, which is never None,
+    so capture could not be turned off and every call on every deployment
+    wrote both sides of the conversation to disk -- contradicting
+    media_dump.py's docstring and guide.md, which both document the default as
+    disabled.
+    """
+    monkeypatch.delenv("MEDIA_DUMP_DIR", raising=False)
+    monkeypatch.delenv("CALL_AGENT_MEDIA_DUMP_DIR", raising=False)
+
+    assert importlib.reload(settings).MEDIA_DUMP_DIR is None
+
+
+def test_media_capture_turns_on_when_a_directory_is_given(monkeypatch):
+    monkeypatch.delenv("MEDIA_DUMP_DIR", raising=False)
+    current = reloaded(monkeypatch, CALL_AGENT_MEDIA_DUMP_DIR="/tmp/captures")
+    assert str(current.MEDIA_DUMP_DIR) == "/tmp/captures"
+
+
+def test_a_none_directory_is_what_actually_disables_the_dump():
+    """Pins the contract the setting relies on."""
+    from app.telephony.audio.media_dump import MediaDump
+
+    assert MediaDump.create(None, "call-1") is None

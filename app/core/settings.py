@@ -340,10 +340,17 @@ IDLE_CLOSING_MESSAGE = _env("IDLE_CLOSING_MESSAGE",
 # Keep the real value in .env.
 STREAM_SECRET = _env("STREAM_SECRET", "")
 
-# Optional diagnostic media capture directory.
-MEDIA_DUMP_DIR = Path(
-    _env("MEDIA_DUMP_DIR", DATA_DIR / "media_dumps")
-)
+# Optional diagnostic media capture directory. **None unless explicitly set.**
+#
+# This defaulted to `<data dir>/media_dumps`, which is never None, so
+# `MediaDump.create()` -- whose only "off" condition is a None directory --
+# could not be switched off. Every call on every deployment was writing both
+# sides of the conversation to disk, contradicting media_dump.py's own
+# docstring ("writes nothing unless CALL_AGENT_MEDIA_DUMP_DIR is set") and
+# guide.md, which documents the default as disabled and warns never to leave
+# it enabled in steady-state production.
+_MEDIA_DUMP_DIR = _env("MEDIA_DUMP_DIR")
+MEDIA_DUMP_DIR = Path(_MEDIA_DUMP_DIR) if _MEDIA_DUMP_DIR else None
 
 # Operational metrics. Safe defaults keep the feature enabled only when
 # explicitly requested in .env.
