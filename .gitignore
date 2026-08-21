@@ -17,7 +17,6 @@ call_answers.xlsx
 venv/
 .pytest_cache/
 # Local metric captures: raw call audio, never committed.
-*.wav
 
 # Runtime call database. Renaming it to calls.sqlite3 slipped past the old
 # call_agent.sqlite3 entries and it was committed carrying 100 transcripts
