@@ -180,14 +180,35 @@ class DurableCallCoordinator:
             # only the provider knows which of its own failures are proven
             # refusals. Never blind-redial.
             try:
+                # The class name alone answers "did it fail"; the carrier's own
+                # message answers "why", which is the only one an operator can
+                # act on. Providers scrub their own credentials out of it.
+                detail = self._describe_dial_error(provider, error)
                 if provider.classify_dial_error(error) == "rejected":
-                    await asyncio.to_thread(self.store.mark_dial_rejected, call["call_id"], type(error).__name__)
+                    await asyncio.to_thread(self.store.mark_dial_rejected, call["call_id"], type(error).__name__, detail)
                 else:
-                    await asyncio.to_thread(self.store.mark_dial_ambiguous, call["call_id"], type(error).__name__)
+                    await asyncio.to_thread(self.store.mark_dial_ambiguous, call["call_id"], type(error).__name__, detail)
                 if sid:
                     await self._abandon(provider, sid, call)
             except Exception:
                 logger.exception("dial_failure_persistence_failed", extra={"call_id": call.get("call_id")})
+
+    @staticmethod
+    def _describe_dial_error(provider, error: Exception) -> str:
+        """Ask the provider why the dial failed, never at the cost of the dial.
+
+        Optional on the protocol so a fake or legacy adapter needs no change,
+        and defensive because this runs inside the failure handler: a provider
+        whose description raised would lose the persistence of the failure
+        itself, which is far worse than losing the detail.
+        """
+        try:
+            describe = getattr(provider, "describe_dial_error", None)
+            if describe is not None:
+                return describe(error)
+        except Exception:
+            logger.warning("dial_error_description_failed", extra={"error_type": type(error).__name__})
+        return type(error).__name__
 
     @staticmethod
     async def _abandon(provider, sid: str, call: dict) -> None:

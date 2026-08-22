@@ -25,23 +25,54 @@ table for `POST /v1/accounts/{account_sid}/calls/connect`:
 
 | Exotel parameter | Meaning per Exotel's docs | Twilio equivalent |
 |---|---|---|
-| `from` | "Number to dial — E.164 format (`+919876543210`)" | `to` |
-| `callerid` | "Your Exophone (shown as caller ID)" | `from_` |
-| `streamurl` | "Bot WebSocket URL — `wss://` or `ws://`, max 600 chars" | (TwiML `<Stream url>`) |
-| `streamtype` | must be `bidirectional` | — |
-| `statuscallback` | webhook URL for call status events | `status_callback` |
-| `timelimit` | max duration in seconds (max `14400`) | — |
-| `customfield` | metadata string, max 128 chars | — |
-| `record` | `true` to record | `record` |
+| `From` | "Number to dial — E.164 format (`+919876543210`)" | `to` |
+| `CallerId` | "Your Exophone (shown as caller ID)" | `from_` |
+| `StreamUrl` | "Bot WebSocket URL — `wss://` or `ws://`, max 600 chars" | (TwiML `<Stream url>`) |
+| `StreamType` | must be `bidirectional` | — |
+| `StatusCallback` | webhook URL for call status events | `status_callback` |
+| `TimeLimit` | max duration in seconds (max `14400`) | — |
+| `CustomField` | metadata string, max 128 chars | — |
+| `Record` | `true` to record | `record` |
+
+**Casing corrected after a live test — see §1.1a.** The AgentStream guide renders all of these
+lowercase; that spelling does not work.
 
 This is consistent with Exotel's classic *Connect Two Numbers* API, where `From` is the leg dialled
 **first** and `To` the leg dialled second. AgentStream has no second human leg — the second leg is
 the bot socket — so `from` is the only number dialled, i.e. the customer.
 
 Getting this backwards dials our own ExoPhone and bills for it. `ExotelProvider.dial()`
-therefore maps `to_number → from`, `EXOTEL_CALLER_ID → callerid`, with the mapping spelled out in a comment
+therefore maps `to_number → From`, `EXOTEL_CALLER_ID → CallerId`, with the mapping spelled out in a comment
 and a unit test asserting the request body puts the
-destination in `from` and the ExoPhone in `callerid`.
+destination in `From` and the ExoPhone in `CallerId`.
+
+### 1.1a The casing in the AgentStream guide is wrong
+
+Implemented against the AgentStream guide's spelling — lowercase path and lowercase form fields —
+**every dial failed**. A live request established the working form, and it is TitleCase on both:
+
+```
+POST /v1/Accounts/{sid}/Calls/connect
+From=<number being dialled>   CallerId=<ExoPhone>
+StreamUrl=<wss://...>         StreamType=bidirectional
+```
+
+That agrees with Exotel's classic Voice v1 reference, which lists `From`, `To`, `CallerId`,
+`StreamUrl`, `StatusCallback`, `StatusCallbackEvents`, `TimeLimit` — all TitleCase — at the same
+`/v1/Accounts/{sid}/Calls/connect` path. `StreamType` is the one field the classic reference does
+*not* list; the live request confirms it is required for a streaming dial. `StatusCallbackEvents`
+is documented as an array and is sent form-encoded as `StatusCallbackEvents[0]=terminal`.
+
+The spellings are pinned as constants in `exotel_provider.py` and asserted against **string
+literals** in `tests/test_exotel_wire_format.py` — deliberately not against the constants, since a
+test written against those would follow a casing regression rather than catch it. A mutation check
+confirms each of the four lowercase spellings fails that file.
+
+The response is XML, not JSON: `<Sid>`, `<Status>in-progress</Status>`, and a
+`<SubResourceUris><Stream>` entry confirming the stream attached. **`<To>` comes back empty** on a
+streaming call — there is no second leg for it to name — so nothing correlates on it; the SID is
+the only thing the response has to supply. The parser handles that exact shape and is tested
+against a captured copy of it.
 
 ### 1.2 Exotel cannot give us mu-law on the inbound leg — the fallback path is mandatory
 
@@ -299,7 +330,7 @@ adapter transcodes it on the way out like any other audio.
 
 ## 4. Stream token in the query string
 
-Exotel allows **max 3 custom params, ≤256 characters total**, and `streamurl` ≤600 chars. Current
+Exotel allows **max 3 custom params, ≤256 characters total**, and `StreamUrl` ≤600 chars. Current
 `stream_token()` is SHA-256 hex — 64 chars. Budget:
 
 ```
@@ -309,7 +340,7 @@ Exotel allows **max 3 custom params, ≤256 characters total**, and `streamurl` 
 
 **It fits with room to spare. No truncation of the HMAC is needed** — the prompt allowed for it;
 the arithmetic says it is unnecessary, so the full 256-bit digest is kept. With a
-`https://calls.example.com` origin the whole `streamurl` lands near 190 chars, well under 600.
+`https://calls.example.com` origin the whole `StreamUrl` lands near 190 chars, well under 600.
 
 The one real difference from Twilio: Twilio binds the CallSid in the TwiML webhook and the token is
 computed over `call_id:sid:expiry` *after* the SID is known. Exotel has no TwiML step and the SID
@@ -337,7 +368,7 @@ string if present.
 `/exotel/status/{call_id}` gets an unguessable HMAC query token derived from the same
 `STREAM_SECRET`, over `call_id` plus an expiry — compared with `hmac.compare_digest`, same as
 everywhere else. The URL is generated per call at dial time and handed to Exotel as
-`statuscallback`, so it never needs to be configured in the Exotel console. Optional IP allowlist
+`StatusCallback`, so it never needs to be configured in the Exotel console. Optional IP allowlist
 via a new `EXOTEL_CALLBACK_ALLOWED_IPS` (empty = disabled, since Exotel publishes ranges only on
 request).
 

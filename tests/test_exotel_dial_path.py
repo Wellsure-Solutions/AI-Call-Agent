@@ -98,7 +98,7 @@ def test_the_dial_carries_a_signed_stream_url_and_status_callback(store):
     seen = run_dial(store, call_id, ok())
 
     fields = dict(parse_qsl(seen[0].content.decode()))
-    stream = urlparse(fields["streamurl"])
+    stream = urlparse(fields["StreamUrl"])
     assert stream.scheme == "wss" and stream.path == "/exotel/media-stream"
     query = parse_qs(stream.query)
     assert query["call_id"] == [call_id]
@@ -107,7 +107,7 @@ def test_the_dial_carries_a_signed_stream_url_and_status_callback(store):
 
     assert valid_exotel_stream_token(call_id, int(query["expiry"][0]), query["token"][0])
 
-    callback = urlparse(fields["statuscallback"])
+    callback = urlparse(fields["StatusCallback"])
     callback_query = parse_qs(callback.query)
     assert callback.path == f"/exotel/status/{call_id}"
     assert valid_exotel_callback_token(call_id, int(callback_query["expiry"][0]), callback_query["token"][0])
@@ -121,8 +121,8 @@ def test_the_destination_is_the_dialled_number_not_the_exophone(store):
     seen = run_dial(store, call_id, ok())
 
     fields = dict(parse_qsl(seen[0].content.decode()))
-    assert fields["from"] == "+919000010003"
-    assert fields["callerid"] == "+918047000000"
+    assert fields["From"] == "+919000010003"
+    assert fields["CallerId"] == "+918047000000"
 
 
 # ---------------------------------------------------------------------------

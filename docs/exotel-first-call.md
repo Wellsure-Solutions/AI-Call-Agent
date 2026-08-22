@@ -28,14 +28,14 @@ EXOTEL_SEND_CHUNK_BYTES=3200         # always rounded to a multiple of 320
 EXOTEL_CALLBACK_ALLOWED_IPS=         # ask Exotel for their egress ranges
 ```
 
-**`EXOTEL_CALLER_ID` is the ExoPhone you are calling *from*.** Exotel's `from` parameter is the
+**`EXOTEL_CALLER_ID` is the ExoPhone you are calling *from*.** Exotel's `From` parameter is the
 number being dialled. If a test call rings your own ExoPhone, these are swapped.
 
 ## 2. Enable AgentStream on the account
 
 Voice streaming is not on by default. Ask Exotel support (hello@exotel.com) to enable AgentStream
 for the account, and confirm the ExoPhone is outbound-capable. Nothing needs configuring in App
-Bazaar: the dial request carries `streamurl` and `statuscallback` per call.
+Bazaar: the dial request carries `StreamUrl` and `StatusCallback` per call.
 
 ## 3. Point the ExoPhone at this box
 
@@ -102,7 +102,20 @@ the carrier is chosen by the setting. Renaming it would break existing callers.)
 ## 6. What to check, in order
 
 **Did the right number ring?** The customer's handset should show your +91 ExoPhone. If your own
-ExoPhone rang instead, `from`/`callerid` are swapped.
+ExoPhone rang instead, `From`/`CallerId` are swapped.
+
+**If the dial failed, read the reason off the call row.** `reconciliation_error` carries Exotel's
+own message, truncated with credentials and media tokens stripped — not just an exception class
+name:
+
+```bash
+curl -sS -u "$CALL_AGENT_ADMIN_USERNAME:$CALL_AGENT_ADMIN_PASSWORD" \
+     "$PUBLIC_BASE_URL/api/calls/<call_id>" | python -c \
+     'import json,sys; print(json.load(sys.stdin)["reconciliation_error"])'
+```
+
+If *every* dial fails regardless of number, suspect request casing before credentials — see
+guide.md §8a and `tests/test_exotel_wire_format.py`.
 
 **Did the call row get the right provider?**
 

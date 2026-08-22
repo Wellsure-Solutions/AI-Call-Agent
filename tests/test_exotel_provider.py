@@ -78,8 +78,8 @@ def test_dial_puts_the_destination_in_from_and_the_exophone_in_callerid():
     )
 
     fields = form_fields(seen[0])
-    assert fields["from"] == "+919812345678", "from is the customer, not us"
-    assert fields["callerid"] == "+918047000000", "callerid is the ExoPhone"
+    assert fields["From"] == "+919812345678", "From is the customer, not us"
+    assert fields["CallerId"] == "+918047000000", "CallerId is the ExoPhone"
 
 
 def test_dial_requests_a_bidirectional_stream_at_the_agentstream_endpoint():
@@ -95,11 +95,11 @@ def test_dial_requests_a_bidirectional_stream_at_the_agentstream_endpoint():
 
     request = seen[0]
     assert request.method == "POST"
-    assert str(request.url) == f"https://api.in.exotel.com/v1/accounts/{ACCOUNT}/calls/connect"
+    assert str(request.url) == f"https://api.in.exotel.com/v1/Accounts/{ACCOUNT}/Calls/connect"
     fields = form_fields(request)
-    assert fields["streamtype"] == "bidirectional"
-    assert fields["streamurl"].startswith("wss://")
-    assert fields["statuscallback"].endswith("/exotel/status/call-2")
+    assert fields["StreamType"] == "bidirectional"
+    assert fields["StreamUrl"].startswith("wss://")
+    assert fields["StatusCallback"].endswith("/exotel/status/call-2")
 
 
 def test_dial_uses_basic_auth_with_the_api_key_and_token():
@@ -123,7 +123,7 @@ def test_the_stream_url_is_sent_verbatim_so_its_token_survives():
     exotel, seen = provider(ok())
     asyncio.run(exotel.dial(call_id="c", to_number="+919812345672", ring_timeout=45,
                             stream_url=url, status_callback_url="https://x/z"))
-    assert form_fields(seen[0])["streamurl"] == url
+    assert form_fields(seen[0])["StreamUrl"] == url
 
 
 # ---------------------------------------------------------------------------
@@ -253,14 +253,14 @@ def test_exotel_cancels_only_before_answer():
 def test_fetch_status_normalizes_what_exotel_reports():
     exotel, seen = provider(ok({"Call": {"Sid": "s", "Status": "no-answer"}}))
     assert asyncio.run(exotel.fetch_status("s")) == "no-answer"
-    assert str(seen[0].url).endswith(f"/v1/accounts/{ACCOUNT}/calls/s")
+    assert str(seen[0].url).endswith(f"/v1/Accounts/{ACCOUNT}/Calls/s")
 
 
 def test_request_terminal_deletes_the_call_resource():
     exotel, seen = provider(ok({"Call": {"Sid": "s", "Status": "completed"}}))
     asyncio.run(exotel.request_terminal("s", "completed"))
     assert seen[0].method == "DELETE"
-    assert str(seen[0].url).endswith(f"/calls/s")
+    assert str(seen[0].url).endswith("/Calls/s")
 
 
 # ---------------------------------------------------------------------------

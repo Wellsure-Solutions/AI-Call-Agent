@@ -47,7 +47,7 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `EXOTEL_API_KEY` | Yes for Exotel calls | REST Basic-auth username | from the Exotel console; no default | Yes |
 | `EXOTEL_API_TOKEN` | Yes for Exotel calls | REST Basic-auth password | from the Exotel console; no default | Yes |
 | `EXOTEL_SUBDOMAIN` | No | Exotel API region | `api.in.exotel.com` (Mumbai); `api.exotel.com` for Singapore | No |
-| `EXOTEL_CALLER_ID` | Yes for Exotel calls | The +91 ExoPhone shown to the customer. **This is Exotel's `callerid`, not its `from`** | E.164; no default | No |
+| `EXOTEL_CALLER_ID` | Yes for Exotel calls | The +91 ExoPhone shown to the customer. **This is Exotel's `CallerId`, not its `From`** | E.164; no default | No |
 | `EXOTEL_SEND_CHUNK_BYTES` | No | Outbound PCM bytes per websocket message; always rounded to a multiple of 320 | `3200` | No |
 | `EXOTEL_CALLBACK_ALLOWED_IPS` | No | Comma-separated IP allowlist for Exotel status callbacks; empty disables the check | unset (disabled) | No |
 | `CALL_AGENT_DEFAULT_PROVIDER` | No | **Seed only.** Written to the database the first time it is opened and ignored from then on — once a provider is saved in the dashboard, the database is authoritative. See §8a | `twilio`; also `exotel` or `auto` | No |
@@ -150,16 +150,24 @@ Take the account SID, API key and API token from the Exotel console's API settin
 Mumbai. Ask Exotel support to enable AgentStream (voice streaming) on the account; it is not on by
 default.
 
-**`EXOTEL_CALLER_ID` is Exotel's `callerid`, not its `from`.** On
-`POST /v1/accounts/{sid}/calls/connect`, Exotel's `from` is the number being *dialled* and
-`callerid` is the ExoPhone shown to them. This is the opposite of Twilio's `to`/`from`, and
+**`EXOTEL_CALLER_ID` is Exotel's `CallerId`, not its `From`.** On
+`POST /v1/Accounts/{sid}/Calls/connect`, Exotel's `From` is the number being *dialled* and
+`CallerId` is the ExoPhone shown to them. This is the opposite of Twilio's `to`/`from`, and
 inverting them dials your own ExoPhone and bills for it. The mapping is asserted in
 `tests/test_exotel_provider.py`.
+
+**The path and field names are TitleCase, and Exotel is case-sensitive about both.** The
+AgentStream developer guide renders them lowercase (`/v1/accounts/.../calls/connect`, `from`,
+`callerid`, `streamurl`); that spelling is rejected and every dial fails. The working form is
+`/v1/Accounts/{sid}/Calls/connect` with `From`, `CallerId`, `StreamUrl`,
+`StreamType=bidirectional`, `StatusCallback`, `StatusCallbackEvents[0]` and `TimeLimit`. These are
+pinned in `tests/test_exotel_wire_format.py`; if Exotel ever changes them, that is the file to
+update.
 
 ### Pointing the ExoPhone at this box
 
 Nothing needs configuring in App Bazaar for outbound AgentStream calls. The dial request carries
-`streamurl` (the websocket, with its token) and `statuscallback` (the status webhook, with its
+`StreamUrl` (the websocket, with its token) and `StatusCallback` (the status webhook, with its
 token), both built from `PUBLIC_BASE_URL`, so the carrier is told where to reach you per call.
 `PUBLIC_BASE_URL` must be the exact public HTTPS origin, without a trailing slash, exactly as for
 Twilio.
@@ -250,9 +258,9 @@ The sequence above is written for Twilio. On Exotel, steps 4-8 differ:
 | Step | Twilio | Exotel |
 |---|---|---|
 | 0 | Async AMD runs alongside the call | No AMD — the AgentStream dial has none |
-| 4 | REST call creation with a `timeout` ring parameter | `POST /calls/connect` with `from` = destination, `callerid` = ExoPhone, `streamurl`, `streamtype=bidirectional`. No ring timeout exists on this endpoint; the durable ring deadline is the only one |
+| 4 | REST call creation with a `timeout` ring parameter | `POST /Calls/connect` with `From` = destination, `CallerId` = ExoPhone, `StreamUrl`, `StreamType=bidirectional`. No ring timeout exists on this endpoint; the durable ring deadline is the only one |
 | 5 | Same | Same. A 4xx is a proven rejection; a 5xx, a timeout, **or an HTTP 200 carrying an error payload** is ambiguous and enters `needs_reconciliation` |
-| 6-7 | Twilio fetches signed TwiML, which binds the CallSid and mints the stream token | **No TwiML step.** The CallSid comes back in the dial response and is bound there; the stream token was already minted into `streamurl` |
+| 6-7 | Twilio fetches signed TwiML, which binds the CallSid and mints the stream token | **No TwiML step.** The CallSid comes back in the dial response and is bound there; the stream token was already minted into `StreamUrl` |
 | 8 | Media validates HMAC/expiry/CallSid from TwiML custom parameters | Media validates the HMAC and expiry from the query string, **and separately** checks the start event's `call_sid` against the SID bound at dial time before claiming ownership |
 
 Step 8 is split for a structural reason. Exotel's stream URL has to be built before the dial
@@ -377,7 +385,8 @@ python scripts/prerender_greeting.py --check  # is the cache current? (exit 1 if
   Capacity is still never released by a timer alone: automatic release requires repeated recorded failures to obtain proof, and the override requires a human.
 - **Extraction retries:** verify OpenAI key/model/quota. Raw transcripts remain durable. Permanent connected failures place leads in review.
 - **403 Exotel callback:** Exotel signs nothing, so `/exotel/status/{call_id}` is authenticated by an HMAC query token this service minted at dial time. `GET /health` and `/api/operations` report `callback_auth_failures` (and the same snapshot under the retained `twilio_signature_failures` key); a nonzero `exotel_status` count means `CALL_AGENT_STREAM_SECRET` changed after the calls were placed, `PUBLIC_BASE_URL` is wrong so the callback never carried the token, or `EXOTEL_CALLBACK_ALLOWED_IPS` does not include Exotel's egress range.
-- **Exotel dial fails immediately with no call placed:** check the console for a 4xx. A 4xx is recorded as `provider_rejected` and is terminal. If instead the call sits in `needs_reconciliation`, the submission was ambiguous — Exotel returned a 5xx, timed out, or answered HTTP 200 with an error body — and it is deliberately never redialed. Check the Exotel call log before resolving it.
+- **Every Exotel dial fails, whatever the number:** most likely the request casing. Exotel is case-sensitive on the path and the form field names, and the AgentStream guide's lowercase spelling does not work — see §8a. Read `reconciliation_error` on the call first: it now carries Exotel's own message rather than just an exception class name (`GET /api/calls/<call_id>`).
+- **Exotel dial fails immediately with no call placed:** check the console for a 4xx. A 4xx is recorded as `provider_rejected` and is terminal. If instead the call sits in `needs_reconciliation`, the submission was ambiguous — Exotel returned a 5xx, timed out, or answered HTTP 200 with an error body — and it is deliberately never redialed. Either way `reconciliation_error` holds the carrier's own message, truncated and with credentials and media tokens stripped — that is the string to search the Exotel console for. Check the call log before resolving it.
 - **Exotel call connects but the customer hears nothing / static:** almost always a framing problem. Confirm `EXOTEL_SEND_CHUNK_BYTES` is a multiple of 320 (it is rounded automatically, but a value under 320 is rounded *up* to one frame). Static rather than silence usually means the audio is being sent as mu-law instead of PCM — check `metrics_call` for outbound bytes and capture with `CALL_AGENT_MEDIA_DUMP_DIR`, which stores mu-law for both carriers.
 - **Exotel media stream closes with policy violation:** the correlation has two halves and either can fail. Verify `CALL_AGENT_STREAM_SECRET` and clock synchronisation for the token half; for the database half, confirm the call row's `call_sid` matches what Exotel reports in its start event, and that the call's `provider` column really is `exotel`. A call queued under Twilio will be refused by the Exotel socket by design.
 - **Calls still going out on the old provider after switching:** expected. The provider is resolved and persisted when the call row is created, so already-queued calls keep the carrier they were created with. Only newly queued calls use the new setting.

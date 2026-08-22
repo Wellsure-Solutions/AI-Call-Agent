@@ -27,7 +27,13 @@ from app.core.settings import (
     TWILIO_FROM_NUMBER,
 )
 from app.integrations.audio_profiles import TELEPHONY_AUDIO_PROFILE
-from app.telephony.providers.base import DialErrorKind, DialResult, terminal_request_for
+from app.telephony.providers.base import (
+    DialErrorKind,
+    DialResult,
+    describe_error,
+    scrub,
+    terminal_request_for,
+)
 
 # Twilio's own words for "not answered yet". Asking Twilio to `complete` a
 # call in one of these states is not an error, but it records the wrong
@@ -157,6 +163,24 @@ class TwilioProvider:
 
     def classify_dial_error(self, error: Exception) -> DialErrorKind:
         return classify_twilio_error(error)
+
+    def describe_dial_error(self, error: Exception) -> str:
+        """The carrier's own reason, so a failed dial is diagnosable.
+
+        Twilio's exception carries a numeric error code that maps to a
+        documented cause; that plus the message is what an operator needs.
+        Scrubbed with the auth token, because a `TwilioRestException`'s string
+        form includes the request URI.
+        """
+        secrets = (TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID)
+        if isinstance(error, TwilioRestException):
+            parts = [f"HTTP {error.status} from Twilio"]
+            if getattr(error, "code", None):
+                parts.append(f"code {error.code}")
+            if getattr(error, "msg", None):
+                parts.append(str(error.msg))
+            return scrub(": ".join(parts), secrets)
+        return describe_error(error, secrets)
 
     # ------------------------------------------------------------------
     # Configuration reporting (settings UI)

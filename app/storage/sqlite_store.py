@@ -487,16 +487,22 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("UPDATE calls SET lifecycle_state='QUEUED',updated_at=? WHERE call_id=? AND call_sid IS NULL", (now, call_id))
             return changed == 1
 
-    def mark_dial_ambiguous(self, call_id: str, category: str = "dial_ambiguous") -> None:
+    def mark_dial_ambiguous(self, call_id: str, category: str = "dial_ambiguous", detail: str | None = None) -> None:
+        """`category` is the machine-readable reconciliation status; `detail`
+        is the carrier's own explanation, which is what makes the row
+        diagnosable. Callers must scrub credentials out of `detail` first."""
         with self.transaction(immediate=True) as db:
-            self._mark_reconciliation_db(db, call_id, category, "Provider acceptance is unknown", utcnow())
+            self._mark_reconciliation_db(
+                db, call_id, category, detail or "Provider acceptance is unknown", utcnow()
+            )
 
-    def mark_dial_rejected(self, call_id: str, category: str) -> None:
+    def mark_dial_rejected(self, call_id: str, category: str, detail: str | None = None) -> None:
         now = utcnow()
+        reason = (detail or category)[:500]
         with self.transaction(immediate=True) as db:
-            db.execute("UPDATE calls SET lifecycle_state='FAILED',outcome='provider_rejected',reconciliation_error=?,provider_terminal_at=?,finalized_at=?,updated_at=? WHERE call_id=?", (category[:200], now, now, now, call_id))
+            db.execute("UPDATE calls SET lifecycle_state='FAILED',outcome='provider_rejected',reconciliation_error=?,provider_terminal_at=?,finalized_at=?,updated_at=? WHERE call_id=?", (reason, now, now, now, call_id))
             db.execute("UPDATE call_jobs SET queue_state='terminal',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
-            self._event(db, call_id, "dial_rejected", now, {"category": category[:100]})
+            self._event(db, call_id, "dial_rejected", now, {"category": category[:100], "detail": reason[:300]})
 
     def _mark_reconciliation_db(self, db: sqlite3.Connection, call_id: str, status: str, error: str, now: str) -> None:
         db.execute("UPDATE calls SET lifecycle_state='NEEDS_RECONCILIATION',reconciliation_status=?,reconciliation_error=?,next_reconciliation_at=?,updated_at=? WHERE call_id=? AND provider_terminal_at IS NULL", (status, error[:500], now, now, call_id))

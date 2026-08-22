@@ -17,7 +17,8 @@ direction and a call that really was placed gets marked failed and its phone
 freed for a redial -- i.e. a customer called twice.
 """
 
-from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
+import re
+from typing import Any, Iterable, Literal, NamedTuple, Protocol, runtime_checkable
 
 from app.integrations.audio_profiles import AudioProfile
 
@@ -75,6 +76,20 @@ class TelephonyProvider(Protocol):
 
     def classify_dial_error(self, error: Exception) -> DialErrorKind: ...
 
+    def describe_dial_error(self, error: Exception) -> str:
+        """A diagnosable, credential-free description, stored on the call row.
+
+        `classify_dial_error` decides *what* happened to the queue;
+        this decides whether an operator can find out *why*. The exception
+        class name alone is not enough -- every carrier failure arrives as the
+        same one or two types, so a row reading `HTTPStatusError` is
+        indistinguishable from every other failure and undiagnosable without
+        the carrier's own message.
+
+        Implementations must run their output through `scrub()`.
+        """
+        ...
+
     def is_configured(self) -> tuple[bool, list[str]]:
         """(usable, missing setting names). Drives the settings UI's fail-closed
         check, so an operator cannot select a provider that cannot dial."""
@@ -84,6 +99,53 @@ class TelephonyProvider(Protocol):
         """The number this provider presents. Shown in the settings UI; a
         published business number, never a secret."""
         ...
+
+
+# How much carrier detail is kept on a failed dial. Long enough to hold a
+# real error message, short enough that `reconciliation_error` stays readable
+# in the operations view.
+MAX_ERROR_DETAIL = 300
+
+# `//key:token@host` credentials, if a carrier ever echoes a URL back at us.
+_USERINFO = re.compile(r"//[^/\s@]+:[^/\s@]+@")
+# Our own media/callback HMACs. A carrier error body that quotes the StreamUrl
+# we sent would otherwise put a live media token into the database and the
+# operations view.
+_QUERY_TOKEN = re.compile(r"((?:^|[?&])(?:token|expiry)=)[^&\s\"'<>]+")
+
+
+def scrub(text: str, secrets: Iterable[str] = ()) -> str:
+    """Make carrier error text safe to persist and show to an operator.
+
+    Removes anything that could be a credential -- the caller's own API
+    key/token values, URL userinfo, and the HMAC query parameters this service
+    mints -- then collapses whitespace and truncates.
+
+    Deliberately redacts by *value* rather than trying to recognise formats: a
+    carrier is free to echo our request back in any shape, and the only thing
+    we reliably know is what our own secrets are.
+    """
+    cleaned = " ".join(str(text or "").split())
+    for secret in secrets:
+        if secret and len(secret) >= 4:
+            cleaned = cleaned.replace(secret, "<redacted>")
+    cleaned = _USERINFO.sub("//<redacted>@", cleaned)
+    cleaned = _QUERY_TOKEN.sub(r"\1<redacted>", cleaned)
+    if len(cleaned) > MAX_ERROR_DETAIL:
+        cleaned = cleaned[:MAX_ERROR_DETAIL - 1].rstrip() + "…"
+    return cleaned
+
+
+def describe_error(error: Exception, secrets: Iterable[str] = ()) -> str:
+    """Fallback dial-error description: the exception type and its message.
+
+    Providers override this with something carrier-specific. The bare class
+    name on its own is not diagnosable -- every failure looks identical -- so
+    even the default carries the message.
+    """
+    message = scrub(str(error), secrets)
+    name = type(error).__name__
+    return f"{name}: {message}" if message else name
 
 
 def terminal_request_for(status: str, pre_answer: frozenset[str]) -> str:

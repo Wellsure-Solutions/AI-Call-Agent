@@ -6,13 +6,17 @@ from __future__ import annotations
 and the surface used here is three form-encoded requests.
 
 The parameter mapping is the thing to get right and the easy thing to get
-wrong. On `/v1/accounts/{sid}/calls/connect`, Exotel's `from` is **the number
-being dialled** and `callerid` is the ExoPhone shown to them. That is the
-opposite of what the names suggest to anyone arriving from Twilio, where `to`
-is the destination and `from_` is the caller. It is consistent with Exotel's
-classic "connect two numbers" API, where `From` is simply the leg dialled
-first -- AgentStream has no second human leg, so `from` is the only number
-dialled. Swapping them dials our own ExoPhone and bills for it.
+wrong. On `POST /v1/Accounts/{sid}/Calls/connect`, Exotel's `From` is **the
+number being dialled** and `CallerId` is the ExoPhone shown to them. That is
+the opposite of what the names suggest to anyone arriving from Twilio, where
+`to` is the destination and `from_` is the caller. It is consistent with
+Exotel's classic "connect two numbers" API, where `From` is simply the leg
+dialled first -- AgentStream has no second human leg, so `From` is the only
+number dialled. Swapping them dials our own ExoPhone and bills for it.
+
+Casing is load-bearing: the path and the form fields are TitleCase, not the
+lowercase the AgentStream guide renders them in. See the wire-format constants
+below.
 """
 
 import json
@@ -29,7 +33,13 @@ from app.core.settings import (
     EXOTEL_SUBDOMAIN,
 )
 from app.integrations.audio_profiles import TELEPHONY_AUDIO_PROFILE
-from app.telephony.providers.base import DialErrorKind, DialResult, terminal_request_for
+from app.telephony.providers.base import (
+    DialErrorKind,
+    DialResult,
+    describe_error,
+    scrub,
+    terminal_request_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +74,34 @@ UNKNOWN_STATUS = "in-progress"
 
 CONNECT_TIMEOUT_SECONDS = 15.0
 
+# ---------------------------------------------------------------------------
+# Wire format. Exotel's v1 API is case-SENSITIVE on both the path and the form
+# field names, and this is the spelling that actually works.
+#
+# The AgentStream developer guide renders them all lowercase
+# (`/v1/accounts/.../calls/connect`, `from`, `callerid`, `streamurl`), which is
+# what this provider was originally written against -- and every dial failed.
+# The classic Voice v1 reference and a verified live request both use
+# TitleCase, and the same live request confirmed `StreamType=bidirectional`
+# even though the classic reference does not list it.
+#
+# Pinned as constants, and asserted byte-for-byte in
+# tests/test_exotel_wire_format.py, because a silent casing drift here breaks
+# every outbound call at once and looks like a credentials problem.
+V1_ACCOUNTS_PATH = "/v1/Accounts"
+CONNECT_PATH = "/Calls/connect"
+CALLS_PATH = "/Calls"
+
+FIELD_TO_DIAL = "From"            # the number being dialled, NOT the caller
+FIELD_CALLER_ID = "CallerId"      # the ExoPhone shown to them
+FIELD_STREAM_URL = "StreamUrl"
+FIELD_STREAM_TYPE = "StreamType"
+FIELD_STATUS_CALLBACK = "StatusCallback"
+# Documented as an array. Form-encoded bodies index it explicitly; the
+# bracket-only spelling is the multipart form.
+FIELD_STATUS_CALLBACK_EVENTS = "StatusCallbackEvents[0]"
+FIELD_TIME_LIMIT = "TimeLimit"
+
 
 def normalize_status(raw: Any) -> str:
     """Map an Exotel status word into this codebase's vocabulary."""
@@ -90,7 +128,15 @@ class ExotelDialError(RuntimeError):
     Raised for the HTTP-200-with-an-error-body case, which Indian carrier APIs
     do routinely. Deliberately *not* an httpx.HTTPStatusError, so
     `classify_exotel_error` files it as ambiguous.
+
+    Carries the raw response body so `describe_dial_error` can scrub and store
+    it. Held unscrubbed here rather than at the raise site so that redaction
+    happens in exactly one place, next to the secrets it has to redact.
     """
+
+    def __init__(self, message: str, body: str = "") -> None:
+        super().__init__(message)
+        self.body = body
 
 
 class ExotelProvider:
@@ -126,7 +172,7 @@ class ExotelProvider:
     # ------------------------------------------------------------------
     @property
     def _base(self) -> str:
-        return f"https://{self.subdomain}/v1/accounts/{self.account_sid}"
+        return f"https://{self.subdomain}{V1_ACCOUNTS_PATH}/{self.account_sid}"
 
     async def _request(self, method: str, url: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         auth = (self.api_key, self.api_token)
@@ -142,13 +188,22 @@ class ExotelProvider:
     def _parse_call(response: httpx.Response) -> dict[str, Any]:
         """Pull the Call object out of a response that may not be JSON.
 
-        Exotel's v1 API answers in XML by default. Rather than depend on a
-        `.json` suffix the AgentStream docs do not show, this parses JSON when
-        it can and falls back to lifting <Sid>/<Status> out of XML.
+        Exotel's v1 API answers in **XML** by default, and the AgentStream dial
+        does exactly that: a `<Call>` carrying `<Sid>`, `<Status>in-progress`,
+        and a `<SubResourceUris><Stream>` entry confirming the stream attached.
+        Rather than depend on a `.json` suffix the AgentStream docs do not
+        show, this parses JSON when it can and falls back to lifting
+        `<Sid>`/`<Status>` out of XML.
+
+        `<To>` is deliberately not read. On a streaming call it comes back
+        **empty** -- there is no second leg for it to name -- so anything
+        correlating on it would break. The destination we dialled is already on
+        the call row; the SID is the only thing this response has to supply.
 
         A 200 whose body carries an error instead of a call is treated as
         *ambiguous*, not as a failure: Indian carrier APIs return those
         routinely, and the call may well have been placed. Never redial on it.
+        The body is carried on the exception so the failure is diagnosable.
         """
         body = (response.text or "").strip()
         try:
@@ -161,12 +216,12 @@ class ExotelProvider:
             if isinstance(call, dict):
                 return call
             # A 200 carrying {"status": "failure", ...} or similar.
-            raise ExotelDialError(f"no Call object in response ({sorted(payload)[:5]})")
+            raise ExotelDialError("no Call object in the response", body=body)
 
         sid = _between(body, "<Sid>", "</Sid>")
         if sid:
             return {"Sid": sid, "Status": _between(body, "<Status>", "</Status>")}
-        raise ExotelDialError("response contained no call identifier")
+        raise ExotelDialError("response contained no call identifier", body=body)
 
     # ------------------------------------------------------------------
     # Control plane
@@ -198,25 +253,25 @@ class ExotelProvider:
         from app.core.settings import MAX_CALL_SECONDS
 
         payload = {
-            # `from` is the number being DIALLED. See the module docstring.
-            "from": to_number,
-            # `callerid` is our ExoPhone, i.e. Twilio's `from_`.
-            "callerid": self._caller_id,
-            "streamurl": stream_url,
-            "streamtype": "bidirectional",
-            "statuscallback": status_callback_url,
-            "statuscallbackevents[]": "terminal",
+            # `From` is the number being DIALLED. See the module docstring.
+            FIELD_TO_DIAL: to_number,
+            # `CallerId` is our ExoPhone, i.e. Twilio's `from_`.
+            FIELD_CALLER_ID: self._caller_id,
+            FIELD_STREAM_URL: stream_url,
+            FIELD_STREAM_TYPE: "bidirectional",
+            FIELD_STATUS_CALLBACK: status_callback_url,
+            FIELD_STATUS_CALLBACK_EVENTS: "terminal",
             # Exotel caps this at 14400 seconds.
-            "timelimit": str(min(max(int(MAX_CALL_SECONDS), 1), 14400)),
+            FIELD_TIME_LIMIT: str(min(max(int(MAX_CALL_SECONDS), 1), 14400)),
         }
-        call = await self._request("POST", f"{self._base}/calls/connect", payload)
+        call = await self._request("POST", f"{self._base}{CONNECT_PATH}", payload)
         sid = call.get("Sid") or call.get("sid")
         status = call.get("Status") or call.get("status")
         logger.info("exotel_call_placed", extra={"call_id": call_id, "bound": bool(sid)})
         return DialResult(str(sid) if sid else None, normalize_status(status) if status else None)
 
     async def fetch_status(self, provider_sid: str) -> str:
-        call = await self._request("GET", f"{self._base}/calls/{provider_sid}")
+        call = await self._request("GET", f"{self._base}{CALLS_PATH}/{provider_sid}")
         return normalize_status(call.get("Status") or call.get("status"))
 
     async def request_terminal(self, provider_sid: str, requested: str) -> None:
@@ -226,13 +281,39 @@ class ExotelProvider:
         status update, so `requested` records intent for the caller's log but
         does not change the request -- there is only one way to end a call.
         """
-        await self._request("DELETE", f"{self._base}/calls/{provider_sid}")
+        await self._request("DELETE", f"{self._base}{CALLS_PATH}/{provider_sid}")
 
     def terminal_request_for(self, status: str) -> str:
         return terminal_request_for(status, EXOTEL_PRE_ANSWER)
 
     def classify_dial_error(self, error: Exception) -> DialErrorKind:
         return classify_exotel_error(error)
+
+    def describe_dial_error(self, error: Exception) -> str:
+        """What actually went wrong, in a form an operator can act on.
+
+        Without this every Exotel failure lands on the call row as
+        `HTTPStatusError` -- a wrong ExoPhone, an unenabled AgentStream
+        account, a malformed StreamUrl and an upstream outage all look
+        identical, and none can be diagnosed without going to the Exotel
+        console with nothing to search for.
+
+        Exotel puts the useful part in the response body, so the body is what
+        is captured, scrubbed and truncated. Everything is passed through
+        `scrub()` with this provider's own credentials: the body may echo the
+        request, which contains our `StreamUrl` -- and that carries a live
+        media token.
+        """
+        secrets = (self.api_token, self.api_key)
+        if isinstance(error, httpx.HTTPStatusError):
+            body = scrub(error.response.text, secrets)
+            status = error.response.status_code
+            return scrub(f"HTTP {status} from Exotel: {body}" if body else f"HTTP {status} from Exotel", secrets)
+        if isinstance(error, ExotelDialError):
+            body = scrub(error.body, secrets)
+            reason = scrub(str(error), secrets)
+            return scrub(f"Exotel 200 but {reason}: {body}" if body else f"Exotel 200 but {reason}", secrets)
+        return describe_error(error, secrets)
 
     # ------------------------------------------------------------------
     # Configuration reporting (settings UI)
