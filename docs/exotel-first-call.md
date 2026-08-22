@@ -13,7 +13,7 @@ Set these alongside the existing Twilio and Deepgram variables:
 EXOTEL_ACCOUNT_SID=...            # Exotel console -> API settings
 EXOTEL_API_KEY=...                # Basic-auth username
 EXOTEL_API_TOKEN=...              # Basic-auth password
-EXOTEL_SUBDOMAIN=api.in.exotel.com   # Mumbai; api.exotel.com for Singapore
+EXOTEL_SUBDOMAIN=api.exotel.com   # Singapore (default); api.in.exotel.com for Mumbai
 EXOTEL_CALLER_ID=+91XXXXXXXXXX    # your ExoPhone, E.164
 ```
 

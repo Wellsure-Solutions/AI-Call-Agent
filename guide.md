@@ -46,7 +46,7 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `EXOTEL_ACCOUNT_SID` | Yes for Exotel calls | Exotel account SID | from the Exotel console; no default | Yes |
 | `EXOTEL_API_KEY` | Yes for Exotel calls | REST Basic-auth username | from the Exotel console; no default | Yes |
 | `EXOTEL_API_TOKEN` | Yes for Exotel calls | REST Basic-auth password | from the Exotel console; no default | Yes |
-| `EXOTEL_SUBDOMAIN` | No | Exotel API region | `api.in.exotel.com` (Mumbai); `api.exotel.com` for Singapore | No |
+| `EXOTEL_SUBDOMAIN` | No | Exotel API cluster. Per-account, not a preference: the wrong one 404s | `api.exotel.com` (Singapore); `api.in.exotel.com` for Mumbai | No |
 | `EXOTEL_CALLER_ID` | Yes for Exotel calls | The +91 ExoPhone shown to the customer. **This is Exotel's `CallerId`, not its `From`** | E.164; no default | No |
 | `EXOTEL_SEND_CHUNK_BYTES` | No | Outbound PCM bytes per websocket message; always rounded to a multiple of 320 | `3200` | No |
 | `EXOTEL_CALLBACK_ALLOWED_IPS` | No | Comma-separated IP allowlist for Exotel status callbacks; empty disables the check | unset (disabled) | No |
@@ -146,8 +146,9 @@ the path for international destinations; Exotel is the path for +91.
 ### Credentials
 
 Take the account SID, API key and API token from the Exotel console's API settings, and set
-`EXOTEL_CALLER_ID` to your ExoPhone in E.164. `EXOTEL_SUBDOMAIN` selects the region and defaults to
-Mumbai. Ask Exotel support to enable AgentStream (voice streaming) on the account; it is not on by
+`EXOTEL_CALLER_ID` to your ExoPhone in E.164. `EXOTEL_SUBDOMAIN` selects the cluster and defaults to
+Singapore (`api.exotel.com`); Mumbai accounts need `api.in.exotel.com`. This is a property of the
+account, not a choice — the wrong cluster returns 404 on every request. Ask Exotel support to enable AgentStream (voice streaming) on the account; it is not on by
 default.
 
 **`EXOTEL_CALLER_ID` is Exotel's `CallerId`, not its `From`.** On

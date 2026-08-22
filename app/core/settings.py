@@ -144,10 +144,13 @@ TWILIO_FRAME_MS = int(_env("TWILIO_FRAME_MS", "20"))
 EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID", "")
 EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY", "")
 EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN", "")
+# Which Exotel cluster the account lives on. This is per-account, not a
+# preference: an account provisioned on one cluster returns 404 on the other.
+# `api.exotel.com` is Singapore, `api.in.exotel.com` is Mumbai.
 EXOTEL_SUBDOMAIN = _env("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
-# The ExoPhone, E.164. Note this is Exotel's `callerid`, NOT its `from`:
-# on /calls/connect, `from` is the number being *dialled*. Twilio's to/from do
+# The ExoPhone, E.164. Note this is Exotel's `CallerId`, NOT its `From`:
+# on /Calls/connect, `From` is the number being *dialled*. Twilio's to/from do
 # not map across directly and getting it backwards dials your own ExoPhone.
 EXOTEL_CALLER_ID = os.getenv("EXOTEL_CALLER_ID", "")
 
