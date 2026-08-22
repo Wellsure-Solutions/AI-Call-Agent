@@ -465,7 +465,7 @@ DEEPGRAM_SPEAK_LANGUAGE = os.getenv(
 
 DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
-    "नमस्ते सर, मैं श्रुति बोल रही हूं, Amazon India se| kya meri baat {Business Name} se ho rhi hai।",
+    "Hello Sir.",
 )
 
 DEEPGRAM_FALLBACK_CLOSING = os.getenv(
