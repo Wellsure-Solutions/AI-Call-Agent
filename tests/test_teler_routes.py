@@ -14,8 +14,10 @@ Three endpoints, three different things being proved:
     that `stream.completed` does not imply `call.completed`.
 
   * `/teler/media-stream` correlates in two halves -- token and database --
-    like Exotel's, except Teler's token can cover the carrier's call id
-    because the flow route already knew one.
+    exactly like Exotel's. The token was originally checked against the id in
+    the start message, on the reasoning that the flow route already knew one;
+    a real call proved Teler names the call differently on that socket than
+    anywhere else, so it is checked against the call row instead.
 """
 
 import hashlib
@@ -442,32 +444,60 @@ def test_our_own_token_is_still_required_when_the_signature_is_valid(client, sto
 # ---------------------------------------------------------------------------
 # Media-stream correlation: token plus database, both required
 # ---------------------------------------------------------------------------
-def start_message(sid: str) -> dict:
+# Teler names the same call differently on the media socket than on its REST
+# and webhook surfaces. Both of these came off one real call:
+#
+#   REST / flow / webhooks : 1b3faa9c-4383-4d87-9571-bd51751950cb
+#   media socket start     : cs_5NGFF35W81ACMAH2PEVCQVCQ93
+#
+# The fixtures below keep them deliberately unrelated, because a fixture that
+# used one value for both would pass whether or not the route still compared
+# them -- which is the bug that took a live call to find.
+REST_ID = "1b3faa9c-4383-4d87-9571-bd51751950cb"
+MEDIA_ID = "cs_5NGFF35W81ACMAH2PEVCQVCQ93"
+
+
+def start_message(media_call_id: str = MEDIA_ID) -> dict:
+    """A real Teler start message, verbatim apart from the ids."""
     return {
         "type": "start",
-        "account_id": "acc_01H8ZXK9M2P7Q3R4S5T6V7W8XY",
-        "call_app_id": "va_01H8ZXK9M2P7Q3R4S5T6V7W8XY",
-        "call_id": sid,
-        "stream_id": "ms_01H8ZXK9M2P7Q3R4S5T6V7W8XY",
+        "account_id": "acc_21VB4C0NP18X3RCX8EVA0B0F1M",
+        "call_app_id": "va_2YYAYTG2F698FA76FNM12Z0RZ4",
+        "call_id": media_call_id,
+        "stream_id": "ms_0VCX9M023M8GYA4RJARK06QJPF",
         "message_id": 1,
         "data": {"encoding": "audio/l16", "sample_rate": 8000, "channels": 1},
     }
 
 
-def connect_media(client: TestClient, call_id: str, sid: str,
-                  token: str | None = None, ttl: int = 300) -> bool:
-    """Returns whether the socket survived the correlation handshake."""
-    from starlette.websockets import WebSocketDisconnect
-
+def _media_query(call_id: str, sid: str, token: str | None, ttl: int) -> dict[str, str]:
     expiry = int(time.time()) + ttl
-    query = {
+    return {
         "call_id": call_id,
         "expiry": str(expiry),
         "token": teler_stream_token(call_id, sid, expiry) if token is None else token,
     }
+
+
+def connect_media(client: TestClient, call_id: str, sid: str,
+                  token: str | None = None, ttl: int = 300,
+                  media_call_id: str = MEDIA_ID) -> bool:
+    """Returns whether the socket survived the correlation handshake.
+
+    Only meaningful for the refusal cases: a stream that correlates keeps the
+    socket open for the life of the call and sends nothing, so waiting for a
+    message would block forever by design. Use `open_media` for those.
+
+    `sid` is the id on the call row -- what the flow route bound and what the
+    token is minted over. `media_call_id` is the unrelated id the start
+    message announces.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    query = _media_query(call_id, sid, token, ttl)
     try:
         with client.websocket_connect("/teler/media-stream", params=query) as socket:
-            socket.send_json(start_message(sid))
+            socket.send_json(start_message(media_call_id))
             try:
                 socket.receive_json()
             except WebSocketDisconnect:
@@ -477,45 +507,164 @@ def connect_media(client: TestClient, call_id: str, sid: str,
         return False
 
 
-def test_a_correctly_correlated_stream_passes_the_handshake(client, store):
-    """Positive control. Without it, every rejection test below could pass
-    because the helper always reports refusal."""
-    call_id = teler_call(store, "+919000004000", "cs_M0")
+def open_media(client: TestClient, call_id: str, sid: str, settled,
+               token: str | None = None, ttl: int = 300,
+               media_call_id: str = MEDIA_ID) -> None:
+    """Open the socket, send start, and wait for the handler to get going.
 
-    connect_media(client, call_id, "cs_M0")
+    The success path is asserted against the database and the spy rather than
+    against anything on the wire, because a correlated stream produces nothing
+    on the wire until the agent speaks -- so there is no message to wait on,
+    and leaving the socket open forever is what production does.
+
+    `settled` is polled instead: the app runs on its own thread, so closing the
+    socket the instant after `send_json` races the handler and the assertions
+    see nothing. Bounded so a genuine failure fails the test rather than
+    hanging it.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    query = _media_query(call_id, sid, token, ttl)
+    try:
+        with client.websocket_connect("/teler/media-stream", params=query) as socket:
+            socket.send_json(start_message(media_call_id))
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not settled():
+                time.sleep(0.01)
+    except WebSocketDisconnect:
+        pass
+
+
+@pytest.fixture()
+def spy_adapter(monkeypatch) -> dict:
+    """Stand in for the media plane on the paths where correlation succeeds.
+
+    Both stubs are needed and neither is under test here. The real adapter
+    blocks on the socket for the life of the call, and the real AudioBridge's
+    `stop()` drives the conversation engine, which reaches for Deepgram. A
+    test that gets past correlation hangs on both -- which is itself proof the
+    correlation fix works, but not a usable test.
+    """
+    captured: dict = {}
+
+    class SpyBridge:
+        def __init__(self, session, *_args, **_kwargs):
+            self.session = session
+
+        async def stop(self, status: str = "completed") -> None:
+            captured["bridge_stop"] = status
+
+    class SpyAdapter:
+        def __init__(self, *_args, **_kwargs):
+            self.pending_greeting = None
+            self.call_sid = None
+            self.stream_sid = None
+            self.websocket = None
+
+        def attach(self, session):
+            captured["session"] = session
+
+        async def start(self):
+            captured["call_sid"] = self.call_sid
+            captured["stream_sid"] = self.stream_sid
+
+    monkeypatch.setattr(teler_routes, "AudioBridge", SpyBridge)
+    monkeypatch.setattr(teler_routes, "TelerAdapter", SpyAdapter)
+    return captured
+
+
+def test_a_stream_correlates_even_though_the_start_message_names_the_call_differently(
+    client, store, spy_adapter
+):
+    """The regression that broke every live call.
+
+    The route used to take the carrier id from the start message and validate
+    the token against it. Teler announces a `cs_`-prefixed id there and a raw
+    UUID everywhere else, so the token never matched, the socket closed 1008,
+    and the customer heard silence until Teler hung up.
+    """
+    call_id = teler_call(store, "+919000004000", REST_ID)
+
+    open_media(client, call_id, REST_ID, settled=lambda: "call_sid" in spy_adapter)
 
     claimed = store.get_call(call_id)
     assert claimed["media_owner"] is not None, "correlation should have claimed the media"
     assert claimed["media_connected"] == 1
+    assert claimed["call_sid"] == REST_ID, "the media id must never overwrite the REST one"
 
 
-def test_a_stream_whose_call_id_does_not_match_the_bound_call_is_refused(client, store):
-    call_id = teler_call(store, "+919000004001", "cs_M1")
+def test_the_adapter_is_given_the_rest_id_not_the_media_id(client, store, spy_adapter):
+    """The hangup is a REST call, so it takes the REST id. Handing the adapter
+    the media-plane id would 404 every agent-initiated hangup and leave the
+    call running to its maximum-duration deadline."""
+    call_id = teler_call(store, "+919000004009", REST_ID)
 
-    assert not connect_media(client, call_id, "cs_SOMEONE_ELSE")
-    assert store.get_call(call_id)["media_owner"] is None
+    open_media(client, call_id, REST_ID, settled=lambda: "call_sid" in spy_adapter)
+
+    assert spy_adapter["call_sid"] == REST_ID
+    assert spy_adapter["call_sid"] != MEDIA_ID
+    # The stream handle is the media plane's own, which is what it is for.
+    assert spy_adapter["stream_sid"] == "ms_0VCX9M023M8GYA4RJARK06QJPF"
+
+
+def test_both_identifiers_are_recorded_on_the_session(client, store, spy_adapter):
+    """The media id appears nowhere else, so it has to be kept here to be
+    quotable when raising a stream problem with FreJun."""
+    call_id = teler_call(store, "+919000004013", REST_ID)
+
+    open_media(client, call_id, REST_ID, settled=lambda: "session" in spy_adapter)
+
+    metadata = spy_adapter["session"].metadata
+    assert metadata["call_sid"] == REST_ID
+    assert metadata["teler_media_call_id"] == MEDIA_ID
 
 
 def test_a_stream_with_a_forged_token_is_refused(client, store):
     call_id = teler_call(store, "+919000004002", "cs_M2")
 
     assert not connect_media(client, call_id, "cs_M2", token="0" * 64)
+    assert store.get_call(call_id)["media_owner"] is None
 
 
-def test_a_token_minted_for_a_different_carrier_id_does_not_validate(client, store):
-    """Teler's token covers the carrier's call id, unlike Exotel's. A replayed
-    URL from another call must not bind this one's audio."""
-    call_id = teler_call(store, "+919000004003", "cs_M3")
+def test_a_token_minted_for_a_different_call_does_not_validate(client, store):
+    """A replayed URL from another call must not bind this one's audio."""
+    mine = teler_call(store, "+919000004003", "cs_M3")
+    theirs = teler_call(store, "+919000004010", "cs_M3b")
     expiry = int(time.time()) + 300
-    wrong = teler_stream_token(call_id, "cs_OTHER", expiry)
 
-    assert not connect_media(client, call_id, "cs_M3", token=wrong)
+    assert not connect_media(client, mine, "cs_M3",
+                             token=teler_stream_token(theirs, "cs_M3b", expiry))
+    assert store.get_call(mine)["media_owner"] is None
+
+
+def test_a_token_minted_for_a_different_bound_id_does_not_validate(client, store):
+    """The token still covers the id on the call row, so a token minted before
+    a re-bind cannot be used after it."""
+    call_id = teler_call(store, "+919000004011", "cs_M3c")
+    expiry = int(time.time()) + 300
+    wrong = teler_stream_token(call_id, "cs_SOMETHING_ELSE", expiry)
+
+    assert not connect_media(client, call_id, "cs_M3c", token=wrong)
 
 
 def test_an_expired_stream_token_is_refused(client, store):
     call_id = teler_call(store, "+919000004004", "cs_M4")
 
     assert not connect_media(client, call_id, "cs_M4", ttl=-1)
+
+
+def test_a_stream_for_a_call_with_no_bound_id_is_refused(client, store):
+    """The flow route binds the id. Without it there is nothing to validate the
+    token against, so the stream cannot be trusted."""
+    call_id = store.enqueue_call(phone_number="+919000004012", provider="teler")["call_id"]
+    store.claim_job("owner", 10)
+
+    assert not connect_media(client, call_id, "cs_M9")
+    assert store.get_call(call_id)["media_owner"] is None
+
+
+def test_a_stream_for_an_unknown_call_is_refused(client, store):
+    assert not connect_media(client, "no-such-call", "cs_M10")
 
 
 def test_a_stream_for_a_call_on_another_provider_is_refused(client, store):

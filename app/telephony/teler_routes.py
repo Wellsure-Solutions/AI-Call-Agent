@@ -419,9 +419,15 @@ async def teler_media_stream(websocket: WebSocket):
 
     The query string is read from the handshake rather than from inside the
     stream, which is where it differs from Exotel: Teler's start message
-    carries no echo of the URL's parameters. The carrier's own belief about
-    what it is streaming is still checked -- that is the `call_id` inside the
-    start message, compared against the id the token covers.
+    carries no echo of the URL's parameters.
+
+    What the start message says about *which call this is* is deliberately not
+    used. Teler names the same call differently on this socket than on every
+    other surface -- see the comment on the `known` lookup below -- so
+    comparing them rejects every stream. The correlation is therefore Exotel's
+    shape, not Twilio's: the token proves the URL is ours, unexpired and
+    minted against the id we bound, and the database proves ownership. Both
+    still required, neither sufficient.
     """
     await websocket.accept()
     # Bound before the try so the TEMPORARY failure logging below cannot raise
@@ -437,6 +443,11 @@ async def teler_media_stream(websocket: WebSocket):
 
         _debug_handshake(call_id, expiry, token)
 
+        # Cheap rejection before touching the database, so an unsigned or
+        # long-expired URL costs nothing to refuse.
+        if not token or expiry < int(time.time()):
+            raise ValueError("missing or expired stream token")
+
         start = None
         for attempt in range(3):
             raw = await asyncio.wait_for(websocket.receive_text(), 5)
@@ -448,18 +459,36 @@ async def teler_media_stream(websocket: WebSocket):
         if not start:
             raise ValueError("missing start message")
 
-        sid = str(start.get("call_id") or "")
-        if not sid or not valid_teler_stream_token(call_id, sid, expiry, token):
-            raise ValueError("invalid stream token")
-
-        # Half two: the id must already be bound to this call, by the flow
-        # request that created this URL in the first place.
+        # The carrier id comes from the call row, never from the start
+        # message, because Teler names the same call differently here than
+        # anywhere else. Confirmed on a real call: the dial response, the flow
+        # request and every status webhook agreed on
+        # `1b3faa9c-4383-4d87-9571-bd51751950cb`, while the start message on
+        # the media socket announced `cs_5NGFF35W81ACMAH2PEVCQVCQ93`. Those are
+        # two identifier spaces for one call and there is no local mapping
+        # between them -- FreJun's versioning reference says the media-
+        # streaming protocol is "unaffected by this pin", so it is on the
+        # prefixed scheme whatever the Voice App's webhook version is.
         known = await _repo().aget_call(call_id)
-        if not known or known.get("call_sid") != sid:
-            raise ValueError("stream does not match the call's bound provider id")
+        sid = str((known or {}).get("call_sid") or "")
+        if not known or not sid:
+            raise ValueError("unknown or unbound call")
+
+        # The token still proves everything it proved before: that this URL was
+        # minted by us, for this call_id, against the carrier id the flow route
+        # bound, and that it has not expired. What changed is only that the sid
+        # it is checked against comes from our own row instead of from the
+        # peer. That is not a weakening -- the peer supplied that value, so it
+        # could always choose which pair to be checked against, and it still
+        # cannot produce a token for any pair without STREAM_SECRET.
+        if not valid_teler_stream_token(call_id, sid, expiry, token):
+            raise ValueError("invalid stream token")
         if known.get("provider") != "teler":
             raise ValueError("call was not placed on Teler")
 
+        # Half two is unchanged and still required: `claim_media` re-checks the
+        # sid inside a conditional UPDATE that also enforces single ownership
+        # and refuses a terminal call.
         call = await _repo().aclaim_media(call_id, sid, str(uuid4()))
         if not call:
             raise ValueError("terminal, unknown, or already-owned call")
@@ -481,7 +510,13 @@ async def teler_media_stream(websocket: WebSocket):
             "category": call.get("category"),
             "notes": call.get("notes"),
             "phone_number": call.get("phone_number"),
+            # The REST/webhook id. This is the one every control-plane call
+            # takes -- notably the hangup, which 404s on the media-plane id.
             "call_sid": sid,
+            # The media plane's own name for the same call, recorded because
+            # it is the only id that appears on this socket and so the only
+            # one to quote when raising a stream problem with FreJun.
+            "teler_media_call_id": str(start.get("call_id") or ""),
             "media_connected": True,
         },
     )

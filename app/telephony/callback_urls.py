@@ -156,11 +156,25 @@ def valid_teler_flow_token(call_id: str, expiry: int, token: str) -> bool:
 def teler_stream_token(call_id: str, teler_call_id: str, expiry: int) -> str:
     """HMAC over (call_id, Teler's call id, expiry).
 
-    Unlike Exotel's, this *can* cover the carrier's identifier: it is minted in
-    the flow route, which Teler only reaches after the call exists and which
-    receives the id in its request body. So Teler gets Twilio's stronger token
-    rather than Exotel's weaker one, and the media route's database check is
-    reinforcement rather than the only thing binding the stream to the call.
+    Unlike Exotel's, this *can* cover a carrier identifier: it is minted in the
+    flow route, which Teler only reaches after the call exists and which
+    receives the id in its request body.
+
+    But it covers the id Teler uses on its REST and webhook surfaces, which is
+    **not** the id Teler uses on the media socket. Confirmed on a real call:
+    the dial, the flow request and every status webhook said
+    `1b3faa9c-4383-4d87-9571-bd51751950cb`; the media socket's start message
+    said `cs_5NGFF35W81ACMAH2PEVCQVCQ93`. FreJun's versioning reference is
+    explicit that the media-streaming protocol is "unaffected by this pin",
+    so it stays on the prefixed identifier scheme whatever the Voice App's
+    webhook version is, and there is no local mapping between the two.
+
+    So the media route validates this against the id on the *call row*, not
+    against the id the start message claims. In practice that puts Teler's
+    correlation at Exotel's strength rather than Twilio's: this token proves
+    the URL is ours, unexpired, and minted for this call; `claim_media` proves
+    ownership. Do not "restore" the start-message comparison -- it rejects
+    every stream.
     """
     if not STREAM_SECRET:
         return ""

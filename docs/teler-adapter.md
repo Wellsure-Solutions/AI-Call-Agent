@@ -1,8 +1,8 @@
 # FreJun Teler as a third telephony provider — design note
 
-**Status: implemented; wire format pinned from published sources, not from a packet capture.**
-§5 lists what remains unverified and exactly which test to change when a real call confirms or
-contradicts it. Read §5 before the first production call.
+**Status: implemented; control plane and correlation confirmed against a real call (2026-08-29),
+media framing still pinned from published sources rather than a packet capture.** §5 separates what
+a live call has now confirmed from what is still inferred, and names the test to change for each.
 
 Scope: add Teler alongside Twilio and Exotel as a third implementation of the existing
 `TelephonyProvider` protocol and `StreamingMediaAdapter` base class. No new abstraction. Twilio and
@@ -124,22 +124,49 @@ compared in constant time against a digest of the same secret.
 
 ---
 
-## 3. Correlation
+## 3. Correlation, and the identifier split that decides its shape
 
-Teler is Twilio-shaped, so the stream token is the *stronger* Twilio kind, not the weaker Exotel
-kind. The flow route runs after the call exists and receives Teler's `call_id` in its body, so the
-token covers it:
+**Teler names the same call two different ways, and this cost a live call to find.** From a real
+call, all four identifiers for one conversation:
 
-| | Token covers | Second half |
-|---|---|---|
-| Twilio | call_id, CallSid, expiry | `claim_media` conditional UPDATE |
-| Exotel | call_id, expiry (no SID — none exists at mint time) | start event's `call_sid` vs the bound SID, then `claim_media` |
-| Teler | call_id, Teler's call_id, expiry | start message's `call_id` vs the bound id, then `claim_media` |
+| Surface | Identifier |
+|---|---|
+| Dial response `data.id` | `1b3faa9c-4383-4d87-9571-bd51751950cb` |
+| Flow request `call_id` | `1b3faa9c-…` (same) |
+| Status webhooks `data.call_id` | `1b3faa9c-…` (same) |
+| **Media socket `start.call_id`** | **`cs_5NGFF35W81ACMAH2PEVCQVCQ93`** |
 
-Both halves are still required and neither may be collapsed into the other. The one structural
-difference from Exotel: Teler's start message carries no echo of the URL's query parameters, so the
-token is read from the handshake URL. What the carrier believes it is streaming is still checked —
-that is the `call_id` inside the start message, compared against the id the token covers.
+The account is pinned to webhook version `2025-08-01`, which uses raw UUIDs, and the REST API
+follows it. The media socket does not: FreJun's versioning reference states that "the
+media-streaming WebSocket protocol is unaffected by this pin", so it is on the prefixed
+`acc_`/`va_`/`cs_`/`ms_` scheme regardless. **There is no local mapping between the two**, and the
+media id appears on no other surface.
+
+Consequences, both load-bearing:
+
+* The stream token is minted at flow time over the REST id, so it must be validated against the id
+  on the **call row**, never against the id the start message announces. Validating against the
+  start message rejects every stream: the socket closes 1008, the customer hears silence, and Teler
+  hangs up after a few seconds. That was the observed failure.
+
+* The adapter must be given the **REST** id, because `request_terminal` is a REST call
+  (`POST /voice/calls/{id}/hangup`). Handing it the media id would 404 every agent-initiated hangup
+  and leave the call running to its maximum-duration deadline.
+
+So Teler's correlation ends up at Exotel's strength, not Twilio's:
+
+| | Token covers | Checked against | Second half |
+|---|---|---|---|
+| Twilio | call_id, CallSid, expiry | the CallSid in the start event | `claim_media` conditional UPDATE |
+| Exotel | call_id, expiry (no SID exists at mint time) | the call row | start event's `call_sid` vs the bound SID, then `claim_media` |
+| Teler | call_id, REST call id, expiry | the call row | `claim_media` conditional UPDATE |
+
+Both halves are still required and neither may be collapsed into the other. Moving the token check
+from the peer's claim to our own row is not a weakening — the peer supplied that value, so it could
+always choose which pair it was checked against, and it still cannot produce a token for any pair
+without `STREAM_SECRET`. The media id is recorded on the session as `teler_media_call_id`, because
+it is the only id that appears on that socket and therefore the only one worth quoting to FreJun
+about a stream problem.
 
 The flow route *binds* the id rather than only comparing it, exactly as `/twilio/twiml` does.
 `bind_call_sid` accepts a row whose `call_sid` is NULL or already equal, so it is idempotent against
@@ -175,12 +202,19 @@ The first real call should confirm each row; the named test is the one to change
 |---|---|---|
 | Inbound `{"type":"audio","data":{"audio_b64":…}}` | message reference + both bridges | `test_inbound_audio_is_read_from_the_nested_data_object` |
 | Outbound `{"type":"audio","audio_b64":…,"chunk_id":N}` | same | `test_outbound_audio_is_type_audio_with_a_top_level_payload_and_chunk_id` |
-| `start` carries `call_id` and `stream_id` at the top level | message reference | `test_the_start_message_declares_the_encoding_this_adapter_assumes` |
 | PCM S16LE mono 8 kHz (`audio/l16`) | `start` message + wav-bridge ffmpeg args | `test_audio_is_transcoded_to_linear_pcm_on_the_way_out` |
 | `clear` carries no stream identifier | message reference | `test_clear_is_a_bare_type_clear_with_no_stream_identifier` |
-| Dial returns `data.id` with a `cs_` prefix | OpenAPI + SDK | `test_the_call_id_is_read_from_data_id` |
-| Status webhook version pinned per Voice App | versioning reference | `test_the_older_flat_payload_version_is_understood_too` |
 | Signature digest encoding (hex *or* base64 accepted) | algorithm documented, encoding not | `test_a_validly_signed_callback_is_accepted_in_either_digest_encoding` |
+
+**Confirmed on a real call** (2026-08-29), no longer assumptions:
+
+| Fact | Where it showed up |
+|---|---|
+| `start` carries `call_id` and `stream_id` at the top level, `acc_`/`va_`/`cs_`/`ms_` prefixed | `test_a_stream_correlates_even_though_the_start_message_names_the_call_differently` |
+| Dial returns `data.id`, in the **webhook version's** id format — a raw UUID on `2025-08-01`, *not* `cs_`-prefixed as the OpenAPI describes | same |
+| The media socket's `call_id` is a different identifier from every other surface's | §3, and the adapter/session tests beside it |
+| Status webhooks arrive on the flat `2025-08-01` shape, with no `X-Teler-Api-Version` header | `test_the_older_flat_payload_version_is_understood_too` |
+| The flow request's `call_id` matches the dial response's `id` | `test_a_correctly_signed_flow_request_returns_a_stream_action` |
 
 Two things to watch specifically on the first call, because neither is documented and both degrade
 quietly rather than failing:

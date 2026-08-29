@@ -231,6 +231,32 @@ def test_a_202_with_no_call_id_is_ambiguous_rather_than_a_failure():
     assert built.classify_dial_error(raised.value) == "ambiguous"
 
 
+def test_the_dial_id_is_read_whatever_format_it_arrives_in():
+    """Observed on a real call: the OpenAPI describes `data.id` as `cs_`-
+    prefixed, but an account pinned to webhook version 2025-08-01 gets a raw
+    UUID here -- the REST surface follows the pin even though the document
+    does not say so. Nothing may depend on the shape of this string.
+    """
+    observed = {
+        "message": "Call initiated successfully",
+        "data": {
+            "id": "1b3faa9c-4383-4d87-9571-bd51751950cb",
+            "from_number": "+918065177514",
+            "to_number": "+919352596681",
+            "status_callback_url": "https://example.invalid/teler/status/x",
+            "record": False,
+        },
+    }
+    built, _ = provider(lambda _r: httpx.Response(202, json=observed))
+
+    result = asyncio.run(built.dial(
+        call_id="c", to_number=TO_NUMBER, ring_timeout=45,
+        stream_url="", status_callback_url="https://x/z",
+    ))
+
+    assert result.provider_sid == "1b3faa9c-4383-4d87-9571-bd51751950cb"
+
+
 def test_the_status_is_read_from_state_on_retrieve():
     """CallSessionResponse says `state`; the SDK's own dataclass says `status`.
     Both are read, because only one of them is the documented API."""
