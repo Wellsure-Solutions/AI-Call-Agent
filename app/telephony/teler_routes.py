@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -91,6 +92,79 @@ def _repo() -> SQLiteCallStore:
     if _store is None:
         raise RuntimeError("Teler repository is not configured")
     return _store
+
+
+# ===========================================================================
+# TEMPORARY DEBUG INSTRUMENTATION -- remove once the wire format is confirmed.
+#
+# Everything between this banner and the matching one below exists to capture
+# one real Teler call, because the adapter's message format was pinned from
+# FreJun's published sources rather than from a packet capture (see
+# docs/teler-adapter.md §5). Delete this block and its three call sites in
+# `teler_media_stream` when that is done.
+#
+# Two deliberate departures from this codebase's logging style, both required
+# for the output to exist at all:
+#
+#   * `warning`, not `info`. Nothing in this repo configures logging, so under
+#     uvicorn's default config the root logger has no handler and app loggers
+#     fall through to `logging.lastResort` -- a stderr handler fixed at
+#     WARNING. Every `logger.info(...)` in this package is currently invisible
+#     in production. That is worth fixing properly with a logging config; it
+#     is not worth discovering during the one test call this exists for.
+#
+#   * The payload is inline in the message, not in `extra={...}`. The same
+#     lastResort handler formats with `%(message)s`, so `extra` fields are
+#     dropped entirely. An `extra`-based version of this logs the event name
+#     and none of the data.
+# ===========================================================================
+
+# Enough of a message to see its structure and key names; a 400ms audio chunk
+# base64s to ~10KB and there is nothing to learn from the tail of it. The full
+# length is always reported, so truncation is never silent.
+_RAW_LOG_LIMIT = 2000
+
+
+def _debug_handshake(call_id: str, expiry: int, token: str) -> None:
+    """The query string Teler connected with, minus the token's value.
+
+    The token is a live media HMAC; its length and presence answer "did Teler
+    send one back", which is the diagnostic question, and its value would put
+    a working credential in the log. Whether the expiry has already passed is
+    reported because a stream token outliving ring time is one of the two most
+    likely causes of a 1008 here.
+    """
+    now = int(time.time())
+    logger.warning(
+        "TELER_DEBUG handshake call_id=%r expiry=%s now=%s expired=%s "
+        "token_present=%s token_len=%s",
+        call_id, expiry, now, expiry < now, bool(token), len(token),
+    )
+
+
+def _debug_raw(attempt: int, raw: str) -> None:
+    """One message exactly as it arrived, before json.loads or any check."""
+    body = raw if len(raw) <= _RAW_LOG_LIMIT else raw[:_RAW_LOG_LIMIT] + "...<truncated>"
+    logger.warning(
+        "TELER_DEBUG inbound attempt=%s len=%s raw=%s", attempt, len(raw), body
+    )
+
+
+def _debug_correlation_failure(call_id: str, exc: BaseException) -> None:
+    """Why the socket was closed 1008, instead of swallowing it silently.
+
+    The five correlation failures each raise a distinct ValueError message, so
+    the exception text alone says which half of the check rejected the stream.
+    A timeout or disconnect from `receive_text` lands here too.
+    """
+    logger.warning(
+        "TELER_DEBUG correlation_failed call_id=%r %s: %s",
+        call_id, type(exc).__name__, exc,
+        exc_info=exc,
+    )
+
+
+# =========================== END TEMPORARY DEBUG ===========================
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +356,9 @@ async def teler_media_stream(websocket: WebSocket):
     start message, compared against the id the token covers.
     """
     await websocket.accept()
+    # Bound before the try so the TEMPORARY failure logging below cannot raise
+    # UnboundLocalError and skip the close(1008). Reassigned immediately.
+    call_id = ""
     try:
         call_id = str(websocket.query_params.get("call_id") or "")
         try:
@@ -290,9 +367,13 @@ async def teler_media_stream(websocket: WebSocket):
             expiry = 0
         token = str(websocket.query_params.get("token") or "")
 
+        _debug_handshake(call_id, expiry, token)
+
         start = None
-        for _ in range(3):
-            msg = json.loads(await asyncio.wait_for(websocket.receive_text(), 5))
+        for attempt in range(3):
+            raw = await asyncio.wait_for(websocket.receive_text(), 5)
+            _debug_raw(attempt, raw)
+            msg = json.loads(raw)
             if msg.get("type") == "start":
                 start = msg
                 break
@@ -314,7 +395,8 @@ async def teler_media_stream(websocket: WebSocket):
         call = await _repo().aclaim_media(call_id, sid, str(uuid4()))
         if not call:
             raise ValueError("terminal, unknown, or already-owned call")
-    except Exception:
+    except Exception as exc:
+        _debug_correlation_failure(call_id, exc)
         await websocket.close(code=1008)
         return
 
