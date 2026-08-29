@@ -150,6 +150,32 @@ def _debug_raw(attempt: int, raw: str) -> None:
     )
 
 
+def _debug_status(call_id: str, raw_body: bytes, headers: Any) -> None:
+    """Teler's status webhook, raw, plus the headers that identify the pin.
+
+    Logged *before* the token check on purpose: a callback we reject is
+    exactly the one worth seeing, and right now this is the only Teler traffic
+    reaching the server at all, so it is the only evidence available about
+    what Teler thinks is happening to the call.
+
+    `X-Teler-Api-Version` is present only on 2026-06-01, so its absence
+    confirms the pin without anyone reading the dashboard -- and the event
+    name and the `call_id` format in the body say whether the identifier split
+    between Teler's versioned and unversioned surfaces is real.
+    """
+    body = raw_body.decode("utf-8", "replace")
+    if len(body) > _RAW_LOG_LIMIT:
+        body = body[:_RAW_LOG_LIMIT] + "...<truncated>"
+    logger.warning(
+        "TELER_DEBUG status call_id=%r api_version=%r source=%r event_id=%r len=%s raw=%s",
+        call_id,
+        headers.get("x-teler-api-version"),
+        headers.get("x-teler-source"),
+        headers.get("x-teler-event-id"),
+        len(raw_body), body,
+    )
+
+
 def _debug_flow(call_id: str, raw_body: bytes) -> None:
     """Teler's flow POST exactly as it arrived, before any parsing.
 
@@ -331,6 +357,7 @@ async def status_webhook(call_id: str, request: Request):
     prevents that, so the guard below must stay.
     """
     raw_body = await request.body()
+    _debug_status(call_id, raw_body, request.headers)
     if not _valid_callback(call_id, request, raw_body):
         _record_signature_failure("teler_status", call_id)
         raise HTTPException(403, "Invalid Teler callback token")

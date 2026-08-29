@@ -41,6 +41,7 @@ ours and `to_number` is the destination, as on Twilio.
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -327,7 +328,9 @@ class TelerProvider:
             FIELD_STATUS_CALLBACK: status_callback_url,
             FIELD_RECORD: bool(self.record),
         }
+        _debug_dial_request(call_id, payload)
         body = await self._request("POST", INITIATE_PATH, payload)
+        _debug_dial_response(call_id, body)
         data = body.get("data")
         if not isinstance(data, dict):
             raise TelerDialError("no call object in the response", body=json.dumps(body)[:2000])
@@ -454,6 +457,63 @@ class TelerProvider:
             FLOW_SAMPLE_RATE: sample_rate,
             FLOW_RECORD: bool(record),
         }
+
+
+# ===========================================================================
+# TEMPORARY DEBUG INSTRUMENTATION -- remove with the block in teler_routes.py.
+#
+# A real call rang, was answered, went silent and hung up, and Teler never
+# fetched flow_url at all -- no request for it reached the server, while
+# status callbacks from the same dial arrived fine. Since both URLs are sent
+# in the same request body and carry identical constraints in Teler's schema,
+# the next thing to establish is what we actually put in that body and what
+# Teler said back.
+#
+# `warning` with the payload inline, for the reason set out in
+# teler_routes.py: nothing configures logging here, so `info` emits nothing
+# and `extra=` fields are dropped.
+# ===========================================================================
+_TOKEN_VALUE = re.compile(r"((?:^|[?&])(?:token|expiry)=)([^&\s]+)")
+
+
+def _debug_url(url: str) -> str:
+    """A URL with its HMAC replaced by its length.
+
+    The host and path are the diagnostic content -- whether the URL is
+    absolute, and whether it points where we think. The token is a live
+    credential and never belongs in a log, and its length alone answers the
+    only question worth asking about it.
+    """
+    return _TOKEN_VALUE.sub(lambda m: f"{m.group(1)}<{len(m.group(2))} chars>", str(url))
+
+
+def _debug_dial_request(call_id: str, payload: dict[str, Any]) -> None:
+    """The dial body as sent, so flow_url can be compared against the one that
+    demonstrably works -- status_callback_url, built by the same code."""
+    logger.warning(
+        "TELER_DEBUG dial_request call_id=%r from=%r to=%r record=%r "
+        "flow_url=%s status_callback_url=%s",
+        call_id, payload.get(FIELD_FROM), payload.get(FIELD_TO), payload.get(FIELD_RECORD),
+        _debug_url(payload.get(FIELD_FLOW_URL) or ""),
+        _debug_url(payload.get(FIELD_STATUS_CALLBACK) or ""),
+    )
+
+
+def _debug_dial_response(call_id: str, body: dict[str, Any]) -> None:
+    """Teler's 202 body, including the id we are about to bind.
+
+    Its format is the thing to look at: a `cs_`-prefixed id here against a raw
+    UUID in the webhooks would confirm the identifier split between Teler's
+    versioned and unversioned surfaces.
+    """
+    try:
+        rendered = json.dumps(body)[:1000]
+    except (TypeError, ValueError):
+        rendered = repr(body)[:1000]
+    logger.warning("TELER_DEBUG dial_response call_id=%r body=%s", call_id, rendered)
+
+
+# =========================== END TEMPORARY DEBUG ===========================
 
 
 def _parse_json_object(response: httpx.Response) -> dict[str, Any]:
