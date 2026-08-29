@@ -15,6 +15,7 @@ from twilio.base.exceptions import TwilioRestException
 
 from app.telephony.providers import DEFAULT_PROVIDER, PROVIDER_NAMES, get_provider
 from app.telephony.providers.base import DialResult, terminal_request_for
+from app.telephony.providers.teler_provider import TelerProvider
 from app.telephony.providers.twilio_provider import TwilioProvider
 
 
@@ -144,12 +145,55 @@ def test_twilio_reports_missing_settings_by_name_never_by_value():
     assert "TWILIO_FROM_NUMBER" in missing and "PUBLIC_BASE_URL" in missing
 
 
-def test_registry_knows_both_providers_and_rejects_anything_else():
-    assert set(PROVIDER_NAMES) == {"twilio", "exotel"}
+def test_teler_reports_missing_settings_by_name_never_by_value():
+    provider = TelerProvider(api_key="", from_number="", base_url="https://api.frejun.ai/api/v1")
+
+    configured, missing = provider.is_configured()
+
+    assert configured is False
+    assert "TELER_API_KEY" in missing and "TELER_FROM_NUMBER" in missing
+
+
+def test_no_providers_configuration_report_can_contain_a_credential():
+    """The settings UI renders this verbatim. It may name a setting; it may
+    never carry one's value."""
+    secret = "teler-key-not-real"
+    provider = TelerProvider(api_key=secret, from_number="+918064000000",
+                             base_url="https://api.frejun.ai/api/v1")
+
+    _configured, missing = provider.is_configured()
+
+    assert secret not in str(missing)
+    assert secret not in provider.caller_id()
+    assert provider.caller_id() == "+918064000000", "a published business number, not a secret"
+
+
+def test_teler_cancels_before_answer_and_completes_after():
+    """Teler reports `ringing` in its own right, so unlike Exotel it has two
+    pre-answer words. Asking for the wrong terminal state is what separates
+    'nobody picked up' from 'we hung up on a live conversation'."""
+    provider = TelerProvider(api_key="k", from_number="+1")
+
+    assert provider.terminal_request_for("queued") == "canceled"
+    assert provider.terminal_request_for("ringing") == "canceled"
+    assert provider.terminal_request_for("in-progress") == "completed"
+
+
+def test_registry_knows_every_provider_and_rejects_anything_else():
+    assert set(PROVIDER_NAMES) == {"twilio", "exotel", "teler"}
     assert DEFAULT_PROVIDER == "twilio"
     assert get_provider("twilio").name == "twilio"
     with pytest.raises(ValueError):
         get_provider("carrier-pigeon")
+
+
+def test_every_registered_provider_names_itself_the_way_it_is_registered():
+    """The name on the instance is what gets persisted on the call row and what
+    `_provider_for` later looks the provider back up by. A mismatch between the
+    registry key and `provider.name` would dial on one carrier and reconcile
+    against another for the rest of that call's life."""
+    for name in PROVIDER_NAMES:
+        assert get_provider(name).name == name
 
 
 def test_dial_result_defaults_to_no_status():

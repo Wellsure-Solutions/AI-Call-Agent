@@ -17,15 +17,18 @@ from app.storage.sqlite_store import SQLiteCallStore
 ALL_CONFIGURED = [
     {"name": "twilio", "configured": True, "missing": [], "caller_id": "+15550001111", "supports_amd": True},
     {"name": "exotel", "configured": True, "missing": [], "caller_id": "+918047000000", "supports_amd": False},
+    {"name": "teler", "configured": True, "missing": [], "caller_id": "+918064000000", "supports_amd": False},
 ]
 EXOTEL_MISSING = [
     {"name": "twilio", "configured": True, "missing": [], "caller_id": "+15550001111", "supports_amd": True},
     {"name": "exotel", "configured": False, "missing": ["EXOTEL_API_TOKEN", "EXOTEL_CALLER_ID"],
      "caller_id": "", "supports_amd": False},
+    {"name": "teler", "configured": True, "missing": [], "caller_id": "+918064000000", "supports_amd": False},
 ]
 NONE_CONFIGURED = [
     {"name": "twilio", "configured": False, "missing": ["TWILIO_ACCOUNT_SID"], "caller_id": "", "supports_amd": True},
     {"name": "exotel", "configured": False, "missing": ["EXOTEL_API_KEY"], "caller_id": "", "supports_amd": False},
+    {"name": "teler", "configured": False, "missing": ["TELER_API_KEY"], "caller_id": "", "supports_amd": False},
 ]
 
 
@@ -84,8 +87,8 @@ def test_the_endpoint_reports_the_active_provider_and_every_option(store):
     body = client.get("/api/settings/telephony").json()
 
     assert body["active"] == "twilio"
-    assert set(body["selectable"]) == {"twilio", "exotel", "auto"}
-    assert {item["name"] for item in body["providers"]} == {"twilio", "exotel"}
+    assert set(body["selectable"]) == {"twilio", "exotel", "teler", "auto"}
+    assert {item["name"] for item in body["providers"]} == {"twilio", "exotel", "teler"}
 
 
 def test_it_reports_configuration_state_and_caller_id_but_no_credentials(store):

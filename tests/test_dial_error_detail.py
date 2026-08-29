@@ -19,10 +19,12 @@ from app.services.call_coordinator import DurableCallCoordinator
 from app.storage.sqlite_store import SQLiteCallStore
 from app.telephony.providers.base import MAX_ERROR_DETAIL, describe_error, scrub
 from app.telephony.providers.exotel_provider import ExotelDialError, ExotelProvider
+from app.telephony.providers.teler_provider import TelerDialError, TelerProvider
 from app.telephony.providers.twilio_provider import TwilioProvider
 
 API_KEY = "exotel-key-not-real"
 API_TOKEN = "exotel-token-not-real"
+TELER_KEY = "teler-key-not-real"
 
 
 @pytest.fixture()
@@ -189,6 +191,130 @@ def test_twilio_descriptions_carry_the_numeric_error_code():
 def test_twilio_falls_back_for_a_non_sdk_error():
     provider = TwilioProvider(client=object(), from_number="+1", public_base_url="https://x")
     assert "TimeoutError" in provider.describe_dial_error(TimeoutError("read timeout"))
+
+
+# ---------------------------------------------------------------------------
+# Teler descriptions
+# ---------------------------------------------------------------------------
+def teler(handler) -> TelerProvider:
+    return TelerProvider(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        api_key=TELER_KEY, from_number="+918064000000",
+        base_url="https://api.frejun.ai/api/v1", record=False,
+    )
+
+
+def teler_error(response: httpx.Response) -> httpx.HTTPStatusError:
+    return httpx.HTTPStatusError("boom", request=httpx.Request("POST", "https://x"), response=response)
+
+
+def test_a_teler_description_carries_the_message_and_the_machine_readable_code():
+    """FreJun's own docs say to branch on `code`, not on `message`, so an
+    operator needs both to find the failure in their console."""
+    provider = teler(lambda _r: httpx.Response(202))
+    error = teler_error(httpx.Response(
+        403, json={"success": False, "message": "Virtual number is not assigned to a voice app.",
+                   "code": "number_unassigned"}))
+
+    detail = provider.describe_dial_error(error)
+
+    assert "HTTP 403" in detail
+    assert "not assigned" in detail
+    assert "number_unassigned" in detail
+
+
+def test_two_different_teler_failures_produce_different_descriptions():
+    """The whole point: `HTTPStatusError` on every row is undiagnosable."""
+    provider = teler(lambda _r: httpx.Response(202))
+    unassigned = provider.describe_dial_error(teler_error(httpx.Response(
+        403, json={"message": "Virtual number is not assigned to a voice app."})))
+    invalid = provider.describe_dial_error(teler_error(httpx.Response(
+        422, json={"message": "to_number is not a valid E.164 number."})))
+
+    assert unassigned != invalid
+
+
+def test_a_teler_description_never_leaks_the_api_key_even_if_echoed():
+    provider = teler(lambda _r: httpx.Response(202))
+    error = teler_error(httpx.Response(400, json={"message": f"bad key {TELER_KEY}"}))
+
+    detail = provider.describe_dial_error(error)
+
+    assert TELER_KEY not in detail
+    assert "<redacted>" in detail
+
+
+def test_a_teler_description_never_leaks_a_live_flow_or_media_token():
+    """The dial body carries our flow_url and status_callback_url, and both
+    carry an HMAC. A carrier echoing the request back must not put one in the
+    database and the operations view."""
+    provider = teler(lambda _r: httpx.Response(202))
+    echoed = ("could not reach flow_url "
+              "https://x/teler/flow/c1?expiry=99&token=deadbeefdeadbeefdeadbeefdeadbeef")
+    error = teler_error(httpx.Response(400, json={"message": echoed}))
+
+    detail = provider.describe_dial_error(error)
+
+    assert "deadbeef" not in detail
+    assert "token=<redacted>" in detail
+
+
+def test_a_teler_body_that_is_not_an_envelope_is_still_described():
+    """A proxy in front of Teler will not answer in Teler's envelope, and that
+    body is still the only thing that says what happened."""
+    provider = teler(lambda _r: httpx.Response(202))
+    error = teler_error(httpx.Response(502, text="<html>Bad Gateway</html>"))
+
+    assert "Bad Gateway" in provider.describe_dial_error(error)
+
+
+def test_a_teler_accepted_but_unnameable_call_describes_the_body():
+    provider = teler(lambda _r: httpx.Response(202))
+    error = TelerDialError("response contained no call identifier", body='{"message": "queued"}')
+
+    detail = provider.describe_dial_error(error)
+
+    assert "no call identifier" in detail and "queued" in detail
+
+
+def test_a_teler_transport_failure_is_described_without_a_response():
+    provider = teler(lambda _r: httpx.Response(202))
+    assert "ConnectTimeout" in provider.describe_dial_error(httpx.ConnectTimeout("timed out"))
+
+
+# ---------------------------------------------------------------------------
+# Teler classification -- the direction that risks calling somebody twice
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("status", [400, 403, 404, 409, 422, 429])
+def test_a_teler_4xx_is_a_proven_refusal(status):
+    provider = teler(lambda _r: httpx.Response(202))
+    error = teler_error(httpx.Response(status, json={"message": "no"}))
+
+    assert provider.classify_dial_error(error) == "rejected"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_a_teler_5xx_is_ambiguous_because_the_call_may_have_been_placed(status):
+    """Teler documents 502 and 504 on initiate as upstream failures. An
+    upstream carrier that timed out may still have dialled, so filing it as a
+    refusal would free the number and call the customer twice."""
+    provider = teler(lambda _r: httpx.Response(202))
+    error = teler_error(httpx.Response(status, json={"message": "upstream"}))
+
+    assert provider.classify_dial_error(error) == "ambiguous"
+
+
+@pytest.mark.parametrize("error", [
+    httpx.ConnectTimeout("timed out"),
+    httpx.ReadTimeout("read timed out"),
+    httpx.ConnectError("refused"),
+    TelerDialError("no call identifier", body="{}"),
+    TimeoutError("something else entirely"),
+    RuntimeError("unrecognised"),
+])
+def test_everything_that_is_not_a_proven_refusal_is_ambiguous(error):
+    provider = teler(lambda _r: httpx.Response(202))
+    assert provider.classify_dial_error(error) == "ambiguous"
 
 
 # ---------------------------------------------------------------------------

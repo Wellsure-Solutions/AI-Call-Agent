@@ -50,7 +50,14 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `EXOTEL_CALLER_ID` | Yes for Exotel calls | The +91 ExoPhone shown to the customer. **This is Exotel's `CallerId`, not its `From`** | E.164; no default | No |
 | `EXOTEL_SEND_CHUNK_BYTES` | No | Outbound PCM bytes per websocket message; always rounded to a multiple of 320 | `3200` | No |
 | `EXOTEL_CALLBACK_ALLOWED_IPS` | No | Comma-separated IP allowlist for Exotel status callbacks; empty disables the check | unset (disabled) | No |
-| `CALL_AGENT_DEFAULT_PROVIDER` | No | **Seed only.** Written to the database the first time it is opened and ignored from then on — once a provider is saved in the dashboard, the database is authoritative. See §8a | `twilio`; also `exotel` or `auto` | No |
+| `TELER_API_KEY` | Yes for Teler calls | FreJun Teler secret key, sent as the `x-api-key` header | from platform.frejun.ai; no default | Yes |
+| `TELER_FROM_NUMBER` | Yes for Teler calls | The virtual number the call is placed from. Unlike Exotel this means what it says — Teler's `from_number` is ours | E.164; no default | No |
+| `TELER_BASE_URL` | No | Teler API root. No per-account cluster split, so the default is right for every account | `https://api.frejun.ai/api/v1` | No |
+| `TELER_RECORD` | No | Whether Teler records the leg. Recording is billed and stored on FreJun's side, so it is opt-in | `0` | No |
+| `TELER_CHUNK_MS` | No | **Milliseconds**, not bytes, of audio per inbound chunk. Teler requires 20–2000 and a multiple of 20. Their default of 400 would quantise barge-in detection to 400 ms | `20` | No |
+| `TELER_SEND_CHUNK_MS` | No | Milliseconds of audio per outbound message. FreJun recommend ≥500; the tail of a turn is flushed early regardless | `500` | No |
+| `TELER_WEBHOOK_SECRET` | No | Voice App signing secret, for verifying `X-Teler-Signature`. Defence in depth only — the HMAC query token is the primary control. See §8b | unset (signature not checked) | Yes |
+| `CALL_AGENT_DEFAULT_PROVIDER` | No | **Seed only.** Written to the database the first time it is opened and ignored from then on — once a provider is saved in the dashboard, the database is authoritative. See §8a | `twilio`; also `exotel`, `teler` or `auto` | No |
 | `DEEPGRAM_API_KEY` | Yes for conversation | Deepgram agent access | provider key | Yes |
 | `OPENAI_API_KEY` | Required only when extraction runs | Post-call extraction | provider key; absence never blocks raw persistence | Yes |
 | `OPENAI_MODEL` | No | Extraction model | `gpt-4.1-mini` | No |
@@ -182,16 +189,65 @@ There is no TwiML step and no `/exotel/amd/*`: the AgentStream dial documents no
 detection, so AMD is off for Exotel regardless of `CALL_AGENT_AMD_ENABLED`. Inbound calls to the
 ExoPhone are out of scope for this service.
 
+## 8b. FreJun Teler setup
+
+Teler is FreJun's programmable-voice API. Get a key and a virtual number from
+<https://platform.frejun.ai>, then set `TELER_API_KEY` and `TELER_FROM_NUMBER`. There is no cluster
+or subdomain to choose — unlike Exotel, one API root serves every account.
+
+**Teler is Twilio-shaped, not Exotel-shaped.** The dial carries a `flow_url`; Teler POSTs to it once
+the call connects and expects a JSON action back, and *that* response names the media socket. So the
+media URL is minted after the call exists, against an identifier the carrier has already given us —
+exactly like `/twilio/twiml`. Exotel is the odd one out in this codebase, not Teler.
+
+The Teler endpoints are:
+
+- `POST /teler/flow/{call_id}` — returns the stream action. Authenticated by an HMAC query token,
+  because FreJun document no signature on the flow request and an unauthenticated flow endpoint
+  hands a live media token to anyone who guesses a `call_id`
+- `POST /teler/status/{call_id}` — HMAC query token, plus Teler's own `X-Teler-Signature` when
+  `TELER_WEBHOOK_SECRET` is set
+- `WSS /teler/media-stream` — a separate endpoint from Twilio's and Exotel's
+
+**Both webhook payload versions are handled.** FreJun pin the shape per Voice App
+(`2025-08-01` flat, `2026-06-01` enveloped), changeable from their dashboard without a deploy, so
+the status route reads `type` or `event` and root or nested `call_id`. Teler also delivers
+`stream.*` and `recording.*` events to the same URL; those are acknowledged and ignored, because
+FreJun's own documentation warns that `stream.completed` does not imply `call.completed` — treating
+one as a call status would hang up on a live customer.
+
+**Status vocabulary.** Teler has five states — `initiated`, `ringing`, `answered`, `completed`,
+`failed` — and none of them is busy, no-answer or canceled. Those arrive as a `failed` call carrying
+a `reason` (`no_answer`, `user_busy`, `canceled`), which `normalize_status` refines into this
+codebase's terminal words. A *completed* call's reason is never used that way: `callee_hangup` on a
+completed call is a real conversation, and rewriting it would misreport every successful call.
+
+**`TELER_CHUNK_MS` is milliseconds, not bytes.** Teler requires 20–2000 and a multiple of 20, which
+puts it on exactly the 20 ms frame grid the barge-in constants are expressed in. FreJun's default is
+400 ms; this service uses 20, because inbound chunk size is the quantum of barge-in detection.
+
+**Teler has no mark and no `stop`.** Its only playback controls are `clear` and `interrupt`, both
+outbound commands — nothing is ever acknowledged, and the call ending is the socket closing. The
+adapter therefore models playback from bytes sent rather than reading it off mark round-trips; see
+`docs/teler-adapter.md` for what that costs and what remains unverified. AMD is off for Teler:
+the initiate endpoint documents no detection parameter and no verdict on any webhook.
+
 ### Choosing the active provider
 
 Operators set the provider at runtime from the dashboard's **Settings** page, or via
-`GET`/`POST /api/settings/telephony`. Three values:
+`GET`/`POST /api/settings/telephony`. Four values:
 
 | Value | Behaviour |
 |---|---|
 | `twilio` | Everything goes to Twilio |
 | `exotel` | Everything goes to Exotel |
+| `teler` | Everything goes to FreJun Teler |
 | `auto` | `+91` destinations go to Exotel, everything else to Twilio |
+
+`auto` is a two-carrier routing rule and Teler is deliberately not part of it: adding a third
+carrier to a destination-based rule is a routing decision with billing consequences, not a
+consequence of registering a provider. Select `teler` explicitly to use it. It does still act as a
+fallback like any registered provider, when the carrier `auto` resolved to is unconfigured.
 
 Selecting a provider whose credentials or caller ID are missing is refused with a 422 naming the
 missing settings, so an operator cannot pick a carrier that cannot dial.

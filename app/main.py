@@ -19,6 +19,7 @@ from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
 from app.telephony.exotel_routes import configure as configure_exotel, router as exotel_router
+from app.telephony.teler_routes import configure as configure_teler, router as teler_router
 from app.telephony.providers import SELECTABLE_PROVIDERS, provider_status_report
 from app.telephony.twilio_routes import OutboundCallRequest, callback_auth_failure_health, configure as configure_twilio, media_router, router as twilio_router, start_outbound_call
 
@@ -30,6 +31,7 @@ call_result_service = CallResultService(answer_extractor, answer_store, timeout=
 call_manager = CallManager()
 configure_twilio(answer_store, call_result_service)
 configure_exotel(answer_store, call_result_service)
+configure_teler(answer_store, call_result_service)
 # Seed only: does nothing once the row exists, so an operator's saved choice
 # always wins over the environment.
 answer_store.seed_setting(ACTIVE_PROVIDER_KEY, DEFAULT_TELEPHONY_PROVIDER)
@@ -126,6 +128,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Autonomous Calling Agent", lifespan=lifespan)
 app.include_router(twilio_router)
 app.include_router(exotel_router)
+app.include_router(teler_router)
 app.include_router(media_router)
 
 BATCH_CONCURRENCY_LIMIT = MAX_CONCURRENT_CALLS

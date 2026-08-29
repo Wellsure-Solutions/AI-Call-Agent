@@ -17,7 +17,7 @@ from app.telephony.providers.base import (
     terminal_request_for,
 )
 
-PROVIDER_NAMES: tuple[str, ...] = ("twilio", "exotel")
+PROVIDER_NAMES: tuple[str, ...] = ("twilio", "exotel", "teler")
 
 # Selection modes an operator may store. `auto` is not a provider -- it is a
 # routing rule that resolves to one at enqueue time.
@@ -41,6 +41,10 @@ def get_provider(name: str) -> TelephonyProvider:
         from app.telephony.providers.exotel_provider import ExotelProvider
 
         return ExotelProvider()
+    if name == "teler":
+        from app.telephony.providers.teler_provider import TelerProvider
+
+        return TelerProvider()
     raise ValueError(f"unknown telephony provider: {name!r}")
 
 

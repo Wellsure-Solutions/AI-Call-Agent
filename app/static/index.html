@@ -443,7 +443,7 @@ async function loadTelephonySettings() {
 }
 
 function providerLabel(name) {
-    return { twilio:'Twilio', exotel:'Exotel', auto:'Automatic by destination' }[name] || name;
+    return { twilio:'Twilio', exotel:'Exotel', teler:'FreJun Teler', auto:'Automatic by destination' }[name] || name;
 }
 
 function renderProviderChoices() {
@@ -458,7 +458,7 @@ function renderProviderChoices() {
         // is usable as long as at least one real provider is.
         const usable = name === 'auto' ? anyConfigured : Boolean(state && state.configured);
         const detail = name === 'auto'
-            ? '+91 destinations go to Exotel, everything else to Twilio. Falls back if the preferred carrier is unconfigured.'
+            ? '+91 destinations go to Exotel, everything else to Twilio. FreJun Teler is not part of this rule &mdash; select it explicitly to use it. Falls back if the preferred carrier is unconfigured.'
             : (usable
                 ? `Configured &middot; calls show <b>${escapeHtml(state.caller_id || 'no caller ID')}</b>`
                 : `Not configured &middot; missing ${escapeHtml((state && state.missing || []).join(', ') || 'credentials')}`);
