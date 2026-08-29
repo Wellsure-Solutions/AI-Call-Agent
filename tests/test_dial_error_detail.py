@@ -422,3 +422,116 @@ def test_a_provider_without_a_description_method_still_works(store):
     asyncio.run(scenario())
 
     assert store.get_call(call_id)["lifecycle_state"] == "NEEDS_RECONCILIATION"
+
+
+# ---------------------------------------------------------------------------
+# End to end: the *reconciliation* failure is as diagnosable as the dial one
+#
+# This path stored `type(error).__name__` and nothing else, so it had exactly
+# the defect the dial path was already fixed for -- and it matters more here,
+# not less. A call stalls in NEEDS_RECONCILIATION holding a capacity slot,
+# and at the default ceiling of one that is a stalled queue; `HTTPStatusError`
+# does not tell an operator whether to rotate a key, fix a tunnel, or wait.
+# ---------------------------------------------------------------------------
+def run_reconcile(store: SQLiteCallStore, handler, provider_name: str = "exotel", factory=None,
+                  phone: str = "+919000030001") -> str:
+    """Bind a call, force the ring deadline past, then reconcile it."""
+    call_id = store.enqueue_call(phone_number=phone, provider=provider_name)["call_id"]
+    store.claim_job("dialer", 1)
+    store.bind_call_sid(call_id, f"SID{phone[-4:]}", 45, 900)
+    with store.transaction(immediate=True) as db:
+        db.execute("UPDATE calls SET ring_deadline='1970-01-01T00:00:00+00:00' WHERE call_id=?", (call_id,))
+
+    async def scenario():
+        coordinator = DurableCallCoordinator(
+            store, 1, 0, provider_factory=factory or (lambda name: exotel(handler))
+        )
+        action = store.claim_due_action(coordinator.owner)
+        await coordinator._reconcile(action)
+
+    asyncio.run(scenario())
+    return call_id
+
+
+def test_a_failed_reconciliation_stores_the_carrier_message_not_just_the_class_name(store):
+    call_id = run_reconcile(store, lambda r: httpx.Response(503, text="upstream gateway unavailable"))
+
+    saved = store.get_call(call_id)
+
+    assert "upstream gateway unavailable" in saved["reconciliation_error"]
+    assert saved["reconciliation_error"] != "HTTPStatusError"
+
+
+def test_two_different_reconciliation_failures_are_distinguishable(store):
+    """The whole point. Both used to write `HTTPStatusError`."""
+    gone = run_reconcile(store, lambda r: httpx.Response(404, text="No call found for that Sid"),
+                         phone="+919000030002")
+    denied = run_reconcile(store, lambda r: httpx.Response(401, text="Authentication failed"),
+                           phone="+919000030003")
+
+    assert "No call found" in store.get_call(gone)["reconciliation_error"]
+    assert "Authentication failed" in store.get_call(denied)["reconciliation_error"]
+
+
+def test_the_stored_reconciliation_detail_is_credential_free(store):
+    """Same non-negotiable as the dial path: the operations view and the
+    database never see a live credential."""
+    call_id = run_reconcile(store, lambda r: httpx.Response(401, text=f"bad auth {API_TOKEN}"))
+
+    saved = store.get_call(call_id)
+
+    assert API_TOKEN not in saved["reconciliation_error"]
+    assert API_KEY not in saved["reconciliation_error"]
+
+
+def test_a_teler_reconciliation_failure_carries_telers_own_message(store):
+    """Every provider, not just the one this was written against."""
+    def handler(_request):
+        return httpx.Response(404, json={"message": "The requested call was not found.",
+                                         "code": "call_not_found"})
+
+    call_id = run_reconcile(store, handler, provider_name="teler",
+                            factory=lambda name: teler(handler))
+
+    saved = store.get_call(call_id)
+
+    assert "HTTP 404" in saved["reconciliation_error"]
+    assert "was not found" in saved["reconciliation_error"]
+    assert "call_not_found" in saved["reconciliation_error"]
+
+
+def test_a_provider_the_registry_does_not_know_still_records_the_failure(store):
+    """`_provider_for` raises before `provider` is bound -- a call row written
+    by a build that had a carrier this one does not. Referencing an unbound
+    local inside the handler would raise, lose the reconciliation result
+    entirely, and leave the action lease held until it expired."""
+    def explode(_name):
+        raise ValueError("unknown telephony provider: 'carrier-pigeon'")
+
+    call_id = run_reconcile(store, None, provider_name="exotel", factory=explode)
+
+    saved = store.get_call(call_id)
+
+    assert saved["reconciliation_error"], "the failure must still be recorded"
+    assert saved["reconciliation_attempts"] == 1
+    assert saved["reconciliation_status"] in {"retry_pending", "stalled"}
+
+
+def test_a_provider_whose_description_raises_does_not_lose_the_reconciliation(store):
+    """Losing the detail is acceptable; losing the record of the failure is
+    not -- this runs inside the failure handler."""
+    class Hostile:
+        name = "exotel"
+
+        async def fetch_status(self, _sid):
+            raise RuntimeError("lookup exploded")
+
+        def describe_dial_error(self, error):
+            raise ValueError("description exploded")
+
+    call_id = run_reconcile(store, None, factory=lambda name: Hostile())
+
+    saved = store.get_call(call_id)
+
+    assert saved["reconciliation_error"] == "RuntimeError", "degraded to the class name, not lost"
+    assert saved["reconciliation_attempts"] == 1

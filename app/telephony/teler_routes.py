@@ -150,6 +150,41 @@ def _debug_raw(attempt: int, raw: str) -> None:
     )
 
 
+def _debug_flow(call_id: str, raw_body: bytes) -> None:
+    """Teler's flow POST exactly as it arrived, before any parsing.
+
+    Added after the media-socket logging, because if the flow request is what
+    fails then the media socket is never opened and the instrumentation there
+    produces nothing at all -- an empty log that looks like the call never
+    happened.
+    """
+    body = raw_body.decode("utf-8", "replace")
+    if len(body) > _RAW_LOG_LIMIT:
+        body = body[:_RAW_LOG_LIMIT] + "...<truncated>"
+    logger.warning("TELER_DEBUG flow call_id=%r len=%s raw=%s", call_id, len(raw_body), body)
+
+
+def _debug_flow_correlation(call_id: str, teler_call_id: str, call: dict | None, bound: bool | None) -> None:
+    """Whether Teler's identifier for the call matches the one we bound.
+
+    This is the single comparison the flow route turns on, and the one most
+    likely to fail: FreJun's call-flows reference says "the call_id and
+    account_id formats depend on the webhook version pinned on the owning
+    Voice App", and their versioning reference says 2025-08-01 uses raw UUIDs
+    where 2026-06-01 uses cs_-prefixed ids. The REST API that returns the id
+    we bind at dial time is *not* versioned. So on a Voice App pinned to
+    2025-08-01, these two are the same call under two different names, and
+    bind_call_sid refuses the second one.
+    """
+    stored = (call or {}).get("call_sid")
+    logger.warning(
+        "TELER_DEBUG flow_correlation call_id=%r teler_call_id=%r stored_call_sid=%r "
+        "match=%s row_found=%s provider=%r bound=%s",
+        call_id, teler_call_id, stored, stored == teler_call_id,
+        call is not None, (call or {}).get("provider"), bound,
+    )
+
+
 def _debug_correlation_failure(call_id: str, exc: BaseException) -> None:
     """Why the socket was closed 1008, instead of swallowing it silently.
 
@@ -247,9 +282,14 @@ async def flow_webhook(call_id: str, request: Request):
         _record_signature_failure("teler_flow", call_id)
         raise HTTPException(403, "Invalid Teler flow token")
 
-    body = await _json_body(request)
+    # `_json_body(request)` is exactly these two lines; split so the TEMPORARY
+    # logging can see the body before it is parsed.
+    raw_body = await request.body()
+    _debug_flow(call_id, raw_body)
+    body = _decode_json(raw_body)
     teler_call_id = str(body.get("call_id") or "")
     call = await _repo().aget_call(call_id)
+    _debug_flow_correlation(call_id, teler_call_id, call, None)
     if not call or not teler_call_id:
         raise HTTPException(409, "Call correlation failed")
     if call.get("provider") != "teler":
@@ -257,6 +297,7 @@ async def flow_webhook(call_id: str, request: Request):
     bound = await asyncio.to_thread(
         _repo().bind_call_sid, call_id, teler_call_id, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS
     )
+    _debug_flow_correlation(call_id, teler_call_id, call, bound)
     if not bound:
         raise HTTPException(409, "Call correlation failed")
 

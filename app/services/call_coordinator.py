@@ -195,12 +195,16 @@ class DurableCallCoordinator:
 
     @staticmethod
     def _describe_dial_error(provider, error: Exception) -> str:
-        """Ask the provider why the dial failed, never at the cost of the dial.
+        """Ask the provider why a call failed, never at the cost of recording it.
+
+        Used by both failure paths -- the dial and the reconciliation -- so the
+        two stay equally diagnosable; the name predates the second caller.
 
         Optional on the protocol so a fake or legacy adapter needs no change,
-        and defensive because this runs inside the failure handler: a provider
+        and defensive because this runs inside a failure handler: a provider
         whose description raised would lose the persistence of the failure
-        itself, which is far worse than losing the detail.
+        itself, which is far worse than losing the detail. `provider` may be
+        None for the same reason -- the reconciler can fail before it has one.
         """
         try:
             describe = getattr(provider, "describe_dial_error", None)
@@ -223,6 +227,13 @@ class DurableCallCoordinator:
             logger.exception("uncorrelated_provider_hangup_failed", extra={"call_id": call.get("call_id")})
 
     async def _reconcile(self, call: dict) -> None:
+        # Bound before the try because `_provider_for` itself raises for a
+        # provider name the registry does not know -- a call row written by a
+        # build that had a carrier this one does not. `_describe_dial_error`
+        # tolerates None and degrades to the exception class name, whereas an
+        # unbound local here would raise inside the handler, lose the
+        # reconciliation result entirely, and leave the action lease held.
+        provider = None
         try:
             provider = self._provider_for(call)
             status = await provider.fetch_status(call["call_sid"])
@@ -240,8 +251,16 @@ class DurableCallCoordinator:
             await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None,
                                     "Provider termination requested", self.reconciliation_max_attempts)
         except Exception as error:
+            # The carrier's own message, exactly as the dial path stores it.
+            # The class name alone answers "did it fail"; only the message
+            # answers "why", and this is the path an operator reads when a
+            # call has stalled in NEEDS_RECONCILIATION holding a capacity
+            # slot. A wrong SID, a rotated key, a dead tunnel and a carrier
+            # outage all wrote `HTTPStatusError` and were indistinguishable.
+            # Providers scrub their own credentials out of it.
+            detail = self._describe_dial_error(provider, error)
             await asyncio.to_thread(self.store.reconciliation_result, call["call_id"], self.owner, None,
-                                    type(error).__name__, self.reconciliation_max_attempts)
+                                    detail, self.reconciliation_max_attempts)
 
     async def _extract(self, call: dict) -> None:
         session = CallSession(call_id=call["call_id"], phone_number=call["phone_number"], metadata={"lead_id": call.get("lead_id")})
