@@ -416,6 +416,17 @@ METRICS_SILENCE_GAP_MS = int(
     _env("METRICS_SILENCE_GAP_MS", "700")
 )
 
+# Periodic open-file-descriptor logging (app.core.diagnostics.open_fd_count).
+# On by default: listing /proc/self/fd once every few minutes is cheap, and
+# it is exactly the signal that was missing during the production incident
+# where the process silently climbed to its 1024-descriptor limit over a few
+# hours before anything else showed symptoms. Deliberately a slow timer, not
+# per-request instrumentation -- see app/core/diagnostics.py.
+FD_DIAGNOSTICS_ENABLED = _env_bool("FD_DIAGNOSTICS_ENABLED", True)
+FD_DIAGNOSTICS_INTERVAL_SECONDS = float(
+    _env("FD_DIAGNOSTICS_INTERVAL_SECONDS", "300")
+)
+
 # Twilio async Answering Machine Detection may return several machine verdicts.
 # The route compares the lower-case AnsweredBy value against this set.
 _AMD_TERMINAL_DEFAULT = (

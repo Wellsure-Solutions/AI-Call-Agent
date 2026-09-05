@@ -80,6 +80,29 @@ class SQLiteCallStore(JsonCallStore):
         finally:
             connection.close()
 
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        """A connection for reads with no explicit transaction, always closed.
+
+        `sqlite3.Connection.__exit__` only commits or rolls back the open
+        transaction -- by design it "neither implicitly opens a new
+        transaction nor closes the connection". `with self._connect() as db:`
+        therefore never closes the connection: each call leaves the
+        connection (and, under WAL, its `-wal`/`-shm` file descriptors)
+        referenced only by a cycle inside the sqlite3 module's statement
+        cache, so it survives plain refcounting and sits open until the
+        cyclic garbage collector happens to run. `_rows`/`_one`,
+        `capacity_snapshot`, and `statistics` are read-heavy and hit by
+        nearly every dashboard/API request, so that collection lagging
+        behind request volume is what drained the process's file descriptor
+        table in production.
+        """
+        connection = self._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     def _initialize_schema(self) -> None:
         with self.transaction(immediate=True) as db:
             db.execute("CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
@@ -785,7 +808,7 @@ class SQLiteCallStore(JsonCallStore):
 
     def capacity_snapshot(self) -> dict[str, Any]:
         """What is currently occupying the queue, and for how long."""
-        with self._connect() as db:
+        with self._read_connection() as db:
             states = dict(db.execute("SELECT queue_state,COUNT(*) FROM call_jobs GROUP BY queue_state"))
             occupied = sum(states.get(state, 0) for state in CAPACITY_STATES)
             oldest = db.execute("""SELECT c.call_id,c.lifecycle_state,c.provider_status,c.created_at,j.queue_state
@@ -823,7 +846,7 @@ class SQLiteCallStore(JsonCallStore):
         return self._decode_call(row) if row else None
 
     def statistics(self) -> dict[str, Any]:
-        with self._connect() as db:
+        with self._read_connection() as db:
             # Every aggregate is COALESCEd. SUM() over zero rows returns NULL,
             # not 0, so on a fresh database the arithmetic below raised a
             # TypeError and the dashboard's stats panel 500'd on first load --
@@ -944,11 +967,11 @@ class SQLiteCallStore(JsonCallStore):
         db.execute("INSERT INTO call_events(call_id,event_name,metadata,timestamp) VALUES(?,?,?,?)", (call_id, name, json.dumps(metadata or {}), timestamp))
 
     def _rows(self, sql: str, args: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        with self._connect() as db:
+        with self._read_connection() as db:
             return [dict(row) for row in db.execute(sql, args)]
 
     def _one(self, sql: str, args: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        with self._connect() as db:
+        with self._read_connection() as db:
             row = db.execute(sql, args).fetchone()
             return dict(row) if row else None
 
