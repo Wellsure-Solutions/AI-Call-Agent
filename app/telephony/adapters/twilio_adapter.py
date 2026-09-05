@@ -5,13 +5,10 @@ import json
 import logging
 
 from fastapi import WebSocketDisconnect
-from twilio.rest import Client
 
 from app.core.settings import (
     AMD_ENABLED,
     PUBLIC_BASE_URL,
-    TWILIO_ACCOUNT_SID,
-    TWILIO_AUTH_TOKEN,
     TWILIO_FROM_NUMBER,
 )
 from app.integrations.twilio_media import decode_media_payload, encode_media_payload
@@ -20,7 +17,7 @@ from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.audio.local_vad import rms_energy
 from app.telephony.audio.media_dump import MediaDump
 from app.telephony.metrics import CallMetrics
-from app.telephony.providers.twilio_provider import build_call_kwargs
+from app.telephony.providers.twilio_provider import build_call_kwargs, get_shared_twilio_client
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +49,13 @@ class TwilioAdapter(StreamingMediaAdapter):
         super().__init__(audio_bridge=audio_bridge, metrics=metrics, media_dump=media_dump)
         self.from_number = TWILIO_FROM_NUMBER
         self.public_base_url = PUBLIC_BASE_URL
-        self._client = client or Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        # Shared process-wide client (see get_shared_twilio_client): this
+        # adapter is built fresh for every inbound media WebSocket, and a
+        # fresh `Client()` here built its own never-closed `requests.Session`
+        # on every call -- most of which never even used it, since production
+        # dials through `TwilioProvider` and only reaches this adapter for the
+        # media-plane socket.
+        self._client = client or get_shared_twilio_client()
 
     # ------------------------------------------------------------------
     # Outbound call placement (REST) -- audio isn't live yet after this

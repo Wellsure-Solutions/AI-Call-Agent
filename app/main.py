@@ -3,17 +3,18 @@ import json
 import logging
 import base64
 import hmac
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, Response
 
+from app.core.diagnostics import open_fd_count
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import ACTIVE_PROVIDER_KEY, ActiveDataError, SQLiteCallStore, SuppressedError
-from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DEFAULT_TELEPHONY_PROVIDER, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
+from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DEFAULT_TELEPHONY_PROVIDER, DATABASE_PATH, FD_DIAGNOSTICS_ENABLED, FD_DIAGNOSTICS_INTERVAL_SECONDS, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
 from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
@@ -114,6 +115,24 @@ def check_startup_configuration() -> list[str]:
     return problems
 
 
+async def _log_open_fd_count_periodically() -> None:
+    """Low-frequency, off-the-hot-path visibility into descriptor growth.
+
+    This is the signal that was missing during the production incident: the
+    process climbed to its 1024-descriptor limit over a few hours with no
+    other symptom until SQLite could no longer open a file and Uvicorn could
+    no longer accept a socket. `print`, not `logger.info`, because nothing in
+    this process configures logging -- exactly like the `[startup]` messages
+    above, an `INFO` record here would be silently dropped by the root
+    logger's default WARNING level rather than reach the journal.
+    """
+    while True:
+        await asyncio.sleep(FD_DIAGNOSTICS_INTERVAL_SECONDS)
+        count = open_fd_count()
+        if count is not None:
+            print(f"[diagnostics] open_fds={count}")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     for problem in check_startup_configuration():
@@ -122,8 +141,13 @@ async def lifespan(_: FastAPI):
         print(f"[startup] NOT RENDERED for the current voice: {item}")
         print("[startup]   fix: python scripts/prerender_greeting.py")
     task=asyncio.create_task(coordinator.run())
+    fd_task = asyncio.create_task(_log_open_fd_count_periodically()) if FD_DIAGNOSTICS_ENABLED else None
     yield
     coordinator.stop(); await task
+    if fd_task is not None:
+        fd_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await fd_task
 
 app = FastAPI(title="Autonomous Calling Agent", lifespan=lifespan)
 app.include_router(twilio_router)

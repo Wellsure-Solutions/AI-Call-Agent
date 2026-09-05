@@ -8,6 +8,7 @@ rejected/ambiguous rule the coordinator used to apply inline.
 """
 
 import asyncio
+import threading
 from typing import Any
 
 from twilio.base.exceptions import TwilioRestException
@@ -39,6 +40,33 @@ from app.telephony.providers.base import (
 # call in one of these states is not an error, but it records the wrong
 # outcome, so the distinction is kept.
 TWILIO_PRE_ANSWER = frozenset({"queued", "ringing", "initiated"})
+
+_shared_client_lock = threading.Lock()
+_shared_client: Client | None = None
+
+
+def get_shared_twilio_client() -> Client:
+    """One Twilio REST client for the whole process.
+
+    `twilio.rest.Client` wraps a `TwilioHttpClient`, which owns a
+    `requests.Session` -- an HTTP connection pool that keeps its sockets open
+    (keep-alive) after each request and that `Client` gives no way to close.
+    `TwilioProvider` is deliberately constructed fresh per call (`get_provider`
+    builds a new one for every dial and every reconciliation attempt, keyed on
+    the call's persisted provider), and building a new `Client` to match --
+    the previous behaviour of `TwilioProvider._client` -- meant a new,
+    never-closed `Session` and its sockets on every single one of those calls.
+    `TwilioAdapter` had the same problem, built eagerly in `__init__`.
+    Credentials are read from the environment once at import time (see
+    `app.core.settings`), so sharing one client for the process's lifetime
+    cannot serve a stale account SID or auth token.
+    """
+    global _shared_client
+    if _shared_client is None:
+        with _shared_client_lock:
+            if _shared_client is None:
+                _shared_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return _shared_client
 
 
 def build_call_kwargs(
@@ -106,17 +134,20 @@ class TwilioProvider:
 
     @property
     def _client(self):
-        """Built on first use, not in __init__.
+        """Resolved on first use, not in __init__, and shared across calls.
 
         `is_configured()` and `caller_id()` are called on every enqueue to
-        resolve the provider, and neither needs an SDK client. Constructing
-        one there would set up an HTTP client per candidate per queued call,
-        and would make configuration reporting depend on the SDK tolerating
-        empty credentials in its constructor -- which it does today, and need
-        not tomorrow.
+        resolve the provider, and neither needs an SDK client, so touching
+        `_client` there would build one per candidate per queued call for no
+        reason. And because `TwilioProvider` itself is constructed fresh per
+        call (see `get_provider`), building a fresh `Client` here too used to
+        mean a fresh, never-closed `requests.Session` -- and its open sockets
+        -- on every dial and every reconciliation attempt. `_client` now
+        resolves to the one process-wide client from `get_shared_twilio_client`
+        unless a test has passed its own.
         """
         if self._explicit_client is None:
-            self._explicit_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            self._explicit_client = get_shared_twilio_client()
         return self._explicit_client
 
     # ------------------------------------------------------------------
