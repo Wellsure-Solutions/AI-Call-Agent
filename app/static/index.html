@@ -168,7 +168,10 @@
         .notice.warn { color:#b54708; border-color:#fedf89; background:#fffaeb; }
         .notice.bad { color:#b42318; border-color:#fecdca; background:#fef3f2; }
         .tablewrap { width:100%; overflow:auto; border:1px solid var(--line); border-radius:14px; }
-        .toolbar { display:grid; grid-template-columns:minmax(220px,1fr) 180px 190px auto; gap:10px; margin:0 0 14px; }
+        .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:0 0 14px; }
+        .toolbar-search { flex:2 1 220px; min-width:180px; }
+        .toolbar select { flex:1 1 150px; min-width:130px; }
+        .toolbar-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-left:auto; }
         .table { width:100%; border-collapse:separate; border-spacing:0; background:#fff; }
         .table th,.table td { padding:13px 14px; text-align:left; border-bottom:1px solid #eeeae3; white-space:nowrap; font-size:12px; }
         .table th { position:sticky; top:0; z-index:1; color:#667085; background:#faf9f6; font-size:10px; font-weight:780; letter-spacing:.055em; text-transform:uppercase; }
@@ -178,9 +181,36 @@
         .table tr.clickable { cursor:pointer; }
         .table .actions { flex-wrap:nowrap; }
         .table .btn { min-height:32px; padding:6px 10px; border-radius:9px; font-size:11px; }
-        .badge { display:inline-flex; align-items:center; padding:5px 8px; color:#475467; border:1px solid #e4e7ec; border-radius:999px; background:#f9fafb; font-size:10px; font-weight:760; }
+        .badge { display:inline-flex; align-items:center; padding:5px 8px; color:#475467; border:1px solid #e4e7ec; border-radius:999px; background:#f9fafb; font-size:10px; font-weight:760; white-space:nowrap; }
         .badge.yes { color:#067647; border-color:#abefc6; background:#ecfdf3; }
         .badge.no { color:#b42318; border-color:#fecdca; background:#fef3f2; }
+        .badge.tone-green { color:#067647; border-color:#abefc6; background:#ecfdf3; }
+        .badge.tone-red { color:#b42318; border-color:#fecdca; background:#fef3f2; }
+        .badge.tone-amber { color:#b54708; border-color:#fedf89; background:#fffaeb; }
+        .badge.tone-blue { color:#175cd3; border-color:#b2ddff; background:#eff8ff; }
+        .badge.tone-purple { color:#5925dc; border-color:#d9d6fe; background:#f4f3ff; }
+        .badge.tone-grey { color:#475467; border-color:#e4e7ec; background:#f9fafb; }
+        .check-cell { width:36px; text-align:center; }
+        .check-cell input,.rowCheck { width:16px; height:16px; min-height:0; margin:0; cursor:pointer; accent-color:var(--brand); }
+        .th-sort { display:inline-flex; align-items:center; gap:5px; cursor:pointer; user-select:none; border:0; padding:0; margin:0; color:inherit; background:transparent; font:inherit; letter-spacing:inherit; text-transform:inherit; }
+        .th-sort:hover { color:var(--brand-strong); }
+        .th-sort .sort-arrow { opacity:.3; font-size:8px; }
+        .th-sort.active .sort-arrow { opacity:1; color:var(--brand-strong); }
+        .cell-truncate { display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .bulk-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:11px 14px; margin:0 0 14px; color:#3538cd; border:1px solid #d9d6fe; border-radius:13px; background:#f4f3ff; font-size:12px; font-weight:650; }
+        .bulk-bar .actions { margin-left:auto; }
+        .bulk-bar button.link { padding:0; color:#3538cd; text-decoration:underline; border:0; background:transparent; cursor:pointer; font:inherit; font-weight:650; }
+        .pagination { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-top:14px; }
+        .pagination .pager-info { color:var(--muted); font-size:12px; }
+        .pagination .pager-controls { display:flex; align-items:center; gap:8px; }
+        .pagination .btn { min-height:34px; padding:6px 12px; }
+        .field-note { margin:0 0 12px; color:var(--muted-2); font-size:11px; }
+        .panel.small { max-width:460px; }
+        .detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 18px; margin:14px 0; }
+        .detail-grid > div > span { display:block; color:var(--muted); font-size:11px; font-weight:650; text-transform:uppercase; letter-spacing:.04em; }
+        .detail-grid > div > strong { display:block; margin-top:3px; font-size:13px; font-weight:700; word-break:break-word; }
+        .related-calls th,.related-calls td { font-size:11px; padding:9px 10px; }
+        code { padding:2px 6px; border-radius:6px; background:#f2f0ff; color:var(--brand-strong); font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
         .page > .card + .card { margin-top:16px; }
         .empty-state { display:grid; place-items:center; min-height:170px; padding:24px; color:var(--muted); text-align:center; }
         .browser-card { position:relative; max-width:740px; overflow:hidden; }
@@ -203,12 +233,12 @@
         @keyframes fadeIn { from{opacity:0} to{opacity:1} }
         @keyframes modalUp { from{opacity:0;transform:translateY(10px) scale(.985)} to{opacity:1;transform:none} }
         @media(max-width:1280px){ .stats{grid-template-columns:repeat(2,minmax(190px,1fr))}.secondary-stats{grid-template-columns:repeat(3,1fr)}.analytics-grid{grid-template-columns:minmax(0,1.3fr) minmax(280px,.8fr)} }
-        @media(max-width:1060px){ .analytics-grid{grid-template-columns:1fr}.analytics-stack{grid-template-columns:1fr 1fr}.toolbar{grid-template-columns:1fr 1fr}.toolbar .btn{width:max-content}.outcome-layout{grid-template-columns:140px 1fr} }
+        @media(max-width:1060px){ .analytics-grid{grid-template-columns:1fr}.analytics-stack{grid-template-columns:1fr 1fr}.toolbar-search{flex-basis:100%}.outcome-layout{grid-template-columns:140px 1fr} }
         @media(max-width:820px){
             .layout,.layout.sidebar-collapsed{display:block}.side{position:fixed; left:0; top:0; width:min(288px,86vw); height:100dvh; transform:translateX(-105%); transition:transform .22s ease; box-shadow:18px 0 44px rgba(4,13,27,.22)}
             .layout.mobile-open .side{transform:translateX(0)}.layout.mobile-open + .mobile-scrim,.mobile-scrim.open{display:block}.sidebar-toggle{display:none}.mobile-menu{display:grid}.main{padding:22px 18px 38px}.top{align-items:flex-start}.top-actions{gap:7px}.top-actions .btn-label{display:none}.top-actions .btn{width:42px;padding:0}.export-menu{right:0}.brand-copy,.nav-label,.status-copy,.danger-label{opacity:1!important;transform:none!important}.nav button{justify-content:flex-start!important;padding:0 14px!important}.agent-status{justify-content:flex-start!important;padding:13px!important}.danger-link{justify-content:flex-start!important;padding:0 13px!important}.nav button::after,.danger-link::after{display:none!important}
         }
-        @media(max-width:640px){ .top{gap:12px}.top-actions{align-self:flex-start}.sub{font-size:12px}.stats{grid-template-columns:1fr}.secondary-stats{grid-template-columns:1fr 1fr}.analytics-stack{grid-template-columns:1fr}.formgrid,.three{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr}.toolbar .btn{width:100%}.card{padding:16px}.chart-card{min-height:300px}.time-chart{gap:5px}.time-bar-shell{width:64%}.outcome-layout{grid-template-columns:1fr;justify-items:center}.legend{width:100%}.tabs{width:100%;overflow:auto;flex-wrap:nowrap}.tabs button{flex:1;white-space:nowrap}.actions[style*="justify-content:space-between"]{align-items:stretch!important;flex-direction:column}.actions[style*="justify-content:space-between"]>.actions{width:100%}.actions[style*="justify-content:space-between"]>.actions .btn,.actions[style*="justify-content:space-between"]>.actions input{max-width:none!important;flex:1}.panel{padding:18px}.secondary-stats .mini-stat:last-child{grid-column:1/-1} }
+        @media(max-width:640px){ .top{gap:12px}.top-actions{align-self:flex-start}.sub{font-size:12px}.stats{grid-template-columns:1fr}.secondary-stats{grid-template-columns:1fr 1fr}.analytics-stack{grid-template-columns:1fr}.formgrid,.three{grid-template-columns:1fr}.toolbar>*{flex-basis:100%}.toolbar-actions{margin-left:0}.toolbar-actions>*{flex:1 1 auto}.card{padding:16px}.chart-card{min-height:300px}.time-chart{gap:5px}.time-bar-shell{width:64%}.outcome-layout{grid-template-columns:1fr;justify-items:center}.legend{width:100%}.tabs{width:100%;overflow:auto;flex-wrap:nowrap}.tabs button{flex:1;white-space:nowrap}.actions[style*="justify-content:space-between"]{align-items:stretch!important;flex-direction:column}.actions[style*="justify-content:space-between"]>.actions{width:100%}.actions[style*="justify-content:space-between"]>.actions .btn,.actions[style*="justify-content:space-between"]>.actions input{max-width:none!important;flex:1}.panel{padding:18px}.secondary-stats .mini-stat:last-child{grid-column:1/-1} }
         @media(prefers-reduced-motion:reduce){ *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important} }
     </style>
 </head>
@@ -312,12 +342,43 @@
                 </div>
             </div>
             <div id="mappingCard" class="card hidden" style="margin-top:16px"><h3>Map columns & import</h3><div id="mappingSummary" class="notice"></div><div id="mappingBox"></div><div id="previewTable" class="tablewrap" style="margin-top:14px"></div></div>
-            <div class="card" style="margin-top:16px"><div class="actions" style="justify-content:space-between"><h3>Imported leads</h3><div class="actions"><button class="btn" onclick="callBatch()">Start Batch Calls</button><button class="btn danger" onclick="clearData('leads')">Delete All Leads</button><input id="leadSearch" style="max-width:320px" placeholder="Search leads..."></div></div><div id="leadTable" class="tablewrap"></div></div>
+            <div class="card" style="margin-top:16px">
+                <div class="actions" style="justify-content:space-between">
+                    <div><h3>Imported leads</h3><div id="leadResultCount" class="sub"></div></div>
+                    <div class="actions"><button class="btn" onclick="callBatch()">Start Batch Calls</button><button class="btn danger" onclick="clearData('leads')">Delete All Leads</button></div>
+                </div>
+                <div class="toolbar" style="margin-top:16px">
+                    <input id="leadSearch" class="toolbar-search" placeholder="Search business, phone, category, notes...">
+                    <select id="leadStatusFilter" aria-label="Filter leads by status"><option value="">All statuses</option></select>
+                    <select id="leadCategoryFilter" aria-label="Filter leads by category"><option value="">All categories</option></select>
+                    <div class="toolbar-actions"><select id="leadPageSize" aria-label="Leads per page"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="0">Show all</option></select></div>
+                </div>
+                <div id="leadBulkBar" class="bulk-bar hidden"></div>
+                <div id="leadTable" class="tablewrap"></div>
+                <div id="leadPagination" class="pagination"></div>
+            </div>
         </section>
 
         <section id="calls" class="page hidden">
             <div class="card"><div class="chart-head"><div><h3>Live call status</h3><div class="sub">Calls currently running from this dashboard</div></div></div><div id="liveCallTable"></div></div>
-            <div class="card"><div class="toolbar"><input id="search" aria-label="Search call history" placeholder="Search business, phone, category..."><select id="statusFilter" aria-label="Filter by call status"><option value="">All statuses</option></select><select id="interestFilter" aria-label="Filter by interest"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select><button class="btn danger" onclick="clearData('calls')">Delete Call History</button></div><div id="callTable"></div></div>
+            <div class="card">
+                <div class="actions" style="justify-content:space-between">
+                    <div><h3>Call history</h3><div id="callResultCount" class="sub"></div></div>
+                </div>
+                <div class="toolbar" style="margin-top:16px">
+                    <input id="search" class="toolbar-search" aria-label="Search call history" placeholder="Search business, phone, category...">
+                    <select id="statusFilter" aria-label="Filter by call status"><option value="">All statuses</option></select>
+                    <select id="interestFilter" aria-label="Filter by interest"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select>
+                    <div class="toolbar-actions">
+                        <select id="callPageSize" aria-label="Calls per page"><option value="50">50 / page</option><option value="100" selected>100 / page</option><option value="200">200 / page</option><option value="500">500 / page</option></select>
+                        <button class="btn danger" onclick="clearData('calls')">Delete Call History</button>
+                    </div>
+                </div>
+                <div id="callSearchHint" class="field-note hidden"></div>
+                <div id="callBulkBar" class="bulk-bar hidden"></div>
+                <div id="callTable"></div>
+                <div id="callPagination" class="pagination"></div>
+            </div>
         </section>
 
         <section id="browser" class="page hidden">
@@ -346,11 +407,114 @@
 <div id="mobileScrim" class="mobile-scrim" aria-hidden="true"></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="panel"><div class="actions" style="justify-content:space-between"><h2 id="modalTitle">Call detail</h2><button class="btn ghost" onclick="closeModal()">Close</button></div><div id="detail"></div></div></div>
+<div id="confirmModal" class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="panel small">
+        <h2 id="confirmTitle">Confirm</h2>
+        <div id="confirmBody" class="sub" style="margin-top:10px"></div>
+        <div id="confirmPromptWrap" class="hidden" style="margin-top:14px"><input id="confirmPromptInput" autocomplete="off"></div>
+        <div class="actions" style="justify-content:flex-end;margin-top:20px">
+            <button id="confirmCancelBtn" class="btn ghost" type="button">Cancel</button>
+            <button id="confirmOkBtn" class="btn danger" type="button">Confirm</button>
+        </div>
+    </div>
+</div>
 <script>
 let previewRows = [], headers = [], calls = [], leads = [], liveCalls = [];
+let selectedLeadIds = new Set(), selectedCallIds = new Set();
+let leadSort = { key:'created_at', dir:'desc' }, callSort = { key:'', dir:'desc' };
+let leadPage = 1;
+let callLimit = 100, callOffset = 0, callTotalKnown = 0;
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const safeNumber = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+function formatDate(value) {
+    if (!value) return '\u2014';
+    const iso = /[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`;
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return escapeHtml(value);
+    return date.toLocaleString(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+function statusTone(value) {
+    const v = String(value || '').toLowerCase();
+    if (!v) return 'grey';
+    if (/(fail|busy|reject|no_answer|not_interested|cancel|error)/.test(v)) return 'red';
+    if (/(do_not_call|suppress|opt_out|^new$)/.test(v)) return 'grey';
+    if (/(review)/.test(v)) return 'purple';
+    if (/(queue|calling|connect|progress|pending|ringing|dial)/.test(v)) return 'blue';
+    if (/(complet|answer|success|interested)/.test(v)) return 'green';
+    return 'grey';
+}
+function statusBadge(value) { return `<span class="badge tone-${statusTone(value)}">${escapeHtml(value || 'unknown')}</span>`; }
+function populateSelect(id, values, emptyLabel) {
+    const select = $(id);
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` + values.map(v => `<option ${v === current ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('');
+    select.value = values.includes(current) ? current : '';
+}
+function sortRows(rows, sortState, accessors) {
+    if (!sortState.key) return rows;
+    const get = accessors[sortState.key] || (row => row[sortState.key]);
+    const dir = sortState.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+        let av = get(a), bv = get(b);
+        if (typeof av === 'string') av = av.toLowerCase();
+        if (typeof bv === 'string') bv = bv.toLowerCase();
+        if (av == null) av = '';
+        if (bv == null) bv = '';
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        return 0;
+    });
+}
+function sortHeader(label, key, state, fn) {
+    const active = state.key === key;
+    const arrow = active && state.dir === 'asc' ? '\u25b2' : '\u25bc';
+    return `<th><button type="button" class="th-sort${active ? ' active' : ''}" onclick="${fn}('${key}')">${escapeHtml(label)}<span class="sort-arrow">${arrow}</span></button></th>`;
+}
+function openModal(title, html) { $('modalTitle').textContent = title || 'Detail'; $('detail').innerHTML = html; $('modal').classList.add('open'); }
+
+let confirmResolve = null;
+function closeConfirm(result) {
+    if (!confirmResolve) return;
+    const resolve = confirmResolve; confirmResolve = null;
+    $('confirmModal').classList.remove('open');
+    resolve(result);
+}
+$('confirmOkBtn').onclick = () => {
+    const wrap = $('confirmPromptWrap');
+    if (!wrap.classList.contains('hidden')) closeConfirm($('confirmPromptInput').value === $('confirmPromptInput').dataset.expected);
+    else closeConfirm(true);
+};
+$('confirmCancelBtn').onclick = () => closeConfirm(false);
+$('confirmModal').addEventListener('click', event => { if (event.target === $('confirmModal')) closeConfirm(false); });
+function confirmDialog(message, { title = 'Confirm action', okLabel = 'Confirm', danger = true } = {}) {
+    return new Promise(resolve => {
+        confirmResolve = resolve;
+        $('confirmTitle').textContent = title;
+        $('confirmBody').innerHTML = message;
+        $('confirmPromptWrap').classList.add('hidden');
+        const okBtn = $('confirmOkBtn');
+        okBtn.textContent = okLabel;
+        okBtn.className = danger ? 'btn danger' : 'btn';
+        $('confirmModal').classList.add('open');
+    });
+}
+function promptDialog(message, expected, { title = 'Type to confirm' } = {}) {
+    return new Promise(resolve => {
+        confirmResolve = resolve;
+        $('confirmTitle').textContent = title;
+        $('confirmBody').innerHTML = message;
+        const wrap = $('confirmPromptWrap'), input = $('confirmPromptInput');
+        wrap.classList.remove('hidden');
+        input.value = ''; input.placeholder = expected; input.dataset.expected = expected;
+        const okBtn = $('confirmOkBtn');
+        okBtn.textContent = 'Confirm'; okBtn.className = 'btn danger';
+        $('confirmModal').classList.add('open');
+        setTimeout(() => input.focus(), 30);
+    });
+}
+$('confirmPromptInput').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('confirmOkBtn').click(); } });
 const appLayout = $('appLayout');
 const pageCopy = {
     overview:['Dashboard Overview','Monitor outbound test calls, leads, and AI responses.'],
@@ -409,19 +573,32 @@ document.addEventListener('click', event => { if (!$('exportWrap').contains(even
 window.addEventListener('resize', () => { if (window.innerWidth > 820) closeMobileNav(); });
 function closeModal() { $('modal').classList.remove('open'); }
 $('modal').addEventListener('click', event => { if (event.target === $('modal')) closeModal(); });
-document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeMobileNav(); $('exportWrap').classList.remove('open'); } });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeConfirm(false); closeMobileNav(); $('exportWrap').classList.remove('open'); } });
+
+function pruneSelection(set, validIds) { const valid = new Set(validIds); [...set].forEach(id => { if (!valid.has(id)) set.delete(id); }); }
 
 async function refresh() {
     const getJson = async url => { const response = await fetch(url); if (!response.ok) throw new Error(`${url}: ${response.status}`); return response.json(); };
-    const results = await Promise.allSettled(['/api/stats','/api/calls','/api/leads','/api/live-calls'].map(getJson));
-    const [statsResult,callResult,leadResult,liveResult] = results;
+    const results = await Promise.allSettled(['/api/stats','/api/leads','/api/live-calls',`/api/calls?limit=${callLimit}&offset=${callOffset}`].map(getJson));
+    const [statsResult,leadResult,liveResult,callResult] = results;
     const stats = statsResult.status === 'fulfilled' ? statsResult.value : {};
-    if (callResult.status === 'fulfilled') calls = callResult.value.calls || [];
     if (leadResult.status === 'fulfilled') leads = leadResult.value.leads || [];
     if (liveResult.status === 'fulfilled') liveCalls = liveResult.value.calls || [];
+    if (callResult.status === 'fulfilled') calls = callResult.value.calls || [];
     setConnection(results.every(result => result.status === 'fulfilled'));
+    callTotalKnown = safeNumber(stats.total_calls);
+    pruneSelection(selectedLeadIds, leads.map(l => l.lead_id));
+    pruneSelection(selectedCallIds, calls.map(c => c.call_id));
     renderStats(stats); renderLiveCalls(); renderCalls(); renderLeads(); renderLiveSummary();
     loadTelephonySettings();
+}
+
+async function fetchCalls() {
+    try {
+        const response = await fetch(`/api/calls?limit=${callLimit}&offset=${callOffset}`);
+        if (!response.ok) throw new Error('failed');
+        calls = (await response.json()).calls || [];
+    } catch (_) { toast('Unable to load calls.'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,31 +752,181 @@ async function importMappedLeads() {
 }
 function formatImportProblems(result) { const rejected = result?.rejected || []; if (!rejected.length) return ''; return `<br><b>Review needed:</b> ${rejected.slice(0,5).map(item => `Row ${escapeHtml(item.row)}: ${(item.errors || []).map(escapeHtml).join(', ')}`).join('; ')}${rejected.length > 5 ? `; +${rejected.length - 5} more` : ''}`; }
 function downloadTemplate() { window.location.href = '/api/leads/template'; }
+async function deleteOne(kind, id) {
+    try {
+        const response = await fetch(`/api/${kind}/${encodeURIComponent(id)}`, { method:'DELETE' });
+        const result = await response.json().catch(() => ({}));
+        return { ok: response.ok, detail: result.detail };
+    } catch (error) {
+        return { ok:false, detail:error.message };
+    }
+}
 async function deleteRecord(kind, id, label) {
-    if (!confirm(`Permanently delete ${label}? This action cannot be undone.`)) return;
-    const response = await fetch(`/api/${kind}/${encodeURIComponent(id)}`, { method:'DELETE' });
-    const result = await response.json();
-    if (!response.ok) { alert(result.detail || `Unable to delete ${label}.`); return; }
-    $('modal').classList.remove('open');
+    const ok = await confirmDialog(`Permanently delete <b>${escapeHtml(label)}</b>? This action cannot be undone.`, { title:'Delete record', okLabel:'Delete' });
+    if (!ok) return;
+    const result = await deleteOne(kind, id);
+    if (!result.ok) { toast(result.detail || `Unable to delete ${label}.`); return; }
+    closeModal();
+    selectedLeadIds.delete(id); selectedCallIds.delete(id);
     await refresh();
+}
+async function bulkDeleteLeads() {
+    const ids = [...selectedLeadIds];
+    if (!ids.length) return;
+    const ok = await confirmDialog(`Permanently delete <b>${ids.length}</b> selected lead${ids.length === 1 ? '' : 's'}? Saved call history will remain. This action cannot be undone.`, { title:'Delete selected leads', okLabel:'Delete leads' });
+    if (!ok) return;
+    let failed = 0;
+    for (const id of ids) { const result = await deleteOne('leads', id); if (!result.ok) failed++; }
+    selectedLeadIds.clear();
+    toast(failed ? `Deleted ${ids.length - failed} lead(s). ${failed} failed.` : `Deleted ${ids.length} lead(s).`);
+    await refresh();
+}
+async function bulkDeleteCalls() {
+    const ids = [...selectedCallIds];
+    if (!ids.length) return;
+    const ok = await confirmDialog(`Permanently delete <b>${ids.length}</b> selected call${ids.length === 1 ? '' : 's'}? Calls still in progress will be skipped automatically. This action cannot be undone.`, { title:'Delete selected calls', okLabel:'Delete calls' });
+    if (!ok) return;
+    let failed = 0, blocked = 0;
+    for (const id of ids) {
+        const result = await deleteOne('calls', id);
+        if (!result.ok) { failed++; if ((result.detail || '').toLowerCase().includes('active')) blocked++; }
+    }
+    selectedCallIds.clear();
+    const okCount = ids.length - failed;
+    toast(blocked ? `Deleted ${okCount} call(s). ${blocked} skipped (still active).` : (failed ? `Deleted ${okCount} call(s). ${failed} failed.` : `Deleted ${ids.length} call(s).`));
+    await refresh();
+}
+async function bulkCallLeads() {
+    const ids = [...selectedLeadIds];
+    if (!ids.length) return;
+    const ok = await confirmDialog(`Start outbound calls for <b>${ids.length}</b> selected lead${ids.length === 1 ? '' : 's'}?`, { title:'Start calls', okLabel:'Start calls', danger:false });
+    if (!ok) return;
+    showLeadMessage(`Starting batch for ${ids.length} leads...`);
+    try {
+        const response = await fetch('/api/leads/call-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ lead_ids:ids, max_calls:ids.length }) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Unable to start batch');
+        showLeadMessage(`Batch queued: ${result.queued || 0} leads. Up to ${result.concurrency_limit || 3} calls will run at a time until the batch completes.`, 'ok');
+        selectedLeadIds.clear();
+        setPage('calls');
+        await refresh();
+    } catch (error) {
+        console.error('bulkCallLeads failed', error);
+        showLeadMessage(`Batch failed: ${escapeHtml(error.message)}`, 'bad');
+    }
 }
 async function clearData(scope) {
     const descriptions = { leads:'all leads (saved call history will remain)', calls:'all call history', all:'all leads, calls, and suppression data' };
     const phrase = `DELETE ${scope.toUpperCase()}`;
-    if (!confirm(`Permanently delete ${descriptions[scope]}? This action cannot be undone.`)) return;
-    if (prompt(`Type ${phrase} to confirm:`) !== phrase) return;
+    const ok = await promptDialog(`Permanently delete <b>${descriptions[scope]}</b>? This action cannot be undone.<br><br>Type <code>${phrase}</code> below to confirm.`, phrase, { title:'Confirm permanent deletion' });
+    if (!ok) return;
     const response = await fetch('/api/data', { method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ scope, confirmation:phrase }) });
-    const result = await response.json();
-    if (!response.ok) { alert(result.detail || 'Unable to delete data.'); return; }
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) { toast(result.detail || 'Unable to delete data.'); return; }
+    if (scope === 'leads' || scope === 'all') selectedLeadIds.clear();
+    if (scope === 'calls' || scope === 'all') selectedCallIds.clear();
+    toast('Deleted successfully.');
     await refresh();
 }
-function renderLeads() {
-    const query = ($('leadSearch')?.value || '').toLowerCase();
-    const rows = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query));
-    if (!rows.length) { $('leadTable').innerHTML = `<div class="empty-state"><div><strong>${query ? 'No matching leads' : 'No leads imported yet'}</strong><div class="sub">${query ? 'Try a different search term.' : 'Upload a spreadsheet or add a lead manually to get started.'}</div></div></div>`; return; }
-    $('leadTable').innerHTML = `<table class="table"><thead><tr>${['Business Name','Phone','Category','Notes','Status','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(lead => `<tr><td><strong>${escapeHtml(lead.business_name)}</strong></td><td>${escapeHtml(lead.phone_number)}</td><td>${escapeHtml(lead.category)}</td><td>${escapeHtml(lead.notes)}</td><td><span class="badge">${escapeHtml(lead.status)}</span></td><td><div class="actions"><button class="btn secondary" onclick="callLead('${lead.lead_id}')">Start Call</button><button class="btn danger" onclick="deleteRecord('leads','${lead.lead_id}','this lead')">Delete</button></div></td></tr>`).join('')}</tbody></table>`;
+function filterLeads(list, { query = '', status = '', category = '' } = {}) {
+    const q = query.toLowerCase();
+    return list.filter(lead => {
+        if (q && ![lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(q)) return false;
+        if (status && lead.status !== status) return false;
+        if (category && lead.category !== category) return false;
+        return true;
+    });
 }
-$('leadSearch').oninput = renderLeads;
+function renderLeadBulkBar() {
+    const bar = $('leadBulkBar'); const n = selectedLeadIds.size;
+    if (!n) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+    bar.classList.remove('hidden');
+    bar.innerHTML = `<span><strong>${n}</strong> lead${n === 1 ? '' : 's'} selected</span><div class="actions"><button class="btn secondary" onclick="bulkCallLeads()">Call selected</button><button class="btn danger" onclick="bulkDeleteLeads()">Delete selected</button><button type="button" class="link" onclick="clearLeadSelection()">Clear</button></div>`;
+}
+function clearLeadSelection() { selectedLeadIds.clear(); renderLeads(); }
+function toggleLeadSelect(id, checked) {
+    if (checked) selectedLeadIds.add(id); else selectedLeadIds.delete(id);
+    renderLeadBulkBar();
+    const box = $('leadSelectAll'); if (box) box.checked = false;
+}
+function renderLeadPagination(pageCount, total) {
+    const el = $('leadPagination');
+    if (!total) { el.innerHTML = ''; return; }
+    el.innerHTML = `<span class="pager-info">Page ${leadPage} of ${pageCount}</span><div class="pager-controls"><button class="btn ghost" ${leadPage <= 1 ? 'disabled' : ''} onclick="changeLeadPage(-1)">Prev</button><button class="btn ghost" ${leadPage >= pageCount ? 'disabled' : ''} onclick="changeLeadPage(1)">Next</button></div>`;
+}
+function changeLeadPage(delta) { leadPage += delta; renderLeads(); }
+function renderLeads() {
+    const query = $('leadSearch')?.value || '';
+    populateSelect('leadStatusFilter', [...new Set(leads.map(l => l.status).filter(Boolean))].sort(), 'All statuses');
+    populateSelect('leadCategoryFilter', [...new Set(leads.map(l => l.category).filter(Boolean))].sort(), 'All categories');
+    const status = $('leadStatusFilter').value, category = $('leadCategoryFilter').value;
+    let rows = filterLeads(leads, { query, status, category });
+    rows = sortRows(rows, leadSort, { business_name:r => r.business_name, phone_number:r => r.phone_number, category:r => r.category, status:r => r.status, created_at:r => r.created_at });
+    const total = rows.length;
+    const filtered = Boolean(query || status || category);
+    const pageSizeRaw = Number($('leadPageSize')?.value || 25);
+    const pageSize = pageSizeRaw > 0 ? pageSizeRaw : Math.max(total, 1);
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    leadPage = Math.min(Math.max(leadPage, 1), pageCount);
+    const start = (leadPage - 1) * pageSize;
+    const pageRows = rows.slice(start, start + pageSize);
+    $('leadResultCount').textContent = leads.length ? `${total.toLocaleString()} of ${leads.length.toLocaleString()} lead${leads.length === 1 ? '' : 's'}${filtered ? ' matching filters' : ''}` : '';
+    if (!pageRows.length) {
+        $('leadTable').innerHTML = `<div class="empty-state"><div><strong>${leads.length ? 'No matching leads' : 'No leads imported yet'}</strong><div class="sub">${leads.length ? 'Try a different search term or clear filters.' : 'Upload a spreadsheet or add a lead manually to get started.'}</div></div></div>`;
+    } else {
+        const selectAllChecked = pageRows.every(lead => selectedLeadIds.has(lead.lead_id));
+        $('leadTable').innerHTML = `<table class="table"><thead><tr>
+            <th class="check-cell"><input type="checkbox" id="leadSelectAll" ${selectAllChecked ? 'checked' : ''}></th>
+            ${sortHeader('Business Name','business_name',leadSort,'toggleLeadSort')}
+            ${sortHeader('Phone','phone_number',leadSort,'toggleLeadSort')}
+            ${sortHeader('Category','category',leadSort,'toggleLeadSort')}
+            <th>Notes</th>
+            ${sortHeader('Status','status',leadSort,'toggleLeadSort')}
+            ${sortHeader('Added','created_at',leadSort,'toggleLeadSort')}
+            <th>Action</th>
+        </tr></thead><tbody>${pageRows.map(lead => `<tr>
+            <td class="check-cell"><input type="checkbox" class="rowCheck" ${selectedLeadIds.has(lead.lead_id) ? 'checked' : ''} onchange="toggleLeadSelect('${lead.lead_id}',this.checked)"></td>
+            <td><strong>${escapeHtml(lead.business_name)}</strong></td>
+            <td>${escapeHtml(lead.phone_number)}</td>
+            <td>${escapeHtml(lead.category) || '&mdash;'}</td>
+            <td style="max-width:220px"><span class="cell-truncate" title="${escapeHtml(lead.notes)}">${escapeHtml(lead.notes) || '&mdash;'}</span></td>
+            <td>${statusBadge(lead.status)}</td>
+            <td>${formatDate(lead.created_at)}</td>
+            <td><div class="actions"><button class="btn ghost" onclick="viewLead('${lead.lead_id}')">View</button><button class="btn secondary" onclick="callLead('${lead.lead_id}')">Call</button><button class="btn danger" onclick="deleteRecord('leads','${lead.lead_id}','this lead')">Delete</button></div></td>
+        </tr>`).join('')}</tbody></table>`;
+        $('leadSelectAll').onchange = event => { pageRows.forEach(lead => { if (event.target.checked) selectedLeadIds.add(lead.lead_id); else selectedLeadIds.delete(lead.lead_id); }); renderLeads(); };
+    }
+    renderLeadPagination(pageCount, total);
+    renderLeadBulkBar();
+}
+function toggleLeadSort(key) { leadSort = { key, dir: leadSort.key === key && leadSort.dir === 'asc' ? 'desc' : 'asc' }; renderLeads(); }
+$('leadSearch').oninput = () => { leadPage = 1; renderLeads(); };
+$('leadStatusFilter').onchange = () => { leadPage = 1; renderLeads(); };
+$('leadCategoryFilter').onchange = () => { leadPage = 1; renderLeads(); };
+$('leadPageSize').onchange = () => { leadPage = 1; renderLeads(); };
+async function viewLead(leadId) {
+    const lead = leads.find(l => l.lead_id === leadId);
+    if (!lead) { toast('Lead not found.'); return; }
+    const relatedCalls = calls.filter(c => c.lead_id === leadId);
+    const moreMayExist = !relatedCalls.length && calls.length >= callLimit;
+    const html = `<div class="detail-grid">
+            <div><span>Business</span><strong>${escapeHtml(lead.business_name)}</strong></div>
+            <div><span>Phone</span><strong><a href="tel:${escapeHtml(lead.phone_number)}">${escapeHtml(lead.phone_number)}</a></strong></div>
+            <div><span>Category</span><strong>${escapeHtml(lead.category) || '&mdash;'}</strong></div>
+            <div><span>Status</span><strong>${statusBadge(lead.status)}</strong></div>
+            <div><span>Added</span><strong>${formatDate(lead.created_at)}</strong></div>
+            <div><span>Updated</span><strong>${formatDate(lead.updated_at)}</strong></div>
+        </div>
+        <h3>Notes</h3><p class="sub">${escapeHtml(lead.notes) || 'No notes recorded.'}</p>
+        ${lead.last_error ? `<div class="notice bad">Last error: ${escapeHtml(lead.last_error)}</div>` : ''}
+        <h3>Call history${relatedCalls.length ? ` (${relatedCalls.length})` : ''}</h3>
+        ${relatedCalls.length ? `<div class="tablewrap"><table class="table related-calls"><thead><tr><th>Status</th><th>Interested</th><th>Duration</th><th>Timestamp</th><th></th></tr></thead><tbody>${relatedCalls.map(c => `<tr><td>${statusBadge(c.call_status)}</td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td>${safeNumber(c.duration)}s</td><td>${formatDate(c.timestamp)}</td><td><button class="btn ghost" onclick="detail('${c.call_id}')">View</button></td></tr>`).join('')}</tbody></table></div>` : `<p class="sub">No calls loaded for this lead yet.${moreMayExist ? ' Only the most recently loaded calls are searched here &mdash; increase the calls page size on the Calls tab to look further back.' : ''}</p>`}
+        <div class="actions" style="justify-content:flex-end;margin-top:16px">
+            <button class="btn secondary" onclick="callLead('${lead.lead_id}')">Start Call</button>
+            <button class="btn danger" onclick="deleteRecord('leads','${lead.lead_id}','this lead')">Delete Lead</button>
+        </div>`;
+    openModal(lead.business_name || 'Lead detail', html);
+}
 async function callLead(leadId) {
     showLeadMessage('Starting Twilio call...');
     try {
@@ -615,10 +942,13 @@ async function callLead(leadId) {
     }
 }
 async function callBatch() {
-    const query = ($('leadSearch')?.value || '').toLowerCase();
-    const selected = leads.filter(lead => !query || [lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(query));
-    if (!selected.length) { showLeadMessage('No leads available for batch calling.', 'bad'); return; }
-    if (!confirm(`Start calls for ${selected.length} visible leads?`)) return;
+    const query = $('leadSearch')?.value || '';
+    const status = $('leadStatusFilter')?.value || '';
+    const category = $('leadCategoryFilter')?.value || '';
+    const selected = filterLeads(leads, { query, status, category });
+    if (!selected.length) { showLeadMessage('No leads match the current filters.', 'bad'); return; }
+    const ok = await confirmDialog(`Start calls for <b>${selected.length}</b> lead(s) matching the current filters?`, { title:'Start batch calls', okLabel:'Start calls', danger:false });
+    if (!ok) return;
     showLeadMessage(`Starting batch for ${selected.length} leads...`);
     try {
         const response = await fetch('/api/leads/call-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ lead_ids:selected.map(lead => lead.lead_id), max_calls:selected.length }) });
@@ -640,9 +970,96 @@ function renderLiveCalls() {
     $('liveCallTable').innerHTML = `<div class="tablewrap"><table class="table"><thead><tr>${['Business','Phone','Status','Call SID','Updated'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${liveCalls.map(call => `<tr><td><strong>${escapeHtml(call.business_name)}</strong></td><td>${escapeHtml(call.phone_number)}</td><td><span class="badge yes">${escapeHtml(call.status)}</span></td><td>${escapeHtml(call.call_sid || '')}</td><td>${escapeHtml(call.updated_at || '')}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
-function renderCalls() { const q = ($('search')?.value || '').toLowerCase(), st = $('statusFilter')?.value || '', int = $('interestFilter')?.value || ''; const statuses = [...new Set(calls.map(c => c.call_status).filter(Boolean))]; $('statusFilter').innerHTML = '<option value="">All statuses</option>' + statuses.map(x => `<option ${x === st ? 'selected' : ''}>${escapeHtml(x)}</option>`).join(''); const rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int)); if (!rows.length) { $('callTable').innerHTML = `<div class="empty-state"><div><strong>${q || st || int ? 'No matching calls' : 'No call history yet'}</strong><div class="sub">${q || st || int ? 'Adjust the filters to see more results.' : 'Completed calls and AI outcomes will appear here.'}</div></div></div>`; return; } $('callTable').innerHTML = `<div class="tablewrap"><table class="table"><thead><tr>${['Business Name','Phone Number','Category','Call Status','Interested','Callback Requested','Duration','Timestamp','Action'].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(c => `<tr class="clickable" onclick="detail('${c.call_id}')"><td><strong>${escapeHtml(c.business_name)}</strong></td><td>${escapeHtml(c.phone)}</td><td>${escapeHtml(c.category)}</td><td><span class="badge">${escapeHtml(c.call_status)}</span></td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td><td>${safeNumber(c.duration)}s</td><td>${escapeHtml(c.timestamp)}</td><td><div class="actions"><button class="btn secondary" onclick="event.stopPropagation(); detail('${c.call_id}')">View</button><button class="btn danger" onclick="event.stopPropagation(); deleteRecord('calls','${c.call_id}','this call')">Delete</button></div></td></tr>`).join('')}</tbody></table></div>`; }
+function renderCallBulkBar() {
+    const bar = $('callBulkBar'); const n = selectedCallIds.size;
+    if (!n) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+    bar.classList.remove('hidden');
+    bar.innerHTML = `<span><strong>${n}</strong> call${n === 1 ? '' : 's'} selected</span><div class="actions"><button class="btn danger" onclick="bulkDeleteCalls()">Delete selected</button><button type="button" class="link" onclick="clearCallSelection()">Clear</button></div>`;
+}
+function clearCallSelection() { selectedCallIds.clear(); renderCalls(); }
+function toggleCallSelect(id, checked) {
+    if (checked) selectedCallIds.add(id); else selectedCallIds.delete(id);
+    renderCallBulkBar();
+    const box = $('callSelectAll'); if (box) box.checked = false;
+}
+function renderCallPagination() {
+    const el = $('callPagination');
+    const from = calls.length ? callOffset + 1 : 0;
+    const to = callOffset + calls.length;
+    const hasNext = calls.length >= callLimit && (!callTotalKnown || to < callTotalKnown);
+    el.innerHTML = `<span class="pager-info">${calls.length ? `Showing ${from.toLocaleString()}&ndash;${to.toLocaleString()}${callTotalKnown ? ` of ${callTotalKnown.toLocaleString()}` : ''}` : 'No calls loaded'}</span><div class="pager-controls"><button class="btn ghost" ${callOffset <= 0 ? 'disabled' : ''} onclick="changeCallPage(-1)">Prev</button><button class="btn ghost" ${hasNext ? '' : 'disabled'} onclick="changeCallPage(1)">Next</button></div>`;
+}
+async function changeCallPage(delta) {
+    callOffset = Math.max(0, callOffset + delta * callLimit);
+    selectedCallIds.clear();
+    await fetchCalls();
+    renderCalls();
+}
+function toggleCallSort(key) { callSort = { key, dir: callSort.key === key && callSort.dir === 'asc' ? 'desc' : 'asc' }; renderCalls(); }
+function renderCalls() {
+    const q = ($('search')?.value || '').toLowerCase();
+    const int = $('interestFilter')?.value || '';
+    populateSelect('statusFilter', [...new Set(calls.map(c => c.call_status).filter(Boolean))].sort(), 'All statuses');
+    const st = $('statusFilter').value;
+    let rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int));
+    rows = sortRows(rows, callSort, { business_name:r => r.business_name, phone:r => r.phone, category:r => r.category, call_status:r => r.call_status, duration:r => safeNumber(r.duration), timestamp:r => r.timestamp });
+    const filtered = Boolean(q || st || int);
+    const hintNeeded = filtered && calls.length >= callLimit;
+    $('callSearchHint').classList.toggle('hidden', !hintNeeded);
+    if (hintNeeded) $('callSearchHint').textContent = `Filters only apply to the ${calls.length.toLocaleString()} calls currently loaded (offset ${callOffset.toLocaleString()}). Page forward or raise the page size to search further back.`;
+    $('callResultCount').textContent = calls.length || callTotalKnown ? `${rows.length.toLocaleString()} shown · ${calls.length.toLocaleString()} loaded${callTotalKnown ? ` · ${callTotalKnown.toLocaleString()} total` : ''}` : '';
+    if (!rows.length) {
+        $('callTable').innerHTML = `<div class="empty-state"><div><strong>${filtered ? 'No matching calls' : 'No call history yet'}</strong><div class="sub">${filtered ? 'Adjust the filters to see more results.' : 'Completed calls and AI outcomes will appear here.'}</div></div></div>`;
+    } else {
+        const selectAllChecked = rows.every(c => selectedCallIds.has(c.call_id));
+        $('callTable').innerHTML = `<div class="tablewrap"><table class="table"><thead><tr>
+            <th class="check-cell"><input type="checkbox" id="callSelectAll" ${selectAllChecked ? 'checked' : ''}></th>
+            ${sortHeader('Business Name','business_name',callSort,'toggleCallSort')}
+            ${sortHeader('Phone Number','phone',callSort,'toggleCallSort')}
+            ${sortHeader('Category','category',callSort,'toggleCallSort')}
+            ${sortHeader('Call Status','call_status',callSort,'toggleCallSort')}
+            <th>Interested</th><th>Callback Requested</th>
+            ${sortHeader('Duration','duration',callSort,'toggleCallSort')}
+            ${sortHeader('Timestamp','timestamp',callSort,'toggleCallSort')}
+            <th>Action</th>
+        </tr></thead><tbody>${rows.map(c => `<tr class="clickable" onclick="detail('${c.call_id}')">
+            <td class="check-cell" onclick="event.stopPropagation()"><input type="checkbox" class="rowCheck" ${selectedCallIds.has(c.call_id) ? 'checked' : ''} onchange="toggleCallSelect('${c.call_id}',this.checked)"></td>
+            <td><strong>${escapeHtml(c.business_name)}</strong></td>
+            <td>${escapeHtml(c.phone)}</td>
+            <td>${escapeHtml(c.category)}</td>
+            <td>${statusBadge(c.call_status)}</td>
+            <td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td>
+            <td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td>
+            <td>${safeNumber(c.duration)}s</td>
+            <td>${formatDate(c.timestamp)}</td>
+            <td><div class="actions"><button class="btn secondary" onclick="event.stopPropagation(); detail('${c.call_id}')">View</button><button class="btn danger" onclick="event.stopPropagation(); deleteRecord('calls','${c.call_id}','this call')">Delete</button></div></td>
+        </tr>`).join('')}</tbody></table></div>`;
+        $('callSelectAll').onchange = event => { rows.forEach(c => { if (event.target.checked) selectedCallIds.add(c.call_id); else selectedCallIds.delete(c.call_id); }); renderCalls(); };
+    }
+    renderCallPagination();
+    renderCallBulkBar();
+}
 $('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls; $('interestFilter').onchange = renderCalls;
-async function detail(id) { try { const response = await fetch('/api/calls/' + encodeURIComponent(id)); if (!response.ok) throw new Error('Unable to load call details.'); const c = await response.json(); $('detail').innerHTML = `<h3>${escapeHtml(c.business_name || 'Unknown business')}</h3><p><b>Phone:</b> ${escapeHtml(c.phone)} &nbsp; <b>Category:</b> ${escapeHtml(c.category)}</p><p><b>Status:</b> ${escapeHtml(c.call_status)} &nbsp; <b>Duration:</b> ${safeNumber(c.duration)}s</p><h3>Structured AI response</h3><pre>${escapeHtml(JSON.stringify(c.structured_response || {}, null, 2))}</pre><h3>Transcript</h3><pre>${escapeHtml(c.transcript || 'No transcript saved.')}</pre>`; $('modal').classList.add('open'); } catch (error) { toast(error.message); } }
+$('callPageSize').onchange = async () => { callLimit = Number($('callPageSize').value) || 100; callOffset = 0; selectedCallIds.clear(); await fetchCalls(); renderCalls(); };
+async function detail(id) {
+    try {
+        const response = await fetch('/api/calls/' + encodeURIComponent(id));
+        if (!response.ok) throw new Error('Unable to load call details.');
+        const c = await response.json();
+        const html = `<div class="detail-grid">
+            <div><span>Phone</span><strong><a href="tel:${escapeHtml(c.phone)}">${escapeHtml(c.phone)}</a></strong></div>
+            <div><span>Category</span><strong>${escapeHtml(c.category) || '&mdash;'}</strong></div>
+            <div><span>Status</span><strong>${statusBadge(c.call_status)}</strong></div>
+            <div><span>Duration</span><strong>${safeNumber(c.duration)}s</strong></div>
+            <div><span>Interested</span><strong><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></strong></div>
+            <div><span>Callback requested</span><strong><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></strong></div>
+        </div>
+        <h3>Structured AI response</h3><pre>${escapeHtml(JSON.stringify(c.structured_response || {}, null, 2))}</pre>
+        <h3>Transcript</h3><pre>${escapeHtml(c.transcript || 'No transcript saved.')}</pre>
+        <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn danger" onclick="deleteRecord('calls','${c.call_id}','this call')">Delete Call</button></div>`;
+        openModal(c.business_name || 'Call detail', html);
+    } catch (error) { toast(error.message); }
+}
 function table(headers, rows) { return `<table class="table"><thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table>`; }
 
 let ws = null, audioContext = null, mediaStream = null, workletNode = null, nextPlayTime = 0;
@@ -659,7 +1076,7 @@ function playAudioChunk(arrayBuffer) {
     if (nextPlayTime < audioContext.currentTime) nextPlayTime = audioContext.currentTime;
     source.start(nextPlayTime); nextPlayTime += buffer.duration;
 }
-$('clearChatBtn').onclick = () => { if (!chatLog.textContent.trim() || confirm('Clear the conversation shown in this browser?')) chatLog.replaceChildren(); };
+$('clearChatBtn').onclick = async () => { if (!chatLog.textContent.trim() || await confirmDialog('Clear the conversation shown in this browser?', { title:'Clear conversation', okLabel:'Clear', danger:false })) chatLog.replaceChildren(); };
 startBtn.onclick = async () => {
     try {
         statusText.innerText = 'Requesting microphone access...';
