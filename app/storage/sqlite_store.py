@@ -18,6 +18,10 @@ from app.telephony.providers import DEFAULT_PROVIDER, PROVIDER_NAMES, SELECTABLE
 
 PROVIDER_TERMINAL = frozenset({"completed", "failed", "busy", "no-answer", "canceled"})
 ACTIVE_PROVIDER_KEY = "active_telephony_provider"
+LEAD_EXPORT_FIELDS = [
+    ("Business Name", "business_name"), ("Phone Number", "phone_number"), ("Category", "category"),
+    ("City", "city"), ("Notes", "notes"), ("Status", "status"), ("Added", "created_at"), ("Updated", "updated_at"),
+]
 
 # How long a worker may serve a cached copy of the active-provider setting.
 # Short enough that workers cannot meaningfully disagree after an operator
@@ -108,12 +112,12 @@ class SQLiteCallStore(JsonCallStore):
             db.execute("CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             db.execute("""CREATE TABLE IF NOT EXISTS leads(
                 lead_id TEXT PRIMARY KEY,business_name TEXT NOT NULL,phone_number TEXT NOT NULL UNIQUE,
-                category TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',
+                category TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',
                 do_not_call INTEGER NOT NULL DEFAULT 0,review_required INTEGER NOT NULL DEFAULT 0,
                 last_call_id TEXT,last_call_sid TEXT,last_error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS calls(
                 call_id TEXT PRIMARY KEY,lead_id TEXT REFERENCES leads(lead_id),phone_number TEXT NOT NULL,
-                business_name TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',
+                business_name TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',
                 call_sid TEXT UNIQUE,lifecycle_state TEXT NOT NULL,provider_status TEXT,outcome TEXT,
                 media_connected INTEGER NOT NULL DEFAULT 0,media_owner TEXT,transcript TEXT NOT NULL DEFAULT '',
                 structured_response TEXT NOT NULL DEFAULT '{}',interested INTEGER NOT NULL DEFAULT 0,
@@ -189,6 +193,24 @@ class SQLiteCallStore(JsonCallStore):
             timestamp TEXT NOT NULL)""")
         db.execute("CREATE INDEX IF NOT EXISTS calls_provider ON calls(provider)")
         db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','3')")
+        self._migrate_schema_v4(db)
+
+    def _migrate_schema_v4(self, db: sqlite3.Connection) -> None:
+        """City, for filtering leads and calls by location.
+
+        Additive and idempotent like v2/v3: guarded by checking for the
+        column first, so an already-migrated database (or a second worker
+        racing this on startup) just no-ops.
+        """
+        leads_existing = {row[1] for row in db.execute("PRAGMA table_info(leads)")}
+        if "city" not in leads_existing:
+            db.execute("ALTER TABLE leads ADD COLUMN city TEXT NOT NULL DEFAULT ''")
+        calls_existing = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+        if "city" not in calls_existing:
+            db.execute("ALTER TABLE calls ADD COLUMN city TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE INDEX IF NOT EXISTS leads_city ON leads(city)")
+        db.execute("CREATE INDEX IF NOT EXISTS calls_city ON calls(city)")
+        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','4')")
 
     # ------------------------------------------------------------------
     # Operator settings: the active telephony provider
@@ -332,10 +354,11 @@ class SQLiteCallStore(JsonCallStore):
                 "business_name": self.clean_text(row.get("business_name"), 200),
                 "phone_number": self.normalize_phone(row.get("phone_number")),
                 "category": self.clean_text(row.get("category"), 100),
+                "city": self.clean_text(row.get("city"), 100),
                 "notes": self.clean_text(row.get("notes"), 1000),
             }
         except ValueError as error:
-            return {"business_name": "", "phone_number": "", "category": "", "notes": ""}, [str(error)]
+            return {"business_name": "", "phone_number": "", "category": "", "city": "", "notes": ""}, [str(error)]
         errors = [] if normalized["business_name"] else ["Missing business name"]
         return normalized, errors
 
@@ -351,8 +374,8 @@ class SQLiteCallStore(JsonCallStore):
                 now = utcnow()
                 lead = {**clean, "lead_id": str(uuid4()), "status": "new", "created_at": now, "updated_at": now}
                 try:
-                    db.execute("""INSERT INTO leads(lead_id,business_name,phone_number,category,notes,status,created_at,updated_at)
-                        VALUES(:lead_id,:business_name,:phone_number,:category,:notes,:status,:created_at,:updated_at)""", lead)
+                    db.execute("""INSERT INTO leads(lead_id,business_name,phone_number,category,city,notes,status,created_at,updated_at)
+                        VALUES(:lead_id,:business_name,:phone_number,:category,:city,:notes,:status,:created_at,:updated_at)""", lead)
                     imported.append(lead)
                 except sqlite3.IntegrityError:
                     duplicates += 1
@@ -366,7 +389,7 @@ class SQLiteCallStore(JsonCallStore):
         return self._one("SELECT * FROM leads WHERE lead_id=?", (lead_id,))
 
     def update_lead(self, lead_id: str, **updates: Any) -> dict[str, Any] | None:
-        allowed = {"business_name", "phone_number", "category", "notes", "status", "do_not_call", "review_required", "last_call_id", "last_call_sid", "last_error"}
+        allowed = {"business_name", "phone_number", "category", "city", "notes", "status", "do_not_call", "review_required", "last_call_id", "last_call_sid", "last_error"}
         values = {key: value for key, value in updates.items() if key in allowed and value is not None}
         if not values:
             return self.get_lead(lead_id)
@@ -428,7 +451,7 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("DELETE FROM suppression_list")
             return deleted
 
-    def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", notes: str = "", idempotency_key: str | None = None, provider: str | None = None) -> dict[str, Any]:
+    def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", city: str = "", notes: str = "", idempotency_key: str | None = None, provider: str | None = None) -> dict[str, Any]:
         phone = self.normalize_phone(phone_number)
         # Resolved exactly once, here, and written to the call row below.
         # Every later stage -- dial, media, status callback, reconciliation,
@@ -453,8 +476,8 @@ class SQLiteCallStore(JsonCallStore):
             unresolved = db.execute("SELECT call_id FROM call_jobs j JOIN calls c USING(call_id) WHERE c.phone_number=? AND j.queue_state IN (?,?,?,?,?) LIMIT 1", (phone, *UNRESOLVED_JOB_STATES)).fetchone()
             if unresolved:
                 return self._call_from_db(db, unresolved[0])
-            db.execute("""INSERT INTO calls(call_id,lead_id,phone_number,business_name,category,notes,lifecycle_state,extraction_status,provider,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'QUEUED','not_required',?,?,?)""", (call_id, lead_id, phone, self.clean_text(business_name, 200), self.clean_text(category, 100), self.clean_text(notes, 1000), provider, now, now))
+            db.execute("""INSERT INTO calls(call_id,lead_id,phone_number,business_name,category,city,notes,lifecycle_state,extraction_status,provider,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,'QUEUED','not_required',?,?,?)""", (call_id, lead_id, phone, self.clean_text(business_name, 200), self.clean_text(category, 100), self.clean_text(city, 100), self.clean_text(notes, 1000), provider, now, now))
             db.execute("INSERT INTO call_jobs(job_id,call_id,queue_state,idempotency_key,created_at,updated_at) VALUES(?,?,'queued',?,?,?)", (call_id, call_id, idempotency_key, now, now))
             self._event(db, call_id, "queued", now, {"provider": provider})
             if lead_id:
@@ -827,10 +850,50 @@ class SQLiteCallStore(JsonCallStore):
         rows = self._rows("SELECT *,phone_number AS phone,outcome AS call_status,COALESCE(ended_at,started_at,created_at) AS timestamp FROM calls ORDER BY created_at DESC LIMIT ? OFFSET ?", (min(max(limit, 1), 500), max(offset, 0)))
         return [self._decode_call(row) for row in rows]
 
-    def iter_calls(self, chunk_size: int = 500) -> Iterator[dict[str, Any]]:
+    @staticmethod
+    def _calls_filter_clause(search: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, list[Any]]:
+        """Shared WHERE clause for exporting the calls the operator is looking at.
+
+        Mirrors the dashboard's client-side call filters (search/status/
+        interest/city/date) so "export" means "export what I'm filtering on"
+        rather than the whole table -- the export used to ignore every one of
+        these and always dump every call ever recorded.
+        """
+        clauses, params = [], []
+        if search:
+            like = f"%{search}%"
+            clauses.append("(business_name LIKE ? OR phone_number LIKE ? OR category LIKE ? OR city LIKE ?)")
+            params += [like, like, like, like]
+        if status:
+            clauses.append("COALESCE(outcome,'unknown')=?")
+            params.append(status)
+        if interested in {"true", "false"}:
+            clauses.append("interested=?")
+            params.append(1 if interested == "true" else 0)
+        if city:
+            clauses.append("city=?")
+            params.append(city)
+        # Compared as the plain "YYYY-MM-DD" date prefix, not the full
+        # timestamp: date_to is meant inclusively (through the end of that
+        # day), and the stored timestamps carry a time-of-day that would
+        # otherwise sort a same-day call after a bare date string.
+        date_expr = "substr(COALESCE(ended_at,started_at,created_at),1,10)"
+        if date_from:
+            clauses.append(f"{date_expr}>=?")
+            params.append(date_from)
+        if date_to:
+            clauses.append(f"{date_expr}<=?")
+            params.append(date_to)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def iter_calls(self, chunk_size: int = 500, *, search: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = "") -> Iterator[dict[str, Any]]:
+        where_sql, where_params = self._calls_filter_clause(search, status, interested, city, date_from, date_to)
         offset = 0
         while True:
-            rows = self._rows("SELECT *,phone_number AS phone,outcome AS call_status,COALESCE(ended_at,started_at,created_at) AS timestamp FROM calls ORDER BY created_at DESC LIMIT ? OFFSET ?", (chunk_size, offset))
+            rows = self._rows(
+                f"SELECT *,phone_number AS phone,outcome AS call_status,COALESCE(ended_at,started_at,created_at) AS timestamp FROM calls{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*where_params, chunk_size, offset),
+            )
             if not rows:
                 break
             for row in rows:
@@ -869,15 +932,16 @@ class SQLiteCallStore(JsonCallStore):
         result["average_call_duration"] = round(result["average_call_duration"], 1)
         return result
 
-    def export_calls(self, fmt: str) -> tuple[str, bytes, str]:
+    def export_calls(self, fmt: str, *, search: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, bytes, str]:
+        filters = dict(search=search, status=status, interested=interested, city=city, date_from=date_from, date_to=date_to)
         if fmt == "json":
-            calls = list(self.iter_calls())
+            calls = list(self.iter_calls(**filters))
             return "call_results.json", json.dumps(calls, ensure_ascii=False, indent=2).encode(), "application/json"
         if fmt == "csv":
             output = StringIO()
             writer = csv.DictWriter(output, fieldnames=EXPORT_HEADERS)
             writer.writeheader()
-            for call in self.iter_calls():
+            for call in self.iter_calls(**filters):
                 writer.writerow(self._flat_call(call))
             return "call_results.csv", output.getvalue().encode(), "text/csv"
         if Workbook is None:
@@ -885,11 +949,63 @@ class SQLiteCallStore(JsonCallStore):
         workbook = Workbook(write_only=True)
         sheet = workbook.create_sheet("Call Results")
         sheet.append(EXPORT_HEADERS)
-        for call in self.iter_calls():
+        for call in self.iter_calls(**filters):
             row = self._flat_call(call)
             sheet.append([row.get(header, "") for header in EXPORT_HEADERS])
         output = BytesIO(); workbook.save(output); workbook.close()
         return "call_results.xlsx", output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    @staticmethod
+    def _leads_filter_clause(search: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, list[Any]]:
+        """Shared WHERE clause for exporting the leads the operator is looking at (mirrors _calls_filter_clause)."""
+        clauses, params = [], []
+        if search:
+            like = f"%{search}%"
+            clauses.append("(business_name LIKE ? OR phone_number LIKE ? OR category LIKE ? OR city LIKE ? OR notes LIKE ?)")
+            params += [like, like, like, like, like]
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if category:
+            clauses.append("category=?")
+            params.append(category)
+        if city:
+            clauses.append("city=?")
+            params.append(city)
+        date_expr = "substr(created_at,1,10)"
+        if date_from:
+            clauses.append(f"{date_expr}>=?")
+            params.append(date_from)
+        if date_to:
+            clauses.append(f"{date_expr}<=?")
+            params.append(date_to)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def iter_leads(self, *, search: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = "") -> list[dict[str, Any]]:
+        where_sql, params = self._leads_filter_clause(search, status, category, city, date_from, date_to)
+        return self._rows(f"SELECT * FROM leads{where_sql} ORDER BY created_at DESC", params)
+
+    def export_leads(self, fmt: str, *, search: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, bytes, str]:
+        leads = self.iter_leads(search=search, status=status, category=category, city=city, date_from=date_from, date_to=date_to)
+        if fmt == "json":
+            return "leads.json", json.dumps(leads, ensure_ascii=False, indent=2).encode(), "application/json"
+        rows = [{header: lead.get(field, "") for header, field in LEAD_EXPORT_FIELDS} for lead in leads]
+        headers = [header for header, _ in LEAD_EXPORT_FIELDS]
+        if fmt == "csv":
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+            return "leads.csv", output.getvalue().encode(), "text/csv"
+        if Workbook is None:
+            raise RuntimeError("openpyxl is required for Excel export")
+        workbook = Workbook(write_only=True)
+        sheet = workbook.create_sheet("Leads")
+        sheet.append(headers)
+        for row in rows:
+            sheet.append([row.get(header, "") for header in headers])
+        output = BytesIO(); workbook.save(output); workbook.close()
+        return "leads.xlsx", output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     def _decode_call(self, row: dict[str, Any]) -> dict[str, Any]:
         structured = row.get("structured_response") or "{}"

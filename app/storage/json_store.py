@@ -26,6 +26,7 @@ EXPORT_HEADERS = [
     "business_name",
     "phone",
     "category",
+    "city",
     "notes",
     "call_status",
     "interested",
@@ -257,15 +258,16 @@ class JsonCallStore:
         wb = Workbook()
         ws = wb.active
         ws.title = "Leads"
-        headers = ["Business Name", "Phone Number", "Category", "Notes"]
+        headers = ["Business Name", "Phone Number", "Category", "City", "Notes"]
         ws.append(headers)
-        ws.append(["Sharma Electronics", "+919876543210", "Mobile Accessories", "Owner prefers evenings"])
+        ws.append(["Sharma Electronics", "+919876543210", "Mobile Accessories", "Mumbai", "Owner prefers evenings"])
         for cell in ws["B"]:
             cell.number_format = "@"
         ws.column_dimensions["A"].width = 28
         ws.column_dimensions["B"].width = 20
         ws.column_dimensions["C"].width = 24
-        ws.column_dimensions["D"].width = 32
+        ws.column_dimensions["D"].width = 18
+        ws.column_dimensions["E"].width = 32
         bio = BytesIO()
         wb.save(bio)
         wb.close()

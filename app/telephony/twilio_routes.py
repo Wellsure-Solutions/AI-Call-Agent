@@ -52,6 +52,7 @@ class OutboundCallRequest(BaseModel):
     lead_id: str | None = None
     business_name: str | None = None
     category: str | None = None
+    city: str | None = None
     notes: str | None = None
 
 def configure(store: SQLiteCallStore, result_service: CallResultService) -> None:
@@ -124,7 +125,7 @@ def valid_stream_token(call_id: str, sid: str, expiry: int, token: str) -> bool:
 @router.post("/outbound")
 async def start_outbound_call(request: OutboundCallRequest, idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     try:
-        call = await _repo().aenqueue_call(phone_number=request.phone_number, lead_id=request.lead_id, business_name=request.business_name or "", category=request.category or "", notes=request.notes or "", idempotency_key=idempotency_key)
+        call = await _repo().aenqueue_call(phone_number=request.phone_number, lead_id=request.lead_id, business_name=request.business_name or "", category=request.category or "", city=request.city or "", notes=request.notes or "", idempotency_key=idempotency_key)
     except SuppressedError as exc: raise HTTPException(409, str(exc)) from exc
     except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     return {"call_id": call["call_id"], "call_sid": call.get("call_sid"), "status": "queued"}

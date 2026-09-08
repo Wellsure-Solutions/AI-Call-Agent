@@ -172,6 +172,9 @@
         .toolbar-search { flex:2 1 220px; min-width:180px; }
         .toolbar select { flex:1 1 150px; min-width:130px; }
         .toolbar-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-left:auto; }
+        .date-field { display:flex; flex-direction:column; gap:5px; flex:0 0 auto; }
+        .date-field label { margin:0; white-space:nowrap; }
+        .date-field input { min-width:142px; }
         .table { width:100%; border-collapse:separate; border-spacing:0; background:#fff; }
         .table th,.table td { padding:13px 14px; text-align:left; border-bottom:1px solid #eeeae3; white-space:nowrap; font-size:12px; }
         .table th { position:sticky; top:0; z-index:1; color:#667085; background:#faf9f6; font-size:10px; font-weight:780; letter-spacing:.055em; text-transform:uppercase; }
@@ -296,7 +299,12 @@
                     <button id="exportToggle" class="btn ghost" type="button" aria-haspopup="true" aria-expanded="false">
                         <svg viewBox="0 0 24 24"><path d="M12 3v12m0-12 4 4m-4-4L8 7M5 13v6h14v-6"/></svg><span class="btn-label">Export</span>
                     </button>
-                    <div class="export-menu" role="menu"><a href="/api/export/xlsx" role="menuitem">Excel <span>.xlsx</span></a><a href="/api/export/csv" role="menuitem">CSV <span>.csv</span></a><a href="/api/export/json" role="menuitem">JSON <span>.json</span></a></div>
+                    <div class="export-menu" role="menu">
+                        <div id="exportHint" class="field-note" style="padding:2px 11px 8px;margin:0">Exports call history.</div>
+                        <a href="/api/export/xlsx" data-fmt="xlsx" role="menuitem">Excel <span>.xlsx</span></a>
+                        <a href="/api/export/csv" data-fmt="csv" role="menuitem">CSV <span>.csv</span></a>
+                        <a href="/api/export/json" data-fmt="json" role="menuitem">JSON <span>.json</span></a>
+                    </div>
                 </div>
                 <button id="newCallBtn" class="btn" type="button"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span class="btn-label">New Call</span></button>
             </div>
@@ -335,22 +343,39 @@
                     </form>
                 </div>
                 <div id="pastePane" class="leadPane hidden" style="margin-top:16px">
-                    <form id="pasteForm"><label>Paste copied spreadsheet rows</label><textarea name="pasted_data" placeholder="Business Name&#9;Phone Number&#9;Category&#9;Notes&#10;Sharma Electronics&#9;9876543210&#9;Mobile Accessories&#9;Owner prefers evenings"></textarea><br><br><button class="btn" type="submit">Preview & Validate Pasted Rows</button></form>
+                    <form id="pasteForm"><label>Paste copied spreadsheet rows</label><textarea name="pasted_data" placeholder="Business Name&#9;Phone Number&#9;Category&#9;City&#9;Notes&#10;Sharma Electronics&#9;9876543210&#9;Mobile Accessories&#9;Mumbai&#9;Owner prefers evenings"></textarea><br><br><button class="btn" type="submit">Preview & Validate Pasted Rows</button></form>
                 </div>
                 <div id="manualPane" class="leadPane hidden" style="margin-top:16px">
-                    <form id="manualForm" class="formgrid"><div><label>Business Name *</label><input name="business_name" placeholder="Sharma Electronics" required></div><div><label>Phone Number *</label><input name="phone_number" placeholder="+919876543210" required></div><div><label>Category</label><input name="category" placeholder="Mobile Accessories (optional)"></div><div><label>Notes</label><input name="notes" placeholder="Owner prefers evening callback"></div><div><button class="btn" type="submit">Add Lead</button></div></form>
+                    <form id="manualForm" class="formgrid"><div><label>Business Name *</label><input name="business_name" placeholder="Sharma Electronics" required></div><div><label>Phone Number *</label><input name="phone_number" placeholder="+919876543210" required></div><div><label>Category</label><input name="category" placeholder="Mobile Accessories (optional)"></div><div><label>City</label><input name="city" placeholder="Mumbai (optional)"></div><div><label>Notes</label><input name="notes" placeholder="Owner prefers evening callback"></div><div><button class="btn" type="submit">Add Lead</button></div></form>
                 </div>
             </div>
             <div id="mappingCard" class="card hidden" style="margin-top:16px"><h3>Map columns & import</h3><div id="mappingSummary" class="notice"></div><div id="mappingBox"></div><div id="previewTable" class="tablewrap" style="margin-top:14px"></div></div>
             <div class="card" style="margin-top:16px">
                 <div class="actions" style="justify-content:space-between">
                     <div><h3>Imported leads</h3><div id="leadResultCount" class="sub"></div></div>
-                    <div class="actions"><button class="btn" onclick="callBatch()">Start Batch Calls</button><button class="btn danger" onclick="clearData('leads')">Delete All Leads</button></div>
+                    <div class="actions">
+                        <button class="btn" onclick="callBatch()">Start Batch Calls</button>
+                        <button class="btn danger" onclick="clearData('leads')">Delete All Leads</button>
+                        <div id="leadExportWrap" class="export-wrap">
+                            <button id="leadExportToggle" class="btn ghost" type="button" aria-haspopup="true" aria-expanded="false">
+                                <svg viewBox="0 0 24 24"><path d="M12 3v12m0-12 4 4m-4-4L8 7M5 13v6h14v-6"/></svg><span class="btn-label">Export</span>
+                            </button>
+                            <div class="export-menu" role="menu">
+                                <div id="leadExportHint" class="field-note" style="padding:2px 11px 8px;margin:0"></div>
+                                <a href="/api/leads/export/xlsx" data-fmt="xlsx" role="menuitem">Excel <span>.xlsx</span></a>
+                                <a href="/api/leads/export/csv" data-fmt="csv" role="menuitem">CSV <span>.csv</span></a>
+                                <a href="/api/leads/export/json" data-fmt="json" role="menuitem">JSON <span>.json</span></a>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div class="toolbar" style="margin-top:16px">
-                    <input id="leadSearch" class="toolbar-search" placeholder="Search business, phone, category, notes...">
+                    <input id="leadSearch" class="toolbar-search" placeholder="Search business, phone, category, city, notes...">
                     <select id="leadStatusFilter" aria-label="Filter leads by status"><option value="">All statuses</option></select>
                     <select id="leadCategoryFilter" aria-label="Filter leads by category"><option value="">All categories</option></select>
+                    <select id="leadCityFilter" aria-label="Filter leads by city"><option value="">All cities</option></select>
+                    <div class="date-field"><label>Added from</label><input type="date" id="leadDateFrom" aria-label="Added from date"></div>
+                    <div class="date-field"><label>Added to</label><input type="date" id="leadDateTo" aria-label="Added to date"></div>
                     <div class="toolbar-actions"><select id="leadPageSize" aria-label="Leads per page"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option><option value="0">Show all</option></select></div>
                 </div>
                 <div id="leadBulkBar" class="bulk-bar hidden"></div>
@@ -366,9 +391,12 @@
                     <div><h3>Call history</h3><div id="callResultCount" class="sub"></div></div>
                 </div>
                 <div class="toolbar" style="margin-top:16px">
-                    <input id="search" class="toolbar-search" aria-label="Search call history" placeholder="Search business, phone, category...">
+                    <input id="search" class="toolbar-search" aria-label="Search call history" placeholder="Search business, phone, category, city...">
                     <select id="statusFilter" aria-label="Filter by call status"><option value="">All statuses</option></select>
                     <select id="interestFilter" aria-label="Filter by interest"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select>
+                    <select id="callCityFilter" aria-label="Filter by city"><option value="">All cities</option></select>
+                    <div class="date-field"><label>From</label><input type="date" id="callDateFrom" aria-label="Call date from"></div>
+                    <div class="date-field"><label>To</label><input type="date" id="callDateTo" aria-label="Call date to"></div>
                     <div class="toolbar-actions">
                         <select id="callPageSize" aria-label="Calls per page"><option value="50">50 / page</option><option value="100" selected>100 / page</option><option value="200">200 / page</option><option value="500">500 / page</option></select>
                         <button class="btn danger" onclick="clearData('calls')">Delete Call History</button>
@@ -568,12 +596,26 @@ function setPage(name) {
 }
 document.querySelectorAll('.nav button').forEach(button => button.onclick = () => { setPage(button.dataset.page); refresh(); });
 $('newCallBtn').onclick = () => { setPage('leads'); toast('Choose a lead or add a new contact to begin.'); };
-$('exportToggle').onclick = event => { event.stopPropagation(); const wrap = $('exportWrap'); const open = wrap.classList.toggle('open'); $('exportToggle').setAttribute('aria-expanded', String(open)); };
-document.addEventListener('click', event => { if (!$('exportWrap').contains(event.target)) { $('exportWrap').classList.remove('open'); $('exportToggle').setAttribute('aria-expanded','false'); } });
+function wireExportToggle(toggleId, wrapId, onOpen) {
+    $(toggleId).onclick = event => {
+        event.stopPropagation();
+        if (onOpen) onOpen();
+        const wrap = $(wrapId);
+        const open = wrap.classList.toggle('open');
+        $(toggleId).setAttribute('aria-expanded', String(open));
+    };
+}
+wireExportToggle('exportToggle', 'exportWrap', refreshExportLinks);
+wireExportToggle('leadExportToggle', 'leadExportWrap', refreshLeadExportLinks);
+document.addEventListener('click', event => {
+    document.querySelectorAll('.export-wrap.open').forEach(wrap => {
+        if (!wrap.contains(event.target)) { wrap.classList.remove('open'); wrap.querySelector('[aria-expanded]')?.setAttribute('aria-expanded', 'false'); }
+    });
+});
 window.addEventListener('resize', () => { if (window.innerWidth > 820) closeMobileNav(); });
 function closeModal() { $('modal').classList.remove('open'); }
 $('modal').addEventListener('click', event => { if (event.target === $('modal')) closeModal(); });
-document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeConfirm(false); closeMobileNav(); $('exportWrap').classList.remove('open'); } });
+document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeModal(); closeConfirm(false); closeMobileNav(); document.querySelectorAll('.export-wrap.open').forEach(wrap => wrap.classList.remove('open')); } });
 
 function pruneSelection(set, validIds) { const valid = new Set(validIds); [...set].forEach(id => { if (!valid.has(id)) set.delete(id); }); }
 
@@ -734,16 +776,16 @@ async function previewLeads(formData) {
     renderMapping(); renderPreviewTable(previewRows.slice(0, 25));
 }
 function renderMapping() {
-    const aliases = { business_name:['business','business name','company','name','store'], phone_number:['phone','phone number','mobile','contact','number'], category:['category','type','industry','segment'], notes:['notes','note','remarks','comment'] };
+    const aliases = { business_name:['business','business name','company','name','store'], phone_number:['phone','phone number','mobile','contact','number'], category:['category','type','industry','segment'], city:['city','town','location','area'], notes:['notes','note','remarks','comment'] };
     const guess = field => headers.find(header => aliases[field].some(alias => header.toLowerCase().includes(alias))) || '';
     const select = field => `<select id="map_${field}"><option value="">Select column</option>${headers.map(header => `<option value="${escapeHtml(header)}" ${guess(field) === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}</select>`;
-    $('mappingBox').innerHTML = `<div class="formgrid"><div><label>Business Name *</label>${select('business_name')}</div><div><label>Phone Number *</label>${select('phone_number')}</div><div><label>Category</label>${select('category')}</div><div><label>Notes</label>${select('notes')}</div></div><br><div class="actions"><button class="btn" onclick="importMappedLeads()">Import ${previewRows.length} rows</button><button class="btn ghost" onclick="clearMapping()">Clear Preview</button></div>`;
+    $('mappingBox').innerHTML = `<div class="formgrid"><div><label>Business Name *</label>${select('business_name')}</div><div><label>Phone Number *</label>${select('phone_number')}</div><div><label>Category</label>${select('category')}</div><div><label>City</label>${select('city')}</div><div><label>Notes</label>${select('notes')}</div></div><br><div class="actions"><button class="btn" onclick="importMappedLeads()">Import ${previewRows.length} rows</button><button class="btn ghost" onclick="clearMapping()">Clear Preview</button></div>`;
 }
 function renderPreviewTable(rows) { $('previewTable').innerHTML = table(headers, rows.map(row => headers.map(header => row[header]))); }
 function clearMapping() { previewRows = []; headers = []; $('mappingCard').classList.add('hidden'); }
 async function importMappedLeads() {
-    const mapping = { business_name:$('map_business_name').value, phone_number:$('map_phone_number').value, category:$('map_category').value, notes:$('map_notes').value };
-    if (!mapping.business_name || !mapping.phone_number) { showLeadMessage('Map Business Name and Phone Number before importing. Category is optional.', 'bad'); return; }
+    const mapping = { business_name:$('map_business_name').value, phone_number:$('map_phone_number').value, category:$('map_category').value, city:$('map_city').value, notes:$('map_notes').value };
+    if (!mapping.business_name || !mapping.phone_number) { showLeadMessage('Map Business Name and Phone Number before importing. Category and City are optional.', 'bad'); return; }
     const response = await fetch('/api/leads/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ rows:previewRows, mapping }) });
     const result = await response.json();
     const type = result.rejected?.length ? 'warn' : 'ok';
@@ -828,14 +870,30 @@ async function clearData(scope) {
     toast('Deleted successfully.');
     await refresh();
 }
-function filterLeads(list, { query = '', status = '', category = '' } = {}) {
+function filterLeads(list, { query = '', status = '', category = '', city = '', dateFrom = '', dateTo = '' } = {}) {
     const q = query.toLowerCase();
     return list.filter(lead => {
-        if (q && ![lead.business_name, lead.phone_number, lead.category, lead.notes].join(' ').toLowerCase().includes(q)) return false;
+        if (q && ![lead.business_name, lead.phone_number, lead.category, lead.city, lead.notes].join(' ').toLowerCase().includes(q)) return false;
         if (status && lead.status !== status) return false;
         if (category && lead.category !== category) return false;
+        if (city && lead.city !== city) return false;
+        const day = (lead.created_at || '').slice(0, 10);
+        if (dateFrom && day < dateFrom) return false;
+        if (dateTo && day > dateTo) return false;
         return true;
     });
+}
+function buildLeadExportParams() {
+    const params = new URLSearchParams();
+    const entries = { q:$('leadSearch')?.value || '', status:$('leadStatusFilter')?.value || '', category:$('leadCategoryFilter')?.value || '', city:$('leadCityFilter')?.value || '', date_from:$('leadDateFrom')?.value || '', date_to:$('leadDateTo')?.value || '' };
+    Object.entries(entries).forEach(([key, value]) => { if (value) params.set(key, value); });
+    return params.toString();
+}
+function refreshLeadExportLinks() {
+    const qs = buildLeadExportParams();
+    const suffix = qs ? `?${qs}` : '';
+    document.querySelectorAll('#leadExportWrap a[data-fmt]').forEach(a => { a.href = `/api/leads/export/${a.dataset.fmt}${suffix}`; });
+    $('leadExportHint').textContent = qs ? 'Exports the leads matching your current filters.' : 'Exports all leads.';
 }
 function renderLeadBulkBar() {
     const bar = $('leadBulkBar'); const n = selectedLeadIds.size;
@@ -857,13 +915,15 @@ function renderLeadPagination(pageCount, total) {
 function changeLeadPage(delta) { leadPage += delta; renderLeads(); }
 function renderLeads() {
     const query = $('leadSearch')?.value || '';
+    const dateFrom = $('leadDateFrom')?.value || '', dateTo = $('leadDateTo')?.value || '';
     populateSelect('leadStatusFilter', [...new Set(leads.map(l => l.status).filter(Boolean))].sort(), 'All statuses');
     populateSelect('leadCategoryFilter', [...new Set(leads.map(l => l.category).filter(Boolean))].sort(), 'All categories');
-    const status = $('leadStatusFilter').value, category = $('leadCategoryFilter').value;
-    let rows = filterLeads(leads, { query, status, category });
-    rows = sortRows(rows, leadSort, { business_name:r => r.business_name, phone_number:r => r.phone_number, category:r => r.category, status:r => r.status, created_at:r => r.created_at });
+    populateSelect('leadCityFilter', [...new Set(leads.map(l => l.city).filter(Boolean))].sort(), 'All cities');
+    const status = $('leadStatusFilter').value, category = $('leadCategoryFilter').value, city = $('leadCityFilter').value;
+    let rows = filterLeads(leads, { query, status, category, city, dateFrom, dateTo });
+    rows = sortRows(rows, leadSort, { business_name:r => r.business_name, phone_number:r => r.phone_number, category:r => r.category, city:r => r.city, status:r => r.status, created_at:r => r.created_at });
     const total = rows.length;
-    const filtered = Boolean(query || status || category);
+    const filtered = Boolean(query || status || category || city || dateFrom || dateTo);
     const pageSizeRaw = Number($('leadPageSize')?.value || 25);
     const pageSize = pageSizeRaw > 0 ? pageSizeRaw : Math.max(total, 1);
     const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -880,6 +940,7 @@ function renderLeads() {
             ${sortHeader('Business Name','business_name',leadSort,'toggleLeadSort')}
             ${sortHeader('Phone','phone_number',leadSort,'toggleLeadSort')}
             ${sortHeader('Category','category',leadSort,'toggleLeadSort')}
+            ${sortHeader('City','city',leadSort,'toggleLeadSort')}
             <th>Notes</th>
             ${sortHeader('Status','status',leadSort,'toggleLeadSort')}
             ${sortHeader('Added','created_at',leadSort,'toggleLeadSort')}
@@ -889,6 +950,7 @@ function renderLeads() {
             <td><strong>${escapeHtml(lead.business_name)}</strong></td>
             <td>${escapeHtml(lead.phone_number)}</td>
             <td>${escapeHtml(lead.category) || '&mdash;'}</td>
+            <td>${escapeHtml(lead.city) || '&mdash;'}</td>
             <td style="max-width:220px"><span class="cell-truncate" title="${escapeHtml(lead.notes)}">${escapeHtml(lead.notes) || '&mdash;'}</span></td>
             <td>${statusBadge(lead.status)}</td>
             <td>${formatDate(lead.created_at)}</td>
@@ -898,11 +960,15 @@ function renderLeads() {
     }
     renderLeadPagination(pageCount, total);
     renderLeadBulkBar();
+    refreshLeadExportLinks();
 }
 function toggleLeadSort(key) { leadSort = { key, dir: leadSort.key === key && leadSort.dir === 'asc' ? 'desc' : 'asc' }; renderLeads(); }
 $('leadSearch').oninput = () => { leadPage = 1; renderLeads(); };
 $('leadStatusFilter').onchange = () => { leadPage = 1; renderLeads(); };
 $('leadCategoryFilter').onchange = () => { leadPage = 1; renderLeads(); };
+$('leadCityFilter').onchange = () => { leadPage = 1; renderLeads(); };
+$('leadDateFrom').onchange = () => { leadPage = 1; renderLeads(); };
+$('leadDateTo').onchange = () => { leadPage = 1; renderLeads(); };
 $('leadPageSize').onchange = () => { leadPage = 1; renderLeads(); };
 async function viewLead(leadId) {
     const lead = leads.find(l => l.lead_id === leadId);
@@ -913,6 +979,7 @@ async function viewLead(leadId) {
             <div><span>Business</span><strong>${escapeHtml(lead.business_name)}</strong></div>
             <div><span>Phone</span><strong><a href="tel:${escapeHtml(lead.phone_number)}">${escapeHtml(lead.phone_number)}</a></strong></div>
             <div><span>Category</span><strong>${escapeHtml(lead.category) || '&mdash;'}</strong></div>
+            <div><span>City</span><strong>${escapeHtml(lead.city) || '&mdash;'}</strong></div>
             <div><span>Status</span><strong>${statusBadge(lead.status)}</strong></div>
             <div><span>Added</span><strong>${formatDate(lead.created_at)}</strong></div>
             <div><span>Updated</span><strong>${formatDate(lead.updated_at)}</strong></div>
@@ -945,7 +1012,9 @@ async function callBatch() {
     const query = $('leadSearch')?.value || '';
     const status = $('leadStatusFilter')?.value || '';
     const category = $('leadCategoryFilter')?.value || '';
-    const selected = filterLeads(leads, { query, status, category });
+    const city = $('leadCityFilter')?.value || '';
+    const dateFrom = $('leadDateFrom')?.value || '', dateTo = $('leadDateTo')?.value || '';
+    const selected = filterLeads(leads, { query, status, category, city, dateFrom, dateTo });
     if (!selected.length) { showLeadMessage('No leads match the current filters.', 'bad'); return; }
     const ok = await confirmDialog(`Start calls for <b>${selected.length}</b> lead(s) matching the current filters?`, { title:'Start batch calls', okLabel:'Start calls', danger:false });
     if (!ok) return;
@@ -996,17 +1065,41 @@ async function changeCallPage(delta) {
     renderCalls();
 }
 function toggleCallSort(key) { callSort = { key, dir: callSort.key === key && callSort.dir === 'asc' ? 'desc' : 'asc' }; renderCalls(); }
+function buildCallExportParams() {
+    const params = new URLSearchParams();
+    const entries = { q:$('search')?.value || '', status:$('statusFilter')?.value || '', interested:$('interestFilter')?.value || '', city:$('callCityFilter')?.value || '', date_from:$('callDateFrom')?.value || '', date_to:$('callDateTo')?.value || '' };
+    Object.entries(entries).forEach(([key, value]) => { if (value) params.set(key, value); });
+    return params.toString();
+}
+function refreshExportLinks() {
+    const qs = buildCallExportParams();
+    const suffix = qs ? `?${qs}` : '';
+    document.querySelectorAll('#exportWrap a[data-fmt]').forEach(a => { a.href = `/api/export/${a.dataset.fmt}${suffix}`; });
+    $('exportHint').textContent = qs ? 'Exports the calls matching your current filters.' : 'Exports all calls.';
+}
 function renderCalls() {
     const q = ($('search')?.value || '').toLowerCase();
     const int = $('interestFilter')?.value || '';
+    const dateFrom = $('callDateFrom')?.value || '', dateTo = $('callDateTo')?.value || '';
     populateSelect('statusFilter', [...new Set(calls.map(c => c.call_status).filter(Boolean))].sort(), 'All statuses');
+    populateSelect('callCityFilter', [...new Set(calls.map(c => c.city).filter(Boolean))].sort(), 'All cities');
     const st = $('statusFilter').value;
-    let rows = calls.filter(c => (!q || [c.business_name,c.phone,c.category].join(' ').toLowerCase().includes(q)) && (!st || c.call_status === st) && (!int || String(!!c.interested) === int));
-    rows = sortRows(rows, callSort, { business_name:r => r.business_name, phone:r => r.phone, category:r => r.category, call_status:r => r.call_status, duration:r => safeNumber(r.duration), timestamp:r => r.timestamp });
-    const filtered = Boolean(q || st || int);
+    const city = $('callCityFilter').value;
+    let rows = calls.filter(c => {
+        if (q && ![c.business_name, c.phone, c.category, c.city].join(' ').toLowerCase().includes(q)) return false;
+        if (st && c.call_status !== st) return false;
+        if (int && String(!!c.interested) !== int) return false;
+        if (city && c.city !== city) return false;
+        const day = (c.timestamp || '').slice(0, 10);
+        if (dateFrom && day < dateFrom) return false;
+        if (dateTo && day > dateTo) return false;
+        return true;
+    });
+    rows = sortRows(rows, callSort, { business_name:r => r.business_name, phone:r => r.phone, category:r => r.category, city:r => r.city, call_status:r => r.call_status, duration:r => safeNumber(r.duration), timestamp:r => r.timestamp });
+    const filtered = Boolean(q || st || int || city || dateFrom || dateTo);
     const hintNeeded = filtered && calls.length >= callLimit;
     $('callSearchHint').classList.toggle('hidden', !hintNeeded);
-    if (hintNeeded) $('callSearchHint').textContent = `Filters only apply to the ${calls.length.toLocaleString()} calls currently loaded (offset ${callOffset.toLocaleString()}). Page forward or raise the page size to search further back.`;
+    if (hintNeeded) $('callSearchHint').textContent = `The table's filters only apply to the ${calls.length.toLocaleString()} calls currently loaded (offset ${callOffset.toLocaleString()}) &mdash; page forward or raise the page size to see further back. Export applies these filters to the full call history instead.`;
     $('callResultCount').textContent = calls.length || callTotalKnown ? `${rows.length.toLocaleString()} shown · ${calls.length.toLocaleString()} loaded${callTotalKnown ? ` · ${callTotalKnown.toLocaleString()} total` : ''}` : '';
     if (!rows.length) {
         $('callTable').innerHTML = `<div class="empty-state"><div><strong>${filtered ? 'No matching calls' : 'No call history yet'}</strong><div class="sub">${filtered ? 'Adjust the filters to see more results.' : 'Completed calls and AI outcomes will appear here.'}</div></div></div>`;
@@ -1017,6 +1110,7 @@ function renderCalls() {
             ${sortHeader('Business Name','business_name',callSort,'toggleCallSort')}
             ${sortHeader('Phone Number','phone',callSort,'toggleCallSort')}
             ${sortHeader('Category','category',callSort,'toggleCallSort')}
+            ${sortHeader('City','city',callSort,'toggleCallSort')}
             ${sortHeader('Call Status','call_status',callSort,'toggleCallSort')}
             <th>Interested</th><th>Callback Requested</th>
             ${sortHeader('Duration','duration',callSort,'toggleCallSort')}
@@ -1027,6 +1121,7 @@ function renderCalls() {
             <td><strong>${escapeHtml(c.business_name)}</strong></td>
             <td>${escapeHtml(c.phone)}</td>
             <td>${escapeHtml(c.category)}</td>
+            <td>${escapeHtml(c.city) || '&mdash;'}</td>
             <td>${statusBadge(c.call_status)}</td>
             <td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td>
             <td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td>
@@ -1038,8 +1133,10 @@ function renderCalls() {
     }
     renderCallPagination();
     renderCallBulkBar();
+    refreshExportLinks();
 }
 $('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls; $('interestFilter').onchange = renderCalls;
+$('callCityFilter').onchange = renderCalls; $('callDateFrom').onchange = renderCalls; $('callDateTo').onchange = renderCalls;
 $('callPageSize').onchange = async () => { callLimit = Number($('callPageSize').value) || 100; callOffset = 0; selectedCallIds.clear(); await fetchCalls(); renderCalls(); };
 async function detail(id) {
     try {
@@ -1049,6 +1146,7 @@ async function detail(id) {
         const html = `<div class="detail-grid">
             <div><span>Phone</span><strong><a href="tel:${escapeHtml(c.phone)}">${escapeHtml(c.phone)}</a></strong></div>
             <div><span>Category</span><strong>${escapeHtml(c.category) || '&mdash;'}</strong></div>
+            <div><span>City</span><strong>${escapeHtml(c.city) || '&mdash;'}</strong></div>
             <div><span>Status</span><strong>${statusBadge(c.call_status)}</strong></div>
             <div><span>Duration</span><strong>${safeNumber(c.duration)}s</strong></div>
             <div><span>Interested</span><strong><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></strong></div>

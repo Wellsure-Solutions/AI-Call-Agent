@@ -212,6 +212,7 @@ async def import_leads(payload: dict):
             "business_name": row.get(mapping.get("business_name", ""), ""),
             "phone_number": row.get(mapping.get("phone_number", ""), ""),
             "category": row.get(mapping.get("category", ""), ""),
+            "city": row.get(mapping.get("city", ""), ""),
             "notes": row.get(mapping.get("notes", ""), ""),
         })
     result = await asyncio.to_thread(answer_store.import_leads, normalized)
@@ -225,6 +226,7 @@ async def manual_lead(payload: dict):
         "business_name": payload.get("business_name", ""),
         "phone_number": payload.get("phone_number", ""),
         "category": payload.get("category", ""),
+        "city": payload.get("city", ""),
         "notes": payload.get("notes", ""),
     }
     result = await asyncio.to_thread(answer_store.import_leads, [row])
@@ -244,6 +246,7 @@ async def call_lead(lead_id: str):
         lead_id=lead_id,
         business_name=lead.get("business_name"),
         category=lead.get("category"),
+        city=lead.get("city"),
         notes=lead.get("notes"),
     )
     try:
@@ -280,7 +283,7 @@ async def call_lead_batch(payload: dict):
     queued=[]
     for lead in leads:
         try:
-            call=await answer_store.aenqueue_call(phone_number=lead["phone_number"],lead_id=lead["lead_id"],business_name=lead.get("business_name", ""),category=lead.get("category", ""),notes=lead.get("notes", ""))
+            call=await answer_store.aenqueue_call(phone_number=lead["phone_number"],lead_id=lead["lead_id"],business_name=lead.get("business_name", ""),category=lead.get("category", ""),city=lead.get("city", ""),notes=lead.get("notes", ""))
             queued.append(call["call_id"])
         except SuppressedError: continue
     return {"requested": len(leads), "queued": len(queued), "call_ids": queued, "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
@@ -434,10 +437,28 @@ async def lead_template():
 
 
 @app.get("/api/export/{fmt}")
-async def export_calls(fmt: str):
+async def export_calls(fmt: str, q: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = ""):
+    """Exports the calls matching the dashboard's current filters, not the whole table.
+
+    Every filter is optional and additive; omitting all of them exports
+    everything, same as before this endpoint took query parameters.
+    """
     if fmt not in {"xlsx", "csv", "json"}:
         raise HTTPException(status_code=400, detail="Format must be xlsx, csv, or json")
-    filename, content, media_type = await asyncio.to_thread(answer_store.export_calls, fmt)
+    filename, content, media_type = await asyncio.to_thread(
+        answer_store.export_calls, fmt, search=q, status=status, interested=interested, city=city, date_from=date_from, date_to=date_to
+    )
+    return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/leads/export/{fmt}")
+async def export_leads(fmt: str, q: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = ""):
+    """Exports the leads matching the Lead Upload page's current filters."""
+    if fmt not in {"xlsx", "csv", "json"}:
+        raise HTTPException(status_code=400, detail="Format must be xlsx, csv, or json")
+    filename, content, media_type = await asyncio.to_thread(
+        answer_store.export_leads, fmt, search=q, status=status, category=category, city=city, date_from=date_from, date_to=date_to
+    )
     return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 @app.get("/health")
