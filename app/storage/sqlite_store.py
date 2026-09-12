@@ -5,6 +5,7 @@ import csv
 import json
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
@@ -13,8 +14,21 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from app.storage.json_store import EXPORT_HEADERS, JsonCallStore, Workbook
+from app.telephony.providers import DEFAULT_PROVIDER, PROVIDER_NAMES, SELECTABLE_PROVIDERS, get_provider
 
 PROVIDER_TERMINAL = frozenset({"completed", "failed", "busy", "no-answer", "canceled"})
+ACTIVE_PROVIDER_KEY = "active_telephony_provider"
+LEAD_EXPORT_FIELDS = [
+    ("Business Name", "business_name"), ("Phone Number", "phone_number"), ("Category", "category"),
+    ("City", "city"), ("Notes", "notes"), ("Status", "status"), ("Added", "created_at"), ("Updated", "updated_at"),
+]
+
+# How long a worker may serve a cached copy of the active-provider setting.
+# Short enough that workers cannot meaningfully disagree after an operator
+# saves a change, long enough to keep a SQLite read off the enqueue path in a
+# batch. Never cached for the life of the process, and never read anywhere
+# except at enqueue.
+PROVIDER_SETTING_TTL_SECONDS = 2.0
 LIFECYCLE_TERMINAL = frozenset({"COMPLETED", "FAILED", "CANCELED", "BUSY", "NO_ANSWER", "HUNG_UP"})
 CAPACITY_STATES = ("claimed", "active", "canceling")
 UNRESOLVED_JOB_STATES = ("queued", "claimed", "active", "canceling", "needs_reconciliation")
@@ -42,6 +56,9 @@ class SQLiteCallStore(JsonCallStore):
     def __init__(self, database_path: Path, legacy_data_dir: Path | None = None) -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        # (value, monotonic_read_at). Bounded by PROVIDER_SETTING_TTL_SECONDS
+        # so workers cannot disagree for long after a change is saved.
+        self._provider_setting_cache: tuple[str, float] | None = None
         super().__init__(legacy_data_dir or self.database_path.parent)
         self._initialize_schema()
         self.migrate_legacy()
@@ -67,17 +84,40 @@ class SQLiteCallStore(JsonCallStore):
         finally:
             connection.close()
 
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        """A connection for reads with no explicit transaction, always closed.
+
+        `sqlite3.Connection.__exit__` only commits or rolls back the open
+        transaction -- by design it "neither implicitly opens a new
+        transaction nor closes the connection". `with self._connect() as db:`
+        therefore never closes the connection: each call leaves the
+        connection (and, under WAL, its `-wal`/`-shm` file descriptors)
+        referenced only by a cycle inside the sqlite3 module's statement
+        cache, so it survives plain refcounting and sits open until the
+        cyclic garbage collector happens to run. `_rows`/`_one`,
+        `capacity_snapshot`, and `statistics` are read-heavy and hit by
+        nearly every dashboard/API request, so that collection lagging
+        behind request volume is what drained the process's file descriptor
+        table in production.
+        """
+        connection = self._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     def _initialize_schema(self) -> None:
         with self.transaction(immediate=True) as db:
             db.execute("CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             db.execute("""CREATE TABLE IF NOT EXISTS leads(
                 lead_id TEXT PRIMARY KEY,business_name TEXT NOT NULL,phone_number TEXT NOT NULL UNIQUE,
-                category TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',
+                category TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',
                 do_not_call INTEGER NOT NULL DEFAULT 0,review_required INTEGER NOT NULL DEFAULT 0,
                 last_call_id TEXT,last_call_sid TEXT,last_error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS calls(
                 call_id TEXT PRIMARY KEY,lead_id TEXT REFERENCES leads(lead_id),phone_number TEXT NOT NULL,
-                business_name TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',
+                business_name TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',
                 call_sid TEXT UNIQUE,lifecycle_state TEXT NOT NULL,provider_status TEXT,outcome TEXT,
                 media_connected INTEGER NOT NULL DEFAULT 0,media_owner TEXT,transcript TEXT NOT NULL DEFAULT '',
                 structured_response TEXT NOT NULL DEFAULT '{}',interested INTEGER NOT NULL DEFAULT 0,
@@ -124,7 +164,167 @@ class SQLiteCallStore(JsonCallStore):
         db.execute("CREATE INDEX IF NOT EXISTS calls_deadlines ON calls(provider_terminal_at,ring_deadline,max_call_deadline)")
         db.execute("CREATE INDEX IF NOT EXISTS calls_reconcile ON calls(reconciliation_status,next_reconciliation_at)")
         db.execute("CREATE INDEX IF NOT EXISTS extraction_claim ON extraction_jobs(state,next_attempt_at,lease_expires_at)")
-        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','2')")
+        self._migrate_schema_v3(db)
+
+    def _migrate_schema_v3(self, db: sqlite3.Connection) -> None:
+        """Per-call telephony provider, plus the operator settings store.
+
+        Additive and idempotent, guarded the same way v2 is, so repeated
+        startup and simultaneous workers converge.
+
+        `NOT NULL DEFAULT 'twilio'` *is* the backfill: SQLite applies the
+        default to every existing row as part of the ALTER, so legacy rows --
+        which are all Twilio by definition -- are correct atomically, with no
+        separate UPDATE pass that could be interrupted half-done.
+        """
+        existing = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+        if "provider" not in existing:
+            db.execute(f"ALTER TABLE calls ADD COLUMN provider TEXT NOT NULL DEFAULT '{DEFAULT_PROVIDER}'")
+        db.execute("""CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)""")
+        # Settings changes are audited, but call_events.call_id is NOT NULL
+        # and references calls(call_id): a settings change has no call to hang
+        # off. Relaxing that foreign key to make room would weaken a
+        # constraint that protects the call history, so the audit trail gets
+        # its own table instead.
+        db.execute("""CREATE TABLE IF NOT EXISTS settings_events(
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,key TEXT NOT NULL,
+            old_value TEXT,new_value TEXT NOT NULL,actor TEXT NOT NULL DEFAULT 'operator',
+            timestamp TEXT NOT NULL)""")
+        db.execute("CREATE INDEX IF NOT EXISTS calls_provider ON calls(provider)")
+        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','3')")
+        self._migrate_schema_v4(db)
+
+    def _migrate_schema_v4(self, db: sqlite3.Connection) -> None:
+        """City, for filtering leads and calls by location.
+
+        Additive and idempotent like v2/v3: guarded by checking for the
+        column first, so an already-migrated database (or a second worker
+        racing this on startup) just no-ops.
+        """
+        leads_existing = {row[1] for row in db.execute("PRAGMA table_info(leads)")}
+        if "city" not in leads_existing:
+            db.execute("ALTER TABLE leads ADD COLUMN city TEXT NOT NULL DEFAULT ''")
+        calls_existing = {row[1] for row in db.execute("PRAGMA table_info(calls)")}
+        if "city" not in calls_existing:
+            db.execute("ALTER TABLE calls ADD COLUMN city TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE INDEX IF NOT EXISTS leads_city ON leads(city)")
+        db.execute("CREATE INDEX IF NOT EXISTS calls_city ON calls(city)")
+        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','4')")
+
+    # ------------------------------------------------------------------
+    # Operator settings: the active telephony provider
+    # ------------------------------------------------------------------
+    def seed_setting(self, key: str, value: str) -> None:
+        """Insert a setting only if it does not already exist.
+
+        This is how CALL_AGENT_DEFAULT_PROVIDER gets in: as a *seed*, not as
+        an override. Once an operator has saved a choice, the database is
+        authoritative and the environment variable is ignored forever after.
+        ON CONFLICT DO NOTHING makes two workers racing at startup converge on
+        whichever wrote first rather than fighting.
+        """
+        with self.transaction(immediate=True) as db:
+            db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+                (key, value, utcnow()),
+            )
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        row = self._one("SELECT value FROM settings WHERE key=?", (key,))
+        return row["value"] if row else default
+
+    def active_provider_setting(self) -> str:
+        """The stored selection: a provider name, or 'auto'.
+
+        Read fresh (through a short TTL) rather than cached at construction:
+        multiple Uvicorn workers share this database and each runs its own
+        coordinator, so a value captured once at startup would let workers
+        disagree about the active provider indefinitely.
+        """
+        now = time.monotonic()
+        cached = self._provider_setting_cache
+        if cached is not None and now - cached[1] < PROVIDER_SETTING_TTL_SECONDS:
+            return cached[0]
+        value = self.get_setting(ACTIVE_PROVIDER_KEY, DEFAULT_PROVIDER)
+        if value not in SELECTABLE_PROVIDERS:
+            value = DEFAULT_PROVIDER
+        self._provider_setting_cache = (value, now)
+        return value
+
+    def set_active_provider(self, value: str, actor: str = "operator") -> str:
+        """Store the operator's selection and audit the change.
+
+        Validation of *whether that provider can dial* is the API layer's job
+        -- it owns the credential check and the 422. This enforces only that
+        the value is one the system understands.
+        """
+        if value not in SELECTABLE_PROVIDERS:
+            raise ValueError(f"provider must be one of {sorted(SELECTABLE_PROVIDERS)}")
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (ACTIVE_PROVIDER_KEY,)).fetchone()
+            # The value that was actually in force, not the raw row. With no
+            # row yet the effective provider is the default, and recording
+            # NULL there would make the audit trail disagree with what the
+            # operator saw in the UI before they changed it.
+            old = row["value"] if row else DEFAULT_PROVIDER
+            db.execute(
+                "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (ACTIVE_PROVIDER_KEY, value, now),
+            )
+            # Old value, new value, timestamp. Never a credential -- the only
+            # thing recorded is which carrier was selected.
+            db.execute(
+                "INSERT INTO settings_events(key,old_value,new_value,actor,timestamp) VALUES(?,?,?,?,?)",
+                (ACTIVE_PROVIDER_KEY, old, value, actor[:60], now),
+            )
+        self._provider_setting_cache = None
+        return value
+
+    def list_settings_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        return self._rows("SELECT * FROM settings_events ORDER BY event_id DESC LIMIT ?", (min(limit, 200),))
+
+    def resolve_provider(self, phone_number: str) -> str:
+        """Which carrier this number should be dialled on. Called once, at
+        enqueue, and nowhere else.
+
+        Twilio cannot originate to India with an Indian caller ID, so `auto`
+        sends +91 to Exotel and everything else to Twilio. An explicit
+        selection is authoritative and is never overridden by destination --
+        `auto` is a third value of the setting, not a layer on top of it.
+
+        Falls back rather than failing the enqueue when the preferred provider
+        is unconfigured: refusing to queue the call would turn a
+        misconfiguration into lost work, and the call still has to go
+        somewhere. The fallback is recorded on the call row like any other
+        resolution, so the operator sees which carrier was actually used.
+        """
+        selected = self.active_provider_setting()
+        if selected != "auto":
+            return selected if self._provider_is_configured(selected) else self._fallback_provider(selected)
+        preferred = "exotel" if str(phone_number).startswith("+91") else DEFAULT_PROVIDER
+        if self._provider_is_configured(preferred):
+            return preferred
+        return self._fallback_provider(preferred)
+
+    def _fallback_provider(self, unavailable: str) -> str:
+        for candidate in (DEFAULT_PROVIDER, *PROVIDER_NAMES):
+            if candidate != unavailable and self._provider_is_configured(candidate):
+                return candidate
+        # Nothing is configured. Return the default so the call is still
+        # queued and fails visibly at dial time with a real provider error,
+        # rather than being silently rejected at the door.
+        return DEFAULT_PROVIDER
+
+    @staticmethod
+    def _provider_is_configured(name: str) -> bool:
+        try:
+            configured, _missing = get_provider(name).is_configured()
+        except Exception:
+            return False
+        return configured
 
     @staticmethod
     def normalize_phone(value: Any) -> str:
@@ -154,10 +354,11 @@ class SQLiteCallStore(JsonCallStore):
                 "business_name": self.clean_text(row.get("business_name"), 200),
                 "phone_number": self.normalize_phone(row.get("phone_number")),
                 "category": self.clean_text(row.get("category"), 100),
+                "city": self.clean_text(row.get("city"), 100),
                 "notes": self.clean_text(row.get("notes"), 1000),
             }
         except ValueError as error:
-            return {"business_name": "", "phone_number": "", "category": "", "notes": ""}, [str(error)]
+            return {"business_name": "", "phone_number": "", "category": "", "city": "", "notes": ""}, [str(error)]
         errors = [] if normalized["business_name"] else ["Missing business name"]
         return normalized, errors
 
@@ -173,8 +374,8 @@ class SQLiteCallStore(JsonCallStore):
                 now = utcnow()
                 lead = {**clean, "lead_id": str(uuid4()), "status": "new", "created_at": now, "updated_at": now}
                 try:
-                    db.execute("""INSERT INTO leads(lead_id,business_name,phone_number,category,notes,status,created_at,updated_at)
-                        VALUES(:lead_id,:business_name,:phone_number,:category,:notes,:status,:created_at,:updated_at)""", lead)
+                    db.execute("""INSERT INTO leads(lead_id,business_name,phone_number,category,city,notes,status,created_at,updated_at)
+                        VALUES(:lead_id,:business_name,:phone_number,:category,:city,:notes,:status,:created_at,:updated_at)""", lead)
                     imported.append(lead)
                 except sqlite3.IntegrityError:
                     duplicates += 1
@@ -188,7 +389,7 @@ class SQLiteCallStore(JsonCallStore):
         return self._one("SELECT * FROM leads WHERE lead_id=?", (lead_id,))
 
     def update_lead(self, lead_id: str, **updates: Any) -> dict[str, Any] | None:
-        allowed = {"business_name", "phone_number", "category", "notes", "status", "do_not_call", "review_required", "last_call_id", "last_call_sid", "last_error"}
+        allowed = {"business_name", "phone_number", "category", "city", "notes", "status", "do_not_call", "review_required", "last_call_id", "last_call_sid", "last_error"}
         values = {key: value for key, value in updates.items() if key in allowed and value is not None}
         if not values:
             return self.get_lead(lead_id)
@@ -250,8 +451,14 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("DELETE FROM suppression_list")
             return deleted
 
-    def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", notes: str = "", idempotency_key: str | None = None) -> dict[str, Any]:
+    def enqueue_call(self, *, phone_number: str, lead_id: str | None = None, business_name: str = "", category: str = "", city: str = "", notes: str = "", idempotency_key: str | None = None, provider: str | None = None) -> dict[str, Any]:
         phone = self.normalize_phone(phone_number)
+        # Resolved exactly once, here, and written to the call row below.
+        # Every later stage -- dial, media, status callback, reconciliation,
+        # the operator resolve endpoint -- reads it from the row rather than
+        # re-reading the setting, so flipping the toggle mid-flight cannot
+        # make the coordinator query the wrong carrier about a live call.
+        provider = provider or self.resolve_provider(phone)
         now, call_id = utcnow(), str(uuid4())
         with self.transaction(immediate=True) as db:
             if idempotency_key:
@@ -269,10 +476,10 @@ class SQLiteCallStore(JsonCallStore):
             unresolved = db.execute("SELECT call_id FROM call_jobs j JOIN calls c USING(call_id) WHERE c.phone_number=? AND j.queue_state IN (?,?,?,?,?) LIMIT 1", (phone, *UNRESOLVED_JOB_STATES)).fetchone()
             if unresolved:
                 return self._call_from_db(db, unresolved[0])
-            db.execute("""INSERT INTO calls(call_id,lead_id,phone_number,business_name,category,notes,lifecycle_state,extraction_status,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'QUEUED','not_required',?,?)""", (call_id, lead_id, phone, self.clean_text(business_name, 200), self.clean_text(category, 100), self.clean_text(notes, 1000), now, now))
+            db.execute("""INSERT INTO calls(call_id,lead_id,phone_number,business_name,category,city,notes,lifecycle_state,extraction_status,provider,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,'QUEUED','not_required',?,?,?)""", (call_id, lead_id, phone, self.clean_text(business_name, 200), self.clean_text(category, 100), self.clean_text(city, 100), self.clean_text(notes, 1000), provider, now, now))
             db.execute("INSERT INTO call_jobs(job_id,call_id,queue_state,idempotency_key,created_at,updated_at) VALUES(?,?,'queued',?,?,?)", (call_id, call_id, idempotency_key, now, now))
-            self._event(db, call_id, "queued", now)
+            self._event(db, call_id, "queued", now, {"provider": provider})
             if lead_id:
                 db.execute("UPDATE leads SET status='queued',last_call_id=?,updated_at=? WHERE lead_id=?", (call_id, now, lead_id))
             return self._call_from_db(db, call_id)
@@ -326,16 +533,22 @@ class SQLiteCallStore(JsonCallStore):
                 db.execute("UPDATE calls SET lifecycle_state='QUEUED',updated_at=? WHERE call_id=? AND call_sid IS NULL", (now, call_id))
             return changed == 1
 
-    def mark_dial_ambiguous(self, call_id: str, category: str = "dial_ambiguous") -> None:
+    def mark_dial_ambiguous(self, call_id: str, category: str = "dial_ambiguous", detail: str | None = None) -> None:
+        """`category` is the machine-readable reconciliation status; `detail`
+        is the carrier's own explanation, which is what makes the row
+        diagnosable. Callers must scrub credentials out of `detail` first."""
         with self.transaction(immediate=True) as db:
-            self._mark_reconciliation_db(db, call_id, category, "Provider acceptance is unknown", utcnow())
+            self._mark_reconciliation_db(
+                db, call_id, category, detail or "Provider acceptance is unknown", utcnow()
+            )
 
-    def mark_dial_rejected(self, call_id: str, category: str) -> None:
+    def mark_dial_rejected(self, call_id: str, category: str, detail: str | None = None) -> None:
         now = utcnow()
+        reason = (detail or category)[:500]
         with self.transaction(immediate=True) as db:
-            db.execute("UPDATE calls SET lifecycle_state='FAILED',outcome='provider_rejected',reconciliation_error=?,provider_terminal_at=?,finalized_at=?,updated_at=? WHERE call_id=?", (category[:200], now, now, now, call_id))
+            db.execute("UPDATE calls SET lifecycle_state='FAILED',outcome='provider_rejected',reconciliation_error=?,provider_terminal_at=?,finalized_at=?,updated_at=? WHERE call_id=?", (reason, now, now, now, call_id))
             db.execute("UPDATE call_jobs SET queue_state='terminal',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE call_id=?", (now, call_id))
-            self._event(db, call_id, "dial_rejected", now, {"category": category[:100]})
+            self._event(db, call_id, "dial_rejected", now, {"category": category[:100], "detail": reason[:300]})
 
     def _mark_reconciliation_db(self, db: sqlite3.Connection, call_id: str, status: str, error: str, now: str) -> None:
         db.execute("UPDATE calls SET lifecycle_state='NEEDS_RECONCILIATION',reconciliation_status=?,reconciliation_error=?,next_reconciliation_at=?,updated_at=? WHERE call_id=? AND provider_terminal_at IS NULL", (status, error[:500], now, now, call_id))
@@ -618,7 +831,7 @@ class SQLiteCallStore(JsonCallStore):
 
     def capacity_snapshot(self) -> dict[str, Any]:
         """What is currently occupying the queue, and for how long."""
-        with self._connect() as db:
+        with self._read_connection() as db:
             states = dict(db.execute("SELECT queue_state,COUNT(*) FROM call_jobs GROUP BY queue_state"))
             occupied = sum(states.get(state, 0) for state in CAPACITY_STATES)
             oldest = db.execute("""SELECT c.call_id,c.lifecycle_state,c.provider_status,c.created_at,j.queue_state
@@ -637,10 +850,50 @@ class SQLiteCallStore(JsonCallStore):
         rows = self._rows("SELECT *,phone_number AS phone,outcome AS call_status,COALESCE(ended_at,started_at,created_at) AS timestamp FROM calls ORDER BY created_at DESC LIMIT ? OFFSET ?", (min(max(limit, 1), 500), max(offset, 0)))
         return [self._decode_call(row) for row in rows]
 
-    def iter_calls(self, chunk_size: int = 500) -> Iterator[dict[str, Any]]:
+    @staticmethod
+    def _calls_filter_clause(search: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, list[Any]]:
+        """Shared WHERE clause for exporting the calls the operator is looking at.
+
+        Mirrors the dashboard's client-side call filters (search/status/
+        interest/city/date) so "export" means "export what I'm filtering on"
+        rather than the whole table -- the export used to ignore every one of
+        these and always dump every call ever recorded.
+        """
+        clauses, params = [], []
+        if search:
+            like = f"%{search}%"
+            clauses.append("(business_name LIKE ? OR phone_number LIKE ? OR category LIKE ? OR city LIKE ?)")
+            params += [like, like, like, like]
+        if status:
+            clauses.append("COALESCE(outcome,'unknown')=?")
+            params.append(status)
+        if interested in {"true", "false"}:
+            clauses.append("interested=?")
+            params.append(1 if interested == "true" else 0)
+        if city:
+            clauses.append("city=?")
+            params.append(city)
+        # Compared as the plain "YYYY-MM-DD" date prefix, not the full
+        # timestamp: date_to is meant inclusively (through the end of that
+        # day), and the stored timestamps carry a time-of-day that would
+        # otherwise sort a same-day call after a bare date string.
+        date_expr = "substr(COALESCE(ended_at,started_at,created_at),1,10)"
+        if date_from:
+            clauses.append(f"{date_expr}>=?")
+            params.append(date_from)
+        if date_to:
+            clauses.append(f"{date_expr}<=?")
+            params.append(date_to)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def iter_calls(self, chunk_size: int = 500, *, search: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = "") -> Iterator[dict[str, Any]]:
+        where_sql, where_params = self._calls_filter_clause(search, status, interested, city, date_from, date_to)
         offset = 0
         while True:
-            rows = self._rows("SELECT *,phone_number AS phone,outcome AS call_status,COALESCE(ended_at,started_at,created_at) AS timestamp FROM calls ORDER BY created_at DESC LIMIT ? OFFSET ?", (chunk_size, offset))
+            rows = self._rows(
+                f"SELECT *,phone_number AS phone,outcome AS call_status,COALESCE(ended_at,started_at,created_at) AS timestamp FROM calls{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*where_params, chunk_size, offset),
+            )
             if not rows:
                 break
             for row in rows:
@@ -656,7 +909,7 @@ class SQLiteCallStore(JsonCallStore):
         return self._decode_call(row) if row else None
 
     def statistics(self) -> dict[str, Any]:
-        with self._connect() as db:
+        with self._read_connection() as db:
             # Every aggregate is COALESCEd. SUM() over zero rows returns NULL,
             # not 0, so on a fresh database the arithmetic below raised a
             # TypeError and the dashboard's stats panel 500'd on first load --
@@ -679,15 +932,16 @@ class SQLiteCallStore(JsonCallStore):
         result["average_call_duration"] = round(result["average_call_duration"], 1)
         return result
 
-    def export_calls(self, fmt: str) -> tuple[str, bytes, str]:
+    def export_calls(self, fmt: str, *, search: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, bytes, str]:
+        filters = dict(search=search, status=status, interested=interested, city=city, date_from=date_from, date_to=date_to)
         if fmt == "json":
-            calls = list(self.iter_calls())
+            calls = list(self.iter_calls(**filters))
             return "call_results.json", json.dumps(calls, ensure_ascii=False, indent=2).encode(), "application/json"
         if fmt == "csv":
             output = StringIO()
             writer = csv.DictWriter(output, fieldnames=EXPORT_HEADERS)
             writer.writeheader()
-            for call in self.iter_calls():
+            for call in self.iter_calls(**filters):
                 writer.writerow(self._flat_call(call))
             return "call_results.csv", output.getvalue().encode(), "text/csv"
         if Workbook is None:
@@ -695,11 +949,63 @@ class SQLiteCallStore(JsonCallStore):
         workbook = Workbook(write_only=True)
         sheet = workbook.create_sheet("Call Results")
         sheet.append(EXPORT_HEADERS)
-        for call in self.iter_calls():
+        for call in self.iter_calls(**filters):
             row = self._flat_call(call)
             sheet.append([row.get(header, "") for header in EXPORT_HEADERS])
         output = BytesIO(); workbook.save(output); workbook.close()
         return "call_results.xlsx", output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    @staticmethod
+    def _leads_filter_clause(search: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, list[Any]]:
+        """Shared WHERE clause for exporting the leads the operator is looking at (mirrors _calls_filter_clause)."""
+        clauses, params = [], []
+        if search:
+            like = f"%{search}%"
+            clauses.append("(business_name LIKE ? OR phone_number LIKE ? OR category LIKE ? OR city LIKE ? OR notes LIKE ?)")
+            params += [like, like, like, like, like]
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if category:
+            clauses.append("category=?")
+            params.append(category)
+        if city:
+            clauses.append("city=?")
+            params.append(city)
+        date_expr = "substr(created_at,1,10)"
+        if date_from:
+            clauses.append(f"{date_expr}>=?")
+            params.append(date_from)
+        if date_to:
+            clauses.append(f"{date_expr}<=?")
+            params.append(date_to)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def iter_leads(self, *, search: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = "") -> list[dict[str, Any]]:
+        where_sql, params = self._leads_filter_clause(search, status, category, city, date_from, date_to)
+        return self._rows(f"SELECT * FROM leads{where_sql} ORDER BY created_at DESC", params)
+
+    def export_leads(self, fmt: str, *, search: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = "") -> tuple[str, bytes, str]:
+        leads = self.iter_leads(search=search, status=status, category=category, city=city, date_from=date_from, date_to=date_to)
+        if fmt == "json":
+            return "leads.json", json.dumps(leads, ensure_ascii=False, indent=2).encode(), "application/json"
+        rows = [{header: lead.get(field, "") for header, field in LEAD_EXPORT_FIELDS} for lead in leads]
+        headers = [header for header, _ in LEAD_EXPORT_FIELDS]
+        if fmt == "csv":
+            output = StringIO()
+            writer = csv.DictWriter(output, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+            return "leads.csv", output.getvalue().encode(), "text/csv"
+        if Workbook is None:
+            raise RuntimeError("openpyxl is required for Excel export")
+        workbook = Workbook(write_only=True)
+        sheet = workbook.create_sheet("Leads")
+        sheet.append(headers)
+        for row in rows:
+            sheet.append([row.get(header, "") for header in headers])
+        output = BytesIO(); workbook.save(output); workbook.close()
+        return "leads.xlsx", output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     def _decode_call(self, row: dict[str, Any]) -> dict[str, Any]:
         structured = row.get("structured_response") or "{}"
@@ -777,11 +1083,11 @@ class SQLiteCallStore(JsonCallStore):
         db.execute("INSERT INTO call_events(call_id,event_name,metadata,timestamp) VALUES(?,?,?,?)", (call_id, name, json.dumps(metadata or {}), timestamp))
 
     def _rows(self, sql: str, args: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        with self._connect() as db:
+        with self._read_connection() as db:
             return [dict(row) for row in db.execute(sql, args)]
 
     def _one(self, sql: str, args: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        with self._connect() as db:
+        with self._read_connection() as db:
             row = db.execute(sql, args).fetchone()
             return dict(row) if row else None
 

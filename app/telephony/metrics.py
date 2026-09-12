@@ -172,11 +172,26 @@ class CallMetrics:
     # ------------------------------------------------------------------
     # Inbound caller audio
     # ------------------------------------------------------------------
-    def observe_inbound(self, frame: bytes) -> None:
-        """Measure one caller frame. Never changes any decision."""
+    def observe_inbound(self, frame: bytes, at: float | None = None) -> None:
+        """Measure one caller frame. Never changes any decision.
+
+        `at` is when this frame's audio actually *arrived*, on the same
+        monotonic clock. It exists for carriers whose wire chunks hold more
+        than one 20ms frame: those are re-framed before they reach the
+        barge-in path, and stamping every sub-frame with the time the
+        re-framer happened to emit it would put the whole chunk's audio at the
+        instant its last byte landed.
+
+        That skews `_last_voiced_at` late whenever a caller stops speaking
+        part-way through a chunk, and `eot_to_first_audio_ms` is measured from
+        exactly that mark -- so the headline latency number would read low by
+        up to one chunk, and the two carriers would no longer be comparable.
+        Defaults to now, which is correct for a carrier that sends one frame
+        per message.
+        """
         if not frame:
             return
-        now = time.monotonic()
+        now = time.monotonic() if at is None else at
         energy = rms_energy(frame)
         voiced = energy >= self._voice_threshold
         with self._lock:

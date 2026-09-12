@@ -27,3 +27,7 @@ data/calls.sqlite3-wal
 data/*.sqlite3
 data/*.sqlite3-shm
 data/*.sqlite3-wal
+
+# Raw mu-law capture of both sides of real customer calls. Diagnostic only,
+# opt-in via CALL_AGENT_MEDIA_DUMP_DIR, and never committed.
+data/media_dumps/

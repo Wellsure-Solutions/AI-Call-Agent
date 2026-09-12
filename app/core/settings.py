@@ -133,6 +133,111 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 TWILIO_FRAME_MS = int(_env("TWILIO_FRAME_MS", "20"))
 
 # ============================================================
+# EXOTEL
+# ============================================================
+#
+# Exotel is a licensed Indian carrier, which is the whole reason it is here:
+# Twilio cannot originate calls to India with an Indian caller ID
+# (https://www.twilio.com/en-us/guidelines/in/voice), so a +91 ExoPhone is the
+# only way to show a local number to an Indian seller.
+
+EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID", "")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY", "")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN", "")
+# Which Exotel cluster the account lives on. This is per-account, not a
+# preference: an account provisioned on one cluster returns 404 on the other.
+# `api.exotel.com` is Singapore, `api.in.exotel.com` is Mumbai.
+EXOTEL_SUBDOMAIN = _env("EXOTEL_SUBDOMAIN", "api.exotel.com")
+
+# The ExoPhone, E.164. Note this is Exotel's `CallerId`, NOT its `From`:
+# on /Calls/connect, `From` is the number being *dialled*. Twilio's to/from do
+# not map across directly and getting it backwards dials your own ExoPhone.
+EXOTEL_CALLER_ID = os.getenv("EXOTEL_CALLER_ID", "")
+
+# Bytes of 16-bit PCM per outbound websocket message.
+#
+# Exotel requires a multiple of 320 (which is exactly one 20ms frame at 8 kHz
+# 16-bit, so our mu-law frame grid lines up with theirs). Its stated minimum
+# is "3.2k [100ms data]", which is self-inconsistent at 8 kHz -- 3200 bytes is
+# 200ms there, and the arithmetic only works at 16 kHz. Starting at 3200
+# satisfies both readings; undershooting risks jitter artefacts, and the
+# barge-in path is not hostage to this either way because Exotel supports
+# `clear`. Lower it only against measured eot_to_first_audio_ms and
+# tts_ttfb_ms from real calls -- see docs/exotel-adapter.md.
+EXOTEL_SEND_CHUNK_BYTES = int(_env("EXOTEL_SEND_CHUNK_BYTES", "3200"))
+
+# Optional comma-separated IP allowlist for Exotel status callbacks. Empty
+# disables the check, because Exotel publishes its ranges only on request.
+# The HMAC query token is the primary control; this is defence in depth.
+EXOTEL_CALLBACK_ALLOWED_IPS = tuple(
+    item.strip()
+    for item in _env("EXOTEL_CALLBACK_ALLOWED_IPS", "").split(",")
+    if item.strip()
+)
+
+# ============================================================
+# FREJUN TELER
+# ============================================================
+#
+# Teler is FreJun's programmable-voice API. Structurally it is the Twilio
+# pattern, not the Exotel one: the dial carries a `flow_url` that Teler fetches
+# once the call connects, and that response -- not the dial -- names the media
+# WebSocket. See app/telephony/teler_routes.py.
+
+TELER_API_KEY = os.getenv("TELER_API_KEY", "")
+
+# The virtual number Teler places the call from, E.164. Unlike Exotel's
+# `CallerId`/`From` inversion this means exactly what it says: Teler's
+# `from_number` is ours and `to_number` is the destination, as on Twilio.
+TELER_FROM_NUMBER = os.getenv("TELER_FROM_NUMBER", "")
+
+# Teler's API root. A setting rather than a constant only so a staging host can
+# be pointed elsewhere; there is no per-account cluster split the way Exotel
+# has one, so the default is right for every account.
+TELER_BASE_URL = _env("TELER_BASE_URL", "https://api.frejun.ai/api/v1").rstrip("/")
+
+# Whether Teler records the call leg. Recording is billed and stored on
+# FreJun's side, so it is opt-in rather than inherited from their default of
+# true.
+TELER_RECORD = _env_bool("TELER_RECORD", False)
+
+# Milliseconds of audio per *inbound* chunk, sent to Teler in the stream flow.
+#
+# Teler's own units: `chunk_size` is in milliseconds, must be between 20 and
+# 2000, and must be a multiple of 20. Their default is 400, which is far too
+# coarse here -- inbound chunk size is the quantum of barge-in detection, and
+# at 400ms BARGE_IN_CONFIRM_MS could only ever be evaluated once per 400ms of
+# customer speech. 20ms puts Teler on exactly the frame grid Twilio already
+# uses, so every barge-in constant keeps meaning what it was tuned to mean.
+TELER_CHUNK_MS = int(_env("TELER_CHUNK_MS", "20"))
+
+# Milliseconds of audio per *outbound* websocket message.
+#
+# FreJun recommend at least 500ms per chunk sent to them, to avoid choppy
+# playback, so that is the default even though it costs up to half a second of
+# latency at the start of an agent turn. The partial tail of a turn is flushed
+# early regardless -- see TelerAdapter._flush_outbound -- so this never holds
+# back the end of a goodbye. Rounded to a multiple of 20ms.
+TELER_SEND_CHUNK_MS = int(_env("TELER_SEND_CHUNK_MS", "500"))
+
+# Signing secret for Teler's status webhooks, from the Voice App in the FreJun
+# dashboard. Optional and defence in depth only: the primary authentication on
+# /teler/status is the HMAC query token this service mints, because that one
+# cannot be absent or mismatched without us knowing. See teler_routes.
+TELER_WEBHOOK_SECRET = os.getenv("TELER_WEBHOOK_SECRET", "")
+
+# ============================================================
+# TELEPHONY PROVIDER SELECTION
+# ============================================================
+
+# Seed value only. It is written into the `settings` table the first time the
+# database is opened and is *ignored from then on* -- once an operator saves a
+# choice in the dashboard, the database is authoritative. Changing this
+# variable on an existing deployment does nothing; change the provider in the
+# dashboard instead. See guide.md §8.
+DEFAULT_TELEPHONY_PROVIDER = _env("DEFAULT_PROVIDER", "twilio").strip().lower()
+
+# ============================================================
 # ANSWERING MACHINE DETECTION
 # ============================================================
 
@@ -289,10 +394,17 @@ IDLE_CLOSING_MESSAGE = _env("IDLE_CLOSING_MESSAGE",
 # Keep the real value in .env.
 STREAM_SECRET = _env("STREAM_SECRET", "")
 
-# Optional diagnostic media capture directory.
-MEDIA_DUMP_DIR = Path(
-    _env("MEDIA_DUMP_DIR", DATA_DIR / "media_dumps")
-)
+# Optional diagnostic media capture directory. **None unless explicitly set.**
+#
+# This defaulted to `<data dir>/media_dumps`, which is never None, so
+# `MediaDump.create()` -- whose only "off" condition is a None directory --
+# could not be switched off. Every call on every deployment was writing both
+# sides of the conversation to disk, contradicting media_dump.py's own
+# docstring ("writes nothing unless CALL_AGENT_MEDIA_DUMP_DIR is set") and
+# guide.md, which documents the default as disabled and warns never to leave
+# it enabled in steady-state production.
+_MEDIA_DUMP_DIR = _env("MEDIA_DUMP_DIR")
+MEDIA_DUMP_DIR = Path(_MEDIA_DUMP_DIR) if _MEDIA_DUMP_DIR else None
 
 # Operational metrics. Safe defaults keep the feature enabled only when
 # explicitly requested in .env.
@@ -302,6 +414,17 @@ METRICS_FLUSH_SECONDS = float(
 )
 METRICS_SILENCE_GAP_MS = int(
     _env("METRICS_SILENCE_GAP_MS", "700")
+)
+
+# Periodic open-file-descriptor logging (app.core.diagnostics.open_fd_count).
+# On by default: listing /proc/self/fd once every few minutes is cheap, and
+# it is exactly the signal that was missing during the production incident
+# where the process silently climbed to its 1024-descriptor limit over a few
+# hours before anything else showed symptoms. Deliberately a slow timer, not
+# per-request instrumentation -- see app/core/diagnostics.py.
+FD_DIAGNOSTICS_ENABLED = _env_bool("FD_DIAGNOSTICS_ENABLED", True)
+FD_DIAGNOSTICS_INTERVAL_SECONDS = float(
+    _env("FD_DIAGNOSTICS_INTERVAL_SECONDS", "300")
 )
 
 # Twilio async Answering Machine Detection may return several machine verdicts.
@@ -404,7 +527,7 @@ DEEPGRAM_SPEAK_LANGUAGE = os.getenv(
 
 DEEPGRAM_GREETING = os.getenv(
     "DEEPGRAM_GREETING",
-    "नमस्ते सर, मैं श्रुति बोल रही हूं, Amazon India se| kya meri baat {Business Name} se ho rhi hai।",
+    "Hello Sir.",
 )
 
 DEEPGRAM_FALLBACK_CLOSING = os.getenv(

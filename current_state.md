@@ -6,7 +6,7 @@ This document describes the calling-pipeline repair on `codex/implement-complete
 
 FastAPI retains the dashboard, lead import, browser audio test, Twilio outbound calling and Media Streams, Deepgram conversation, OpenAI extraction, history, statistics, and exports. `SQLiteCallStore` is the active repository. JSON lead/result files are immutable, idempotent migration inputs only.
 
-SQLite uses a fresh connection per operation, WAL journaling, foreign keys, a busy timeout, and explicit transactions. Schema version 2 contains `leads`, `calls`, `call_events`, `call_jobs`, `extraction_jobs`, `suppression_list`, and `schema_metadata`. Additive migrations preserve databases created by the first PR implementation. Versioned legacy migrations import valid JSON and backfill historical DND suppression without modifying source files.
+SQLite uses a fresh connection per operation, WAL journaling, foreign keys, a busy timeout, and explicit transactions. Schema version 3 contains `leads`, `calls`, `call_events`, `call_jobs`, `extraction_jobs`, `suppression_list`, `settings`, `settings_events`, and `schema_metadata`. Version 3 adds the per-call `provider` column (additive, defaulted to `twilio` so legacy rows are correct atomically) and the operator settings store. Additive migrations preserve databases created by the first PR implementation. Versioned legacy migrations import valid JSON and backfill historical DND suppression without modifying source files.
 
 ## Queue, concurrency, deadlines, and reconciliation
 
@@ -15,6 +15,26 @@ All single, batch, and direct outbound requests create a durable call/job before
 Expired dial claims are never redialed. They enter `NEEDS_RECONCILIATION`, cease consuming global calling capacity, remain operator-visible, and continue blocking their normalized phone. A late verified callback may bind the original CallSid. Known CallSids have durable ring and maximum-call deadlines. One worker leases each due action, verifies provider status, and requests cancellation/completion as appropriate. Capacity is released only by terminal webhook or verified terminal lookup, not by a timer or cancellation request alone.
 
 The coordinator has per-iteration exception boundaries, bounded error backoff, health metadata, orderly claim relinquishment, and controlled handling around adapter construction, dialing, binding, reconciliation, and extraction.
+
+## Telephony providers
+
+Twilio and Exotel are both fully supported. Twilio cannot originate to India with an Indian caller
+ID, so Exotel supplies a +91 ExoPhone; Twilio remains the path for everything else. The control
+plane (dial, status lookup, terminal request, dial-error classification) sits behind a
+`TelephonyProvider` protocol in `app/telephony/providers/`; the media plane is shared in
+`StreamingMediaAdapter`, with each carrier overriding only wire framing and message names.
+
+Exotel's stream is 16-bit linear PCM and is transcoded to mu-law at the socket, so the audio
+profile, the `.ulaw` caches and all barge-in tuning are shared unchanged. Inbound chunks are
+re-framed to 20 ms, with arrival timestamps carried through, so latency metrics stay comparable
+between carriers.
+
+The active provider is operator-settable at runtime and stored in the database, since workers share
+it. `CALL_AGENT_DEFAULT_PROVIDER` seeds that row and is ignored thereafter. The provider is resolved
+once at enqueue and persisted on the call row; every later stage reads it from there, so switching
+providers has no effect on queued or in-flight calls. `auto` routes +91 to Exotel and the rest to
+Twilio, falling back when the preferred carrier is unconfigured. DND suppression remains global
+across providers.
 
 ## Correlation and lifecycle
 
@@ -43,7 +63,10 @@ HTTP Basic authentication fails closed for `/`, `/api/*`, `/twilio/outbound`, an
 - `GET /api/operations` — authenticated coordinator health and reconciliation queue.
 - `POST /twilio/outbound` — authenticated durable enqueue.
 - `POST /twilio/twiml/{call_id}` and `/twilio/status/{call_id}` — signed provider callbacks.
+- `POST /exotel/status/{call_id}` — HMAC-token-authenticated callback (Exotel signs nothing).
+- `GET`/`POST /api/settings/telephony` — authenticated provider selection, failing closed on an unconfigured carrier.
 - `WS /media-stream` — HMAC/CallSid-correlated Twilio media.
+- `WS /exotel/media-stream` — separate endpoint; HMAC query token plus a durable CallSid match.
 - `WS /ws` — authenticated browser voice test.
 - `GET /health` — process and coordinator heartbeat.
 

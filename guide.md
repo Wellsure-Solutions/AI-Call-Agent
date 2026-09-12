@@ -43,6 +43,21 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `TWILIO_AUTH_TOKEN` | Yes for phone calls | SDK auth and webhook validation | secret token; no default | Yes |
 | `TWILIO_FROM_NUMBER` | Yes for phone calls | Verified/capable caller number | E.164 test/example number; no default | No |
 | `PUBLIC_BASE_URL` | Yes for phone calls | Exact externally visible HTTPS origin | `https://calls.example.invalid`; no default | No |
+| `EXOTEL_ACCOUNT_SID` | Yes for Exotel calls | Exotel account SID | from the Exotel console; no default | Yes |
+| `EXOTEL_API_KEY` | Yes for Exotel calls | REST Basic-auth username | from the Exotel console; no default | Yes |
+| `EXOTEL_API_TOKEN` | Yes for Exotel calls | REST Basic-auth password | from the Exotel console; no default | Yes |
+| `EXOTEL_SUBDOMAIN` | No | Exotel API cluster. Per-account, not a preference: the wrong one 404s | `api.exotel.com` (Singapore); `api.in.exotel.com` for Mumbai | No |
+| `EXOTEL_CALLER_ID` | Yes for Exotel calls | The +91 ExoPhone shown to the customer. **This is Exotel's `CallerId`, not its `From`** | E.164; no default | No |
+| `EXOTEL_SEND_CHUNK_BYTES` | No | Outbound PCM bytes per websocket message; always rounded to a multiple of 320 | `3200` | No |
+| `EXOTEL_CALLBACK_ALLOWED_IPS` | No | Comma-separated IP allowlist for Exotel status callbacks; empty disables the check | unset (disabled) | No |
+| `TELER_API_KEY` | Yes for Teler calls | FreJun Teler secret key, sent as the `x-api-key` header | from platform.frejun.ai; no default | Yes |
+| `TELER_FROM_NUMBER` | Yes for Teler calls | The virtual number the call is placed from. Unlike Exotel this means what it says — Teler's `from_number` is ours | E.164; no default | No |
+| `TELER_BASE_URL` | No | Teler API root. No per-account cluster split, so the default is right for every account | `https://api.frejun.ai/api/v1` | No |
+| `TELER_RECORD` | No | Whether Teler records the leg. Recording is billed and stored on FreJun's side, so it is opt-in | `0` | No |
+| `TELER_CHUNK_MS` | No | **Milliseconds**, not bytes, of audio per inbound chunk. Teler requires 20–2000 and a multiple of 20. Their default of 400 would quantise barge-in detection to 400 ms | `20` | No |
+| `TELER_SEND_CHUNK_MS` | No | Milliseconds of audio per outbound message. FreJun recommend ≥500; the tail of a turn is flushed early regardless | `500` | No |
+| `TELER_WEBHOOK_SECRET` | No | Voice App signing secret, for verifying `X-Teler-Signature`. Defence in depth only — the HMAC query token is the primary control. See §8b | unset (signature not checked) | Yes |
+| `CALL_AGENT_DEFAULT_PROVIDER` | No | **Seed only.** Written to the database the first time it is opened and ignored from then on — once a provider is saved in the dashboard, the database is authoritative. See §8a | `twilio`; also `exotel`, `teler` or `auto` | No |
 | `DEEPGRAM_API_KEY` | Yes for conversation | Deepgram agent access | provider key | Yes |
 | `OPENAI_API_KEY` | Required only when extraction runs | Post-call extraction | provider key; absence never blocks raw persistence | Yes |
 | `OPENAI_MODEL` | No | Extraction model | `gpt-4.1-mini` | No |
@@ -50,7 +65,7 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `CALL_AGENT_METRICS_ENABLED` | No | Per-turn latency/barge-in/cost instrumentation | `1`; set `0` to disable | No |
 | `CALL_AGENT_METRICS_SILENCE_GAP_MS` | No | Gap counted as dead air | `1500` | No |
 | `CALL_AGENT_METRICS_FLUSH_SECONDS` | No | Metric batch flush interval | `5` | No |
-| `CALL_AGENT_MEDIA_DUMP_DIR` | No | Raw mu-law capture directory — **records customer calls** | unset (disabled) | Contains call audio |
+| `CALL_AGENT_MEDIA_DUMP_DIR` | No | Raw mu-law capture directory — **records customer calls**. Capture is off unless this is set to a path | unset (disabled) | Contains call audio |
 | `CALL_AGENT_CLOSE_GRACE_SECONDS` | No | Grace for the agent's closing line after it calls `end_call` | `10` | No |
 | `CALL_AGENT_AMD_ENABLED` | No | Answering-machine detection (adds Twilio's per-call AMD charge) | `1`; set `0` to disable | No |
 | `CALL_AGENT_AMD_MODE` | No | `Enable` or `DetectMessageEnd` | `Enable` | No |
@@ -127,6 +142,152 @@ Do not manually configure a generic TwiML URL for coordinator-created calls; the
 
 The installed Twilio SDK supports `timeout` on call creation; the ring timeout is passed there and also stored durably. It does not provide a call-creation idempotency key used by this implementation. Ambiguous submission failures are therefore never retried blindly.
 
+## 8a. Exotel setup and provider selection
+
+Twilio cannot originate calls to India with an Indian caller ID
+(<https://www.twilio.com/en-us/guidelines/in/voice>: outbound calls to India can only be made from
+non-Indian numbers). Exotel is a licensed Indian carrier, so it provides a real +91 ExoPhone as the
+CLI. Both providers are fully supported at the same time — this is not a migration. Twilio remains
+the path for international destinations; Exotel is the path for +91.
+
+### Credentials
+
+Take the account SID, API key and API token from the Exotel console's API settings, and set
+`EXOTEL_CALLER_ID` to your ExoPhone in E.164. `EXOTEL_SUBDOMAIN` selects the cluster and defaults to
+Singapore (`api.exotel.com`); Mumbai accounts need `api.in.exotel.com`. This is a property of the
+account, not a choice — the wrong cluster returns 404 on every request. Ask Exotel support to enable AgentStream (voice streaming) on the account; it is not on by
+default.
+
+**`EXOTEL_CALLER_ID` is Exotel's `CallerId`, not its `From`.** On
+`POST /v1/Accounts/{sid}/Calls/connect`, Exotel's `From` is the number being *dialled* and
+`CallerId` is the ExoPhone shown to them. This is the opposite of Twilio's `to`/`from`, and
+inverting them dials your own ExoPhone and bills for it. The mapping is asserted in
+`tests/test_exotel_provider.py`.
+
+**The path and field names are TitleCase, and Exotel is case-sensitive about both.** The
+AgentStream developer guide renders them lowercase (`/v1/accounts/.../calls/connect`, `from`,
+`callerid`, `streamurl`); that spelling is rejected and every dial fails. The working form is
+`/v1/Accounts/{sid}/Calls/connect` with `From`, `CallerId`, `StreamUrl`,
+`StreamType=bidirectional`, `StatusCallback`, `StatusCallbackEvents[0]` and `TimeLimit`. These are
+pinned in `tests/test_exotel_wire_format.py`; if Exotel ever changes them, that is the file to
+update.
+
+### Pointing the ExoPhone at this box
+
+Nothing needs configuring in App Bazaar for outbound AgentStream calls. The dial request carries
+`StreamUrl` (the websocket, with its token) and `StatusCallback` (the status webhook, with its
+token), both built from `PUBLIC_BASE_URL`, so the carrier is told where to reach you per call.
+`PUBLIC_BASE_URL` must be the exact public HTTPS origin, without a trailing slash, exactly as for
+Twilio.
+
+The Exotel endpoints are:
+
+- `POST /exotel/status/{call_id}` — authenticated by an HMAC query token, not a signature
+- `WSS /exotel/media-stream` — a separate endpoint from Twilio's `/media-stream`
+
+There is no TwiML step and no `/exotel/amd/*`: the AgentStream dial documents no answering-machine
+detection, so AMD is off for Exotel regardless of `CALL_AGENT_AMD_ENABLED`. Inbound calls to the
+ExoPhone are out of scope for this service.
+
+## 8b. FreJun Teler setup
+
+Teler is FreJun's programmable-voice API. Get a key and a virtual number from
+<https://platform.frejun.ai>, then set `TELER_API_KEY` and `TELER_FROM_NUMBER`. There is no cluster
+or subdomain to choose — unlike Exotel, one API root serves every account.
+
+**Teler is Twilio-shaped, not Exotel-shaped.** The dial carries a `flow_url`; Teler POSTs to it once
+the call connects and expects a JSON action back, and *that* response names the media socket. So the
+media URL is minted after the call exists, against an identifier the carrier has already given us —
+exactly like `/twilio/twiml`. Exotel is the odd one out in this codebase, not Teler.
+
+The Teler endpoints are:
+
+- `POST /teler/flow/{call_id}` — returns the stream action. Authenticated by an HMAC query token,
+  because FreJun document no signature on the flow request and an unauthenticated flow endpoint
+  hands a live media token to anyone who guesses a `call_id`
+- `POST /teler/status/{call_id}` — HMAC query token, plus Teler's own `X-Teler-Signature` when
+  `TELER_WEBHOOK_SECRET` is set
+- `WSS /teler/media-stream` — a separate endpoint from Twilio's and Exotel's
+
+**Both webhook payload versions are handled.** FreJun pin the shape per Voice App
+(`2025-08-01` flat, `2026-06-01` enveloped), changeable from their dashboard without a deploy, so
+the status route reads `type` or `event` and root or nested `call_id`. Teler also delivers
+`stream.*` and `recording.*` events to the same URL; those are acknowledged and ignored, because
+FreJun's own documentation warns that `stream.completed` does not imply `call.completed` — treating
+one as a call status would hang up on a live customer.
+
+**Status vocabulary.** Teler has five states — `initiated`, `ringing`, `answered`, `completed`,
+`failed` — and none of them is busy, no-answer or canceled. Those arrive as a `failed` call carrying
+a `reason` (`no_answer`, `user_busy`, `canceled`), which `normalize_status` refines into this
+codebase's terminal words. A *completed* call's reason is never used that way: `callee_hangup` on a
+completed call is a real conversation, and rewriting it would misreport every successful call.
+
+**`TELER_CHUNK_MS` is milliseconds, not bytes.** Teler requires 20–2000 and a multiple of 20, which
+puts it on exactly the 20 ms frame grid the barge-in constants are expressed in. FreJun's default is
+400 ms; this service uses 20, because inbound chunk size is the quantum of barge-in detection.
+
+**Teler has no mark and no `stop`.** Its only playback controls are `clear` and `interrupt`, both
+outbound commands — nothing is ever acknowledged, and the call ending is the socket closing. The
+adapter therefore models playback from bytes sent rather than reading it off mark round-trips; see
+`docs/teler-adapter.md` for what that costs and what remains unverified. AMD is off for Teler:
+the initiate endpoint documents no detection parameter and no verdict on any webhook.
+
+### Choosing the active provider
+
+Operators set the provider at runtime from the dashboard's **Settings** page, or via
+`GET`/`POST /api/settings/telephony`. Four values:
+
+| Value | Behaviour |
+|---|---|
+| `twilio` | Everything goes to Twilio |
+| `exotel` | Everything goes to Exotel |
+| `teler` | Everything goes to FreJun Teler |
+| `auto` | `+91` destinations go to Exotel, everything else to Twilio |
+
+`auto` is a two-carrier routing rule and Teler is deliberately not part of it: adding a third
+carrier to a destination-based rule is a routing decision with billing consequences, not a
+consequence of registering a provider. Select `teler` explicitly to use it. It does still act as a
+fallback like any registered provider, when the carrier `auto` resolved to is unconfigured.
+
+Selecting a provider whose credentials or caller ID are missing is refused with a 422 naming the
+missing settings, so an operator cannot pick a carrier that cannot dial.
+
+**`CALL_AGENT_DEFAULT_PROVIDER` is a seed value only.** It is written into the `settings` table the
+first time the database is opened and is ignored from then on. Once a provider has been saved from
+the dashboard, the database is authoritative and changing the environment variable does nothing.
+This is deliberate — the setting is shared across workers, so it has to live somewhere all of them
+can see — but it does mean an env var that silently stops mattering. To change the provider on a
+running deployment, use the dashboard.
+
+### Switching providers is safe while calls are in flight
+
+The provider is resolved **once, when the call row is created**, and written to that row. The dial,
+the media stream, the status callback, deadline reconciliation and the operator resolve endpoint
+all read it from there, never from the current setting. Flipping the toggle therefore has **zero
+effect on already-queued and in-flight calls** — they finish on the carrier they started on.
+
+This matters more than it sounds. If reconciliation read the current setting, flipping the toggle
+mid-flight would have the coordinator query Exotel for a Twilio CallSid; that lookup fails, burns
+`CALL_AGENT_RECONCILIATION_MAX_ATTEMPTS`, and quarantines a perfectly healthy call while holding
+its capacity slot the whole time. At the default concurrency of 1 that stalls the entire queue.
+
+DND suppression is global across providers. A number suppressed while on Twilio stays suppressed on
+Exotel.
+
+### Audio
+
+Exotel's bidirectional stream is 16-bit linear PCM at 8 kHz, and cannot be asked for mu-law. The
+adapter transcodes at its socket boundary, so everything above it — the `.ulaw` greeting and
+closing caches, the barge-in tuning in §12b, `scripts/ulaw_to_wav.py` — is unchanged and shared
+with Twilio. Inbound chunks are re-framed to 20 ms before the barge-in path sees them, so every
+constant in §12b means the same thing on both carriers.
+
+`EXOTEL_SEND_CHUNK_BYTES` controls how much audio goes in each outbound message. It is always
+rounded to a multiple of 320 bytes, which is Exotel's hard requirement. Exotel's stated minimum
+("3.2k [100ms data]") is self-inconsistent at 8 kHz — 3200 bytes is 200 ms there — so the default
+starts at 3200, which satisfies both readings. See `docs/exotel-adapter.md` for the measurement
+that should decide whether to lower it.
+
 ## 9. Complete execution sequence
 
 0. Answering-machine detection runs asynchronously alongside the call; a machine/fax verdict requests provider completion but never releases capacity itself.
@@ -146,6 +307,25 @@ The installed Twilio SDK supports `timeout` on call creation; the ring timeout i
 14. Success transactionally stores the complete structured response and maps interest/callback flags.
 15. `do_not_call_requested=yes` inserts suppression and updates the lead in the same transaction.
 16. Failure schedules bounded exponential backoff. Exhaustion marks a connected lead `review_required`.
+
+### Exotel deltas
+
+The sequence above is written for Twilio. On Exotel, steps 4-8 differ:
+
+| Step | Twilio | Exotel |
+|---|---|---|
+| 0 | Async AMD runs alongside the call | No AMD — the AgentStream dial has none |
+| 4 | REST call creation with a `timeout` ring parameter | `POST /Calls/connect` with `From` = destination, `CallerId` = ExoPhone, `StreamUrl`, `StreamType=bidirectional`. No ring timeout exists on this endpoint; the durable ring deadline is the only one |
+| 5 | Same | Same. A 4xx is a proven rejection; a 5xx, a timeout, **or an HTTP 200 carrying an error payload** is ambiguous and enters `needs_reconciliation` |
+| 6-7 | Twilio fetches signed TwiML, which binds the CallSid and mints the stream token | **No TwiML step.** The CallSid comes back in the dial response and is bound there; the stream token was already minted into `StreamUrl` |
+| 8 | Media validates HMAC/expiry/CallSid from TwiML custom parameters | Media validates the HMAC and expiry from the query string, **and separately** checks the start event's `call_sid` against the SID bound at dial time before claiming ownership |
+
+Step 8 is split for a structural reason. Exotel's stream URL has to be built before the dial
+request is sent, so no CallSid exists yet and the token cannot cover one. The token proves the URL
+came from us and has not expired; the database proves the stream belongs to that call. Both are
+required. Do not collapse them.
+
+Steps 1-3 and 9-16 are identical on both carriers.
 
 ## 10. Durable states and recovery
 
@@ -261,6 +441,15 @@ python scripts/prerender_greeting.py --check  # is the cache current? (exit 1 if
 
   Capacity is still never released by a timer alone: automatic release requires repeated recorded failures to obtain proof, and the override requires a human.
 - **Extraction retries:** verify OpenAI key/model/quota. Raw transcripts remain durable. Permanent connected failures place leads in review.
+- **403 Exotel callback:** Exotel signs nothing, so `/exotel/status/{call_id}` is authenticated by an HMAC query token this service minted at dial time. `GET /health` and `/api/operations` report `callback_auth_failures` (and the same snapshot under the retained `twilio_signature_failures` key); a nonzero `exotel_status` count means `CALL_AGENT_STREAM_SECRET` changed after the calls were placed, `PUBLIC_BASE_URL` is wrong so the callback never carried the token, or `EXOTEL_CALLBACK_ALLOWED_IPS` does not include Exotel's egress range.
+- **Every Exotel dial fails, whatever the number:** most likely the request casing. Exotel is case-sensitive on the path and the form field names, and the AgentStream guide's lowercase spelling does not work — see §8a. Read `reconciliation_error` on the call first: it now carries Exotel's own message rather than just an exception class name (`GET /api/calls/<call_id>`).
+- **Exotel dial fails immediately with no call placed:** check the console for a 4xx. A 4xx is recorded as `provider_rejected` and is terminal. If instead the call sits in `needs_reconciliation`, the submission was ambiguous — Exotel returned a 5xx, timed out, or answered HTTP 200 with an error body — and it is deliberately never redialed. Either way `reconciliation_error` holds the carrier's own message, truncated and with credentials and media tokens stripped — that is the string to search the Exotel console for. Check the call log before resolving it.
+- **Exotel call connects but the customer hears nothing / static:** almost always a framing problem. Confirm `EXOTEL_SEND_CHUNK_BYTES` is a multiple of 320 (it is rounded automatically, but a value under 320 is rounded *up* to one frame). Static rather than silence usually means the audio is being sent as mu-law instead of PCM — check `metrics_call` for outbound bytes and capture with `CALL_AGENT_MEDIA_DUMP_DIR`, which stores mu-law for both carriers.
+- **Exotel media stream closes with policy violation:** the correlation has two halves and either can fail. Verify `CALL_AGENT_STREAM_SECRET` and clock synchronisation for the token half; for the database half, confirm the call row's `call_sid` matches what Exotel reports in its start event, and that the call's `provider` column really is `exotel`. A call queued under Twilio will be refused by the Exotel socket by design.
+- **Calls still going out on the old provider after switching:** expected. The provider is resolved and persisted when the call row is created, so already-queued calls keep the carrier they were created with. Only newly queued calls use the new setting.
+- **Changing `CALL_AGENT_DEFAULT_PROVIDER` does nothing:** also expected. It is a seed value used only when the settings row does not yet exist. Change the provider from the dashboard instead — see §8a.
+- **The dashboard refuses to select a provider:** the 422 names the missing settings. Exotel needs `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, `EXOTEL_CALLER_ID` and `PUBLIC_BASE_URL`. This is a deliberate fail-closed check; selecting an unconfigured carrier would produce a batch of failed calls instead of one clear error.
+- **`ImportError: No module named 'audioop'` on Python 3.13:** should not happen — the G.711 codec in `app/telephony/audio/g711.py` is a table lookup precisely because `audioop` was removed in 3.13. If you see this, something new imported it; do not fix it by adding `audioop-lts`.
 - **Database locked:** ensure all workers use the same supported local filesystem, directory permissions are correct, and transactions are not held by external tools.
 
 ## 14. History, exports, and verification

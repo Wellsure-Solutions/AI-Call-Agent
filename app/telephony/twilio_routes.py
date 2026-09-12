@@ -32,6 +32,7 @@ from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
 from app.telephony.adapters.twilio_adapter import TwilioAdapter
+from app.telephony.providers.twilio_provider import TwilioProvider
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.integrations.deepgram.config import cached_greeting_audio
 from app.telephony.audio.media_dump import MediaDump
@@ -51,6 +52,7 @@ class OutboundCallRequest(BaseModel):
     lead_id: str | None = None
     business_name: str | None = None
     category: str | None = None
+    city: str | None = None
     notes: str | None = None
 
 def configure(store: SQLiteCallStore, result_service: CallResultService) -> None:
@@ -98,9 +100,20 @@ def _record_signature_failure(endpoint: str, call_id: str) -> None:
     )
 
 
-def signature_failure_health() -> dict[str, Any]:
-    """Surfaced on /api/operations and /health so a total outage is visible."""
+def callback_auth_failure_health() -> dict[str, Any]:
+    """Surfaced on /api/operations and /health so a total outage is visible.
+
+    Counts rejected callbacks from *any* carrier: a Twilio signature that did
+    not verify, or an Exotel callback whose HMAC token was wrong or expired.
+    The endpoint name in `by_endpoint` says which.
+    """
     return dict(_signature_failures, by_endpoint=dict(_signature_failures["by_endpoint"]))
+
+
+# Retained name. `/health` and `/api/operations` still publish the old
+# `twilio_signature_failures` key alongside the new one so existing dashboards
+# and alerts keep working; both are the same snapshot.
+signature_failure_health = callback_auth_failure_health
 
 def stream_token(call_id: str, sid: str, expiry: int) -> str:
     if not STREAM_SECRET: return ""
@@ -112,7 +125,7 @@ def valid_stream_token(call_id: str, sid: str, expiry: int, token: str) -> bool:
 @router.post("/outbound")
 async def start_outbound_call(request: OutboundCallRequest, idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
     try:
-        call = await _repo().aenqueue_call(phone_number=request.phone_number, lead_id=request.lead_id, business_name=request.business_name or "", category=request.category or "", notes=request.notes or "", idempotency_key=idempotency_key)
+        call = await _repo().aenqueue_call(phone_number=request.phone_number, lead_id=request.lead_id, business_name=request.business_name or "", category=request.category or "", city=request.city or "", notes=request.notes or "", idempotency_key=idempotency_key)
     except SuppressedError as exc: raise HTTPException(409, str(exc)) from exc
     except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     return {"call_id": call["call_id"], "call_sid": call.get("call_sid"), "status": "queued"}
@@ -127,7 +140,7 @@ async def twiml_webhook(call_id: str, request: Request):
     if not call or not sid or not await asyncio.to_thread(_repo().bind_call_sid, call_id, sid, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS): raise HTTPException(409, "Call correlation failed")
     expiry = int(time.time()) + 300
     ws_base = PUBLIC_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
-    xml = TwilioAdapter.build_twiml(f"{ws_base}/media-stream", {"call_id":call_id,"expiry":str(expiry),"token":stream_token(call_id,sid,expiry)})
+    xml = TwilioProvider.build_twiml(f"{ws_base}/media-stream", {"call_id":call_id,"expiry":str(expiry),"token":stream_token(call_id,sid,expiry)})
     return PlainTextResponse(xml, media_type="application/xml")
 
 @router.post("/status/{call_id}")
@@ -168,7 +181,7 @@ async def amd_webhook(call_id: str, request: Request):
         return Response(status_code=200)
     if answered_by in AMD_TERMINAL_VERDICTS and sid:
         try:
-            await TwilioAdapter().update_status(sid, "completed")
+            await TwilioProvider().request_terminal(sid, "completed")
         except Exception:
             # The deadline reconciler still owns this call and will retry;
             # failing the webhook would only make Twilio redeliver it.

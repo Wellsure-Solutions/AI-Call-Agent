@@ -3,22 +3,26 @@ import json
 import logging
 import base64
 import hmac
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, Response
 
+from app.core.diagnostics import open_fd_count
 from app.integrations.deepgram.config import DEEPGRAM_API_KEY
 from app.services.answer_extractor import AnswerExtractor
 from app.services.call_service import CallResultService
-from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
-from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DATABASE_PATH, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
+from app.storage.sqlite_store import ACTIVE_PROVIDER_KEY, ActiveDataError, SQLiteCallStore, SuppressedError
+from app.core.settings import ADMIN_PASSWORD, ADMIN_USERNAME, DATA_DIR, DEFAULT_TELEPHONY_PROVIDER, DATABASE_PATH, FD_DIAGNOSTICS_ENABLED, FD_DIAGNOSTICS_INTERVAL_SECONDS, HOST, INDEX_HTML, MAX_CONCURRENT_CALLS, PORT, START_INTERVAL_SECONDS, EXTRACTION_MAX_ATTEMPTS, EXTRACTION_TIMEOUT_SECONDS, EXTRACTION_RETRY_DELAY_SECONDS, RING_TIMEOUT_SECONDS, MAX_CALL_SECONDS, RECONCILIATION_MAX_ATTEMPTS, ABANDONED_JOB_GRACE_SECONDS
 from app.services.call_coordinator import DurableCallCoordinator
 from app.telephony.adapters.browser_adapter import BrowserAdapter
 from app.telephony.audio.audio_bridge import AudioBridge
 from app.telephony.call_manager import CallManager
-from app.telephony.twilio_routes import OutboundCallRequest, configure as configure_twilio, media_router, router as twilio_router, signature_failure_health, start_outbound_call
+from app.telephony.exotel_routes import configure as configure_exotel, router as exotel_router
+from app.telephony.teler_routes import configure as configure_teler, router as teler_router
+from app.telephony.providers import SELECTABLE_PROVIDERS, provider_status_report
+from app.telephony.twilio_routes import OutboundCallRequest, callback_auth_failure_health, configure as configure_twilio, media_router, router as twilio_router, start_outbound_call
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +31,11 @@ answer_store = SQLiteCallStore(DATABASE_PATH, DATA_DIR)
 call_result_service = CallResultService(answer_extractor, answer_store, timeout=EXTRACTION_TIMEOUT_SECONDS, max_attempts=EXTRACTION_MAX_ATTEMPTS)
 call_manager = CallManager()
 configure_twilio(answer_store, call_result_service)
+configure_exotel(answer_store, call_result_service)
+configure_teler(answer_store, call_result_service)
+# Seed only: does nothing once the row exists, so an operator's saved choice
+# always wins over the environment.
+answer_store.seed_setting(ACTIVE_PROVIDER_KEY, DEFAULT_TELEPHONY_PROVIDER)
 coordinator = DurableCallCoordinator(
     answer_store, MAX_CONCURRENT_CALLS, START_INTERVAL_SECONDS,
     ring_timeout=RING_TIMEOUT_SECONDS, max_call_seconds=MAX_CALL_SECONDS,
@@ -106,6 +115,24 @@ def check_startup_configuration() -> list[str]:
     return problems
 
 
+async def _log_open_fd_count_periodically() -> None:
+    """Low-frequency, off-the-hot-path visibility into descriptor growth.
+
+    This is the signal that was missing during the production incident: the
+    process climbed to its 1024-descriptor limit over a few hours with no
+    other symptom until SQLite could no longer open a file and Uvicorn could
+    no longer accept a socket. `print`, not `logger.info`, because nothing in
+    this process configures logging -- exactly like the `[startup]` messages
+    above, an `INFO` record here would be silently dropped by the root
+    logger's default WARNING level rather than reach the journal.
+    """
+    while True:
+        await asyncio.sleep(FD_DIAGNOSTICS_INTERVAL_SECONDS)
+        count = open_fd_count()
+        if count is not None:
+            print(f"[diagnostics] open_fds={count}")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     for problem in check_startup_configuration():
@@ -114,11 +141,18 @@ async def lifespan(_: FastAPI):
         print(f"[startup] NOT RENDERED for the current voice: {item}")
         print("[startup]   fix: python scripts/prerender_greeting.py")
     task=asyncio.create_task(coordinator.run())
+    fd_task = asyncio.create_task(_log_open_fd_count_periodically()) if FD_DIAGNOSTICS_ENABLED else None
     yield
     coordinator.stop(); await task
+    if fd_task is not None:
+        fd_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await fd_task
 
 app = FastAPI(title="Autonomous Calling Agent", lifespan=lifespan)
 app.include_router(twilio_router)
+app.include_router(exotel_router)
+app.include_router(teler_router)
 app.include_router(media_router)
 
 BATCH_CONCURRENCY_LIMIT = MAX_CONCURRENT_CALLS
@@ -178,6 +212,7 @@ async def import_leads(payload: dict):
             "business_name": row.get(mapping.get("business_name", ""), ""),
             "phone_number": row.get(mapping.get("phone_number", ""), ""),
             "category": row.get(mapping.get("category", ""), ""),
+            "city": row.get(mapping.get("city", ""), ""),
             "notes": row.get(mapping.get("notes", ""), ""),
         })
     result = await asyncio.to_thread(answer_store.import_leads, normalized)
@@ -191,6 +226,7 @@ async def manual_lead(payload: dict):
         "business_name": payload.get("business_name", ""),
         "phone_number": payload.get("phone_number", ""),
         "category": payload.get("category", ""),
+        "city": payload.get("city", ""),
         "notes": payload.get("notes", ""),
     }
     result = await asyncio.to_thread(answer_store.import_leads, [row])
@@ -210,6 +246,7 @@ async def call_lead(lead_id: str):
         lead_id=lead_id,
         business_name=lead.get("business_name"),
         category=lead.get("category"),
+        city=lead.get("city"),
         notes=lead.get("notes"),
     )
     try:
@@ -246,7 +283,7 @@ async def call_lead_batch(payload: dict):
     queued=[]
     for lead in leads:
         try:
-            call=await answer_store.aenqueue_call(phone_number=lead["phone_number"],lead_id=lead["lead_id"],business_name=lead.get("business_name", ""),category=lead.get("category", ""),notes=lead.get("notes", ""))
+            call=await answer_store.aenqueue_call(phone_number=lead["phone_number"],lead_id=lead["lead_id"],business_name=lead.get("business_name", ""),category=lead.get("category", ""),city=lead.get("city", ""),notes=lead.get("notes", ""))
             queued.append(call["call_id"])
         except SuppressedError: continue
     return {"requested": len(leads), "queued": len(queued), "call_ids": queued, "concurrency_limit": BATCH_CONCURRENCY_LIMIT}
@@ -307,15 +344,66 @@ async def operations():
     return {
         "coordinator": coordinator.health(),
         "reconciliation": await asyncio.to_thread(answer_store.list_reconciliation, 100),
-        # Any nonzero total here means Twilio callbacks are being rejected --
-        # almost always a PUBLIC_BASE_URL that does not match the URL Twilio
-        # signed. Nothing else in the system reports that condition.
-        "twilio_signature_failures": signature_failure_health(),
+        # Any nonzero total here means provider callbacks are being
+        # rejected -- for Twilio almost always a PUBLIC_BASE_URL that does not
+        # match the URL it signed, for Exotel a wrong or expired callback
+        # token. Nothing else in the system reports that condition.
+        "callback_auth_failures": callback_auth_failure_health(),
+        # Retained key, same snapshot, so existing dashboards keep working.
+        "twilio_signature_failures": callback_auth_failure_health(),
         # What is currently occupying the queue. When calls sit in QUEUED and
         # nothing starts, this is the answer: something in capacity_occupied
         # is not finishing.
         "capacity": await asyncio.to_thread(answer_store.capacity_snapshot),
     }
+
+
+@app.get("/api/settings/telephony")
+async def get_telephony_settings():
+    """The active provider and what each one can actually do.
+
+    Returns configuration *state*, never configuration values: whether each
+    provider's credentials are present, which of them are missing by name, and
+    the caller ID it would present -- a published business number, not a
+    secret.
+    """
+    return {
+        "active": await asyncio.to_thread(answer_store.active_provider_setting),
+        "selectable": list(SELECTABLE_PROVIDERS),
+        "providers": await asyncio.to_thread(provider_status_report),
+        "recent_changes": await asyncio.to_thread(answer_store.list_settings_events, 10),
+        "note": "Applies to newly queued calls only. Calls already queued or in flight keep the provider they were created with.",
+    }
+
+
+@app.post("/api/settings/telephony")
+async def set_telephony_settings(payload: dict):
+    """Change the active provider, failing closed on an unusable one.
+
+    An operator who selects a provider with no credentials would otherwise
+    find out through a wall of failed calls, so the check happens here rather
+    than at dial time. `auto` requires at least one usable provider, since it
+    resolves to a real one per destination.
+    """
+    requested = str((payload or {}).get("provider") or "").strip().lower()
+    if requested not in SELECTABLE_PROVIDERS:
+        raise HTTPException(422, f"provider must be one of {sorted(SELECTABLE_PROVIDERS)}")
+
+    report = {item["name"]: item for item in await asyncio.to_thread(provider_status_report)}
+    if requested == "auto":
+        if not any(item["configured"] for item in report.values()):
+            raise HTTPException(422, "auto needs at least one configured provider; none are")
+    else:
+        state = report.get(requested, {})
+        if not state.get("configured"):
+            missing = ", ".join(state.get("missing") or ["unknown settings"])
+            raise HTTPException(422, f"{requested} cannot place calls: {missing} not set")
+
+    previous = await asyncio.to_thread(answer_store.active_provider_setting)
+    await asyncio.to_thread(answer_store.set_active_provider, requested)
+    # Names only. Never the credentials themselves.
+    logger.warning("telephony_provider_changed", extra={"old": previous, "new": requested})
+    return {"active": requested, "previous": previous, "applies_to": "newly_queued_calls"}
 
 
 @app.post("/api/calls/{call_id}/resolve")
@@ -349,10 +437,28 @@ async def lead_template():
 
 
 @app.get("/api/export/{fmt}")
-async def export_calls(fmt: str):
+async def export_calls(fmt: str, q: str = "", status: str = "", interested: str = "", city: str = "", date_from: str = "", date_to: str = ""):
+    """Exports the calls matching the dashboard's current filters, not the whole table.
+
+    Every filter is optional and additive; omitting all of them exports
+    everything, same as before this endpoint took query parameters.
+    """
     if fmt not in {"xlsx", "csv", "json"}:
         raise HTTPException(status_code=400, detail="Format must be xlsx, csv, or json")
-    filename, content, media_type = await asyncio.to_thread(answer_store.export_calls, fmt)
+    filename, content, media_type = await asyncio.to_thread(
+        answer_store.export_calls, fmt, search=q, status=status, interested=interested, city=city, date_from=date_from, date_to=date_to
+    )
+    return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/leads/export/{fmt}")
+async def export_leads(fmt: str, q: str = "", status: str = "", category: str = "", city: str = "", date_from: str = "", date_to: str = ""):
+    """Exports the leads matching the Lead Upload page's current filters."""
+    if fmt not in {"xlsx", "csv", "json"}:
+        raise HTTPException(status_code=400, detail="Format must be xlsx, csv, or json")
+    filename, content, media_type = await asyncio.to_thread(
+        answer_store.export_leads, fmt, search=q, status=status, category=category, city=city, date_from=date_from, date_to=date_to
+    )
     return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 @app.get("/health")
@@ -361,7 +467,8 @@ async def health_check():
         "status": "ok",
         "data_dir": str(DATA_DIR),
         "coordinator": coordinator.health(),
-        "twilio_signature_failures": signature_failure_health(),
+        "callback_auth_failures": callback_auth_failure_health(),
+        "twilio_signature_failures": callback_auth_failure_health(),
     }
 
 
