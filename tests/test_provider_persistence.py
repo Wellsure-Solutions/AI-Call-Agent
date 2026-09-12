@@ -44,9 +44,9 @@ def test_schema_version_three_adds_the_provider_column(store):
     assert store.get_setting("schema_version", "") == "" or True  # marker lives in schema_metadata
     with store.transaction() as db:
         version = db.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()
-    # v4 (city, for filtering leads/calls by location) runs right after v3 on
-    # every fresh database, so a freshly created store is already at v4.
-    assert version[0] == "4"
+    # The migrations chain, so a freshly created store has already run every
+    # one of them: v4 (city) and v5 (inbound_calls) follow v3 unconditionally.
+    assert version[0] == "5"
 
 
 def test_existing_rows_are_backfilled_to_twilio(tmp_path):

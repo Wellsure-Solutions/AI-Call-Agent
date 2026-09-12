@@ -6,6 +6,23 @@ from app.services.call_service import CallResultService
 from app.storage.sqlite_store import ActiveDataError, SQLiteCallStore, SuppressedError
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def extraction_enabled(monkeypatch):
+    """Post-call extraction is opt-in now (settings.EXTRACTION_ENABLED, default
+    off) because it spent an OpenAI request per answered call on fields nobody
+    acted on. The machinery is still expected to work when it is switched on,
+    which is what this file tests, so switch it on.
+
+    Patched on the settings module rather than on an importer: `persist_raw`
+    and the coordinator both read the flag at call time precisely so it can be
+    changed without a rebuild.
+    """
+    monkeypatch.setattr("app.core.settings.EXTRACTION_ENABLED", True)
+
+
 def store(tmp_path): return SQLiteCallStore(tmp_path/'calls.db', tmp_path)
 
 def lead(repo, phone='+14155552671'):

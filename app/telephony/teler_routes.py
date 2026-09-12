@@ -55,6 +55,8 @@ from app.core.settings import (
     METRICS_SILENCE_GAP_MS,
     RING_TIMEOUT_SECONDS,
     TELER_CHUNK_MS,
+    TELER_INCOMING_MEDIA_URL,
+    TELER_INCOMING_SECRET,
     TELER_RECORD,
     TELER_WEBHOOK_SECRET,
 )
@@ -174,6 +176,20 @@ def _debug_status(call_id: str, raw_body: bytes, headers: Any) -> None:
         headers.get("x-teler-event-id"),
         len(raw_body), body,
     )
+
+
+def _debug_incoming(raw_body: bytes) -> None:
+    """An inbound flow or status request, raw, before parsing.
+
+    Inbound is brand new and has never been seen on a live call, so its body
+    shape is inferred from the outbound flow's -- FreJun document one schema
+    for both directions, distinguished only by `direction`. This is what
+    confirms or corrects that on the first real callback.
+    """
+    body = raw_body.decode("utf-8", "replace")
+    if len(body) > _RAW_LOG_LIMIT:
+        body = body[:_RAW_LOG_LIMIT] + "...<truncated>"
+    logger.warning("TELER_DEBUG incoming len=%s raw=%s", len(raw_body), body)
 
 
 def _debug_flow(call_id: str, raw_body: bytes) -> None:
@@ -333,6 +349,104 @@ async def flow_webhook(call_id: str, request: Request):
         record=TELER_RECORD,
     )
     return JSONResponse(flow)
+
+
+# ---------------------------------------------------------------------------
+# Inbound calls -- somebody ringing the virtual number back
+# ---------------------------------------------------------------------------
+def _valid_incoming_secret(request: Request) -> bool:
+    """Authenticate FreJun's Incoming Call URL by a single shared secret.
+
+    This cannot be the per-call HMAC the outbound flow uses. That URL is minted
+    at dial time against a call that already exists; the Incoming Call URL is
+    typed into the Voice App once, before any inbound call exists, so there is
+    nothing per-call to sign.
+
+    Fails closed when the secret is unset. An unauthenticated endpoint here is
+    a public write into the callbacks table -- anyone who guessed the path could
+    fill the operator's follow-up list with numbers that never rang.
+    """
+    if not TELER_INCOMING_SECRET:
+        return False
+    return hmac.compare_digest(str(request.query_params.get("key") or ""), TELER_INCOMING_SECRET)
+
+
+@router.post("/incoming")
+async def incoming_call_flow(request: Request):
+    """FreJun's Incoming Call URL: record the callback, then end the call.
+
+    Set this as the Voice App's Incoming Call URL. Teler POSTs the same body
+    shape as the outbound flow -- `{call_id, account_id, from_number,
+    to_number, direction}` -- and expects one call-flow action back.
+
+    Recording happens before the response is built and never fails the request:
+    the whole point is to capture that this number rang, and returning a 5xx
+    would make Teler retry, which would either duplicate the callback or leave
+    the caller listening to silence while we retried a database write.
+
+    The agent is deliberately not run on inbound. Answering with the outbound
+    pitch to somebody who rang *us* is the wrong conversation, and the flow
+    here exists to log the callback for a human to return.
+    """
+    if not _valid_incoming_secret(request):
+        _record_signature_failure("teler_incoming", "inbound")
+        raise HTTPException(403, "Invalid Teler incoming key")
+
+    raw_body = await request.body()
+    _debug_incoming(raw_body)
+    body = _decode_json(raw_body)
+    from_number = str(body.get("from_number") or "")
+    try:
+        recorded = await _repo().arecord_inbound_call(
+            from_number=from_number,
+            to_number=str(body.get("to_number") or ""),
+            provider="teler",
+            provider_call_id=str(body.get("call_id") or ""),
+        )
+        logger.warning(
+            "TELER_DEBUG inbound_recorded id=%r from=%r matched_lead=%r",
+            recorded.get("inbound_id"), recorded.get("from_number"), recorded.get("lead_id"),
+        )
+    except Exception:
+        logger.exception("inbound_call_not_recorded", extra={"from_number": from_number})
+
+    return JSONResponse(TelerProvider.build_incoming_flow(TELER_INCOMING_MEDIA_URL))
+
+
+@router.post("/incoming/status")
+async def incoming_status_webhook(request: Request):
+    """The Voice App's Call status URL, for inbound calls.
+
+    Separate from `/teler/status/{call_id}`: that one is per-call and carries a
+    token minted for an outbound call we placed. This one is configured once on
+    the Voice App, so it is authenticated by the same shared secret as the
+    Incoming Call URL and correlates on Teler's own call id.
+
+    Only ever updates an existing callback row -- see `update_inbound_status`.
+    Outbound calls report to their own per-call URL, so anything arriving here
+    that we cannot match is acknowledged and dropped rather than invented.
+    """
+    if not _valid_incoming_secret(request):
+        _record_signature_failure("teler_incoming_status", "inbound")
+        raise HTTPException(403, "Invalid Teler incoming key")
+
+    raw_body = await request.body()
+    _debug_incoming(raw_body)
+    payload = _decode_json(raw_body)
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    event = payload.get("type") or payload.get("event")
+    provider_call_id = str(payload.get("call_id") or data.get("call_id") or "")
+    status = normalize_event(event, data.get("reason"))
+    if provider_call_id and status:
+        duration = data.get("duration_seconds")
+        if duration is None:
+            duration = data.get("duration")
+        try:
+            duration = int(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        await _repo().aupdate_inbound_status(provider_call_id, status, duration)
+    return Response(status_code=200)
 
 
 # ---------------------------------------------------------------------------

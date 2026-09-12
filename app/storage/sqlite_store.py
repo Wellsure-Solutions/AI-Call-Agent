@@ -211,6 +211,49 @@ class SQLiteCallStore(JsonCallStore):
         db.execute("CREATE INDEX IF NOT EXISTS leads_city ON leads(city)")
         db.execute("CREATE INDEX IF NOT EXISTS calls_city ON calls(city)")
         db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','4')")
+        self._migrate_schema_v5(db)
+
+    def _migrate_schema_v5(self, db: sqlite3.Connection) -> None:
+        """Inbound calls: somebody ringing the virtual number back.
+
+        A new table rather than a flag on `calls`, because an inbound call is
+        not a row in the outbound queue and must not look like one. `calls` is
+        governed by `one_active_phone`, by the capacity accounting, and by the
+        reconciliation deadlines -- an inbound row landing there would occupy a
+        concurrency slot for a call nobody placed, and could block the outbound
+        queue from ever dialling that number again.
+
+        Additive and idempotent exactly like v2-v4: CREATE TABLE IF NOT EXISTS
+        and guarded ALTERs only, no DROP and no data rewrite, so an existing
+        production database keeps every row it had and two workers racing this
+        on startup converge. `migrate_existing_database` in the tests asserts
+        precisely that.
+
+        `provider_call_id` is UNIQUE because Teler retries a flow request it
+        did not get a clean response to, and a retry must update the callback
+        rather than record a second one.
+        """
+        db.execute("""CREATE TABLE IF NOT EXISTS inbound_calls(
+            inbound_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL DEFAULT 'teler',
+            provider_call_id TEXT UNIQUE,
+            from_number TEXT NOT NULL,
+            to_number TEXT NOT NULL DEFAULT '',
+            lead_id TEXT REFERENCES leads(lead_id),
+            business_name TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT '',
+            city TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'received',
+            duration INTEGER NOT NULL DEFAULT 0,
+            handled INTEGER NOT NULL DEFAULT 0,
+            handled_at TEXT,
+            notes TEXT NOT NULL DEFAULT '',
+            received_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL)""")
+        db.execute("CREATE INDEX IF NOT EXISTS inbound_received ON inbound_calls(received_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS inbound_handled ON inbound_calls(handled,received_at)")
+        db.execute("CREATE INDEX IF NOT EXISTS inbound_from ON inbound_calls(from_number)")
+        db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('schema_version','5')")
 
     # ------------------------------------------------------------------
     # Operator settings: the active telephony provider
@@ -400,11 +443,19 @@ class SQLiteCallStore(JsonCallStore):
         return self.get_lead(lead_id)
 
     def delete_lead(self, lead_id: str) -> bool:
-        """Delete a lead while retaining its calls as standalone history."""
+        """Delete a lead while retaining its calls as standalone history.
+
+        Inbound callbacks are detached the same way outbound calls are. They
+        reference `leads(lead_id)` too, so without this the foreign key refuses
+        the delete outright and an operator cannot remove any lead who has ever
+        rung back. Their business name is already copied onto the callback row,
+        so the history still says who called.
+        """
         with self.transaction(immediate=True) as db:
             if not db.execute("SELECT 1 FROM leads WHERE lead_id=?", (lead_id,)).fetchone():
                 return False
             db.execute("UPDATE calls SET lead_id=NULL WHERE lead_id=?", (lead_id,))
+            db.execute("UPDATE inbound_calls SET lead_id=NULL WHERE lead_id=?", (lead_id,))
             return db.execute("DELETE FROM leads WHERE lead_id=?", (lead_id,)).rowcount == 1
 
     @staticmethod
@@ -445,6 +496,10 @@ class SQLiteCallStore(JsonCallStore):
             if scope in {"leads", "all"}:
                 deleted["leads"] = db.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
                 db.execute("UPDATE calls SET lead_id=NULL")
+                # Same reason as `delete_lead`: inbound callbacks reference
+                # leads, so leaving them attached makes the DELETE fail and
+                # "clear leads" errors out on any workspace that has callbacks.
+                db.execute("UPDATE inbound_calls SET lead_id=NULL")
                 db.execute("DELETE FROM leads")
             if scope == "all":
                 deleted["suppression_entries"] = db.execute("SELECT COUNT(*) FROM suppression_list").fetchone()[0]
@@ -597,6 +652,14 @@ class SQLiteCallStore(JsonCallStore):
     def persist_raw(self, session: Any, media_end_reason: str = "completed", max_extraction_attempts: int = 3) -> dict[str, Any]:
         now = utcnow()
         metadata = session.metadata or {}
+        # Read at call time rather than imported at module scope, so a test (or
+        # a restart with a changed .env) sees the current value. Gates both the
+        # `pending` status stamped below and the job queued further down: with
+        # extraction off, a row marked `pending` with no job behind it would
+        # read as work in progress that never finishes.
+        from app.core.settings import EXTRACTION_ENABLED
+
+        extraction_on = 1 if EXTRACTION_ENABLED else 0
         lifecycle = "AI_FINISHED" if media_end_reason == "completed" else "HUNG_UP" if media_end_reason in {"client_disconnected", "hung_up"} else "FAILED"
         with self.transaction(immediate=True) as db:
             lead_id = metadata.get("lead_id")
@@ -615,11 +678,11 @@ class SQLiteCallStore(JsonCallStore):
             db.execute("""UPDATE calls SET transcript=?,ended_at=COALESCE(ended_at,?),duration=?,media_connected=CASE WHEN ? THEN 1 ELSE media_connected END,
                 media_end_reason=?,media_ended_at=COALESCE(media_ended_at,?),
                 raw_persisted_at=COALESCE(raw_persisted_at,?),lifecycle_state=CASE WHEN provider_terminal_at IS NULL THEN ? ELSE lifecycle_state END,
-                extraction_status=CASE WHEN (media_connected=1 OR ?) AND extraction_status='not_required' THEN 'pending' ELSE extraction_status END,
+                extraction_status=CASE WHEN ? AND (media_connected=1 OR ?) AND extraction_status='not_required' THEN 'pending' ELSE extraction_status END,
                 finalized_at=CASE WHEN provider_terminal_at IS NOT NULL THEN COALESCE(finalized_at,?) ELSE finalized_at END,updated_at=? WHERE call_id=?""",
                 (session.transcript_text, (session.ended_at or datetime.now(timezone.utc)).isoformat(), session.duration_seconds,
                  int(bool(metadata.get("media_connected", session.direction == "browser"))), media_end_reason, now, now,
-                 lifecycle, int(bool(metadata.get("media_connected", session.direction == "browser"))),
+                 lifecycle, extraction_on, int(bool(metadata.get("media_connected", session.direction == "browser"))),
                  now, now, session.call_id))
             row = db.execute("SELECT media_connected FROM calls WHERE call_id=?", (session.call_id,)).fetchone()
             if row is None:
@@ -629,7 +692,10 @@ class SQLiteCallStore(JsonCallStore):
                 # skips the rest of teardown.
                 raise SuppressedError(f"call row missing for {session.call_id}; raw transcript not persisted")
             connected = row[0]
-            if connected:
+            # Queued only when extraction is switched on, so a disabled
+            # deployment accumulates no backlog to churn through if it is ever
+            # switched back on.
+            if connected and extraction_on:
                 db.execute("""INSERT INTO extraction_jobs(call_id,state,next_attempt_at,max_attempts,created_at,updated_at)
                     VALUES(?,'pending',?,?,?,?) ON CONFLICT(call_id) DO NOTHING""", (session.call_id, now, max_extraction_attempts, now, now))
             self._event(db, session.call_id, "raw_persisted", now, {"media_end_reason": media_end_reason})
@@ -923,8 +989,15 @@ class SQLiteCallStore(JsonCallStore):
             outcomes = dict(db.execute("SELECT COALESCE(outcome,'unknown'),COUNT(*) FROM calls GROUP BY COALESCE(outcome,'unknown')"))
             days = dict(db.execute("SELECT substr(COALESCE(ended_at,started_at,created_at),1,10),COUNT(*) FROM calls GROUP BY 1"))
             leads = db.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+            inbound = db.execute(
+                """SELECT COUNT(*) total,
+                   COALESCE(SUM(CASE WHEN handled=0 THEN 1 ELSE 0 END),0) pending
+                   FROM inbound_calls"""
+            ).fetchone()
         result = dict(row)
         result["total_leads"] = leads
+        result["inbound_calls"] = inbound["total"]
+        result["inbound_pending"] = inbound["pending"]
         result["outcomes"] = outcomes
         result["calls_over_time"] = days
         result["calls_not_answered"] = result["total_calls"] - result["calls_answered"]
@@ -1022,6 +1095,148 @@ class SQLiteCallStore(JsonCallStore):
         if not row:
             raise KeyError(call_id)
         return self._decode_call(dict(row))
+
+    # ------------------------------------------------------------------
+    # Inbound calls -- callbacks to the virtual number
+    # ------------------------------------------------------------------
+    def record_inbound_call(
+        self,
+        *,
+        from_number: str,
+        to_number: str = "",
+        provider: str = "teler",
+        provider_call_id: str = "",
+    ) -> dict[str, Any]:
+        """Record that somebody rang our number, and match them to a lead.
+
+        Idempotent on `provider_call_id`: Teler retries a flow request whose
+        response it did not receive cleanly, and a retry has to land on the
+        same row or one callback shows up in the dashboard three times.
+
+        The caller's number is normalised before matching so that a lead stored
+        as `+919812345678` is still found when the carrier reports
+        `9812345678`. A number that will not normalise is stored raw rather
+        than rejected -- an unrecognisable caller ID is still a real callback,
+        and dropping it loses the one signal this table exists for.
+
+        Business details are copied onto the row rather than joined at read
+        time, so a callback keeps saying who rang even after the lead is
+        deleted -- deleting a lead must not silently rewrite call history.
+        """
+        now = uuid_now = utcnow()
+        raw = str(from_number or "").strip()
+        try:
+            normalized = self.normalize_phone(raw)
+        except (ValueError, TypeError):
+            normalized = raw
+        with self.transaction(immediate=True) as db:
+            if provider_call_id:
+                existing = db.execute(
+                    "SELECT inbound_id FROM inbound_calls WHERE provider_call_id=?", (provider_call_id,)
+                ).fetchone()
+                if existing:
+                    db.execute("UPDATE inbound_calls SET updated_at=? WHERE inbound_id=?", (now, existing[0]))
+                    return self._inbound_from_db(db, existing[0])
+            lead = db.execute(
+                "SELECT lead_id,business_name,category,city FROM leads WHERE phone_number=?", (normalized,)
+            ).fetchone()
+            inbound_id = str(uuid4())
+            db.execute(
+                """INSERT INTO inbound_calls(inbound_id,provider,provider_call_id,from_number,to_number,
+                    lead_id,business_name,category,city,status,received_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,'received',?,?)""",
+                (
+                    inbound_id, provider, provider_call_id or None, normalized, str(to_number or ""),
+                    lead["lead_id"] if lead else None,
+                    lead["business_name"] if lead else "",
+                    lead["category"] if lead else "",
+                    lead["city"] if lead else "",
+                    uuid_now, now,
+                ),
+            )
+            return self._inbound_from_db(db, inbound_id)
+
+    def update_inbound_status(self, provider_call_id: str, status: str, duration: int | None = None) -> bool:
+        """Apply a status webhook for an inbound call.
+
+        Never creates a row: a status for a call whose flow request we never
+        saw is not a callback we can attribute, and inventing one from a
+        webhook would put a caller in the dashboard with no record of why.
+        """
+        if not provider_call_id:
+            return False
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            changed = db.execute(
+                "UPDATE inbound_calls SET status=?,duration=COALESCE(?,duration),updated_at=? WHERE provider_call_id=?",
+                (str(status or "")[:40], duration, now, provider_call_id),
+            ).rowcount
+            return changed == 1
+
+    def list_inbound_calls(self, limit: int = 200, offset: int = 0, handled: str = "") -> list[dict[str, Any]]:
+        clause, args = "", []
+        if handled == "true":
+            clause = " WHERE handled=1"
+        elif handled == "false":
+            clause = " WHERE handled=0"
+        args.extend([max(1, min(limit, 1000)), max(0, offset)])
+        return self._rows(
+            f"SELECT * FROM inbound_calls{clause} ORDER BY received_at DESC LIMIT ? OFFSET ?", tuple(args)
+        )
+
+    def set_inbound_handled(self, inbound_id: str, handled: bool, notes: str = "") -> dict[str, Any] | None:
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            changed = db.execute(
+                "UPDATE inbound_calls SET handled=?,handled_at=?,notes=?,updated_at=? WHERE inbound_id=?",
+                (1 if handled else 0, now if handled else None, self.clean_text(notes, 500), now, inbound_id),
+            ).rowcount
+            if changed != 1:
+                return None
+            return self._inbound_from_db(db, inbound_id)
+
+    def delete_inbound_call(self, inbound_id: str) -> bool:
+        with self.transaction(immediate=True) as db:
+            return db.execute("DELETE FROM inbound_calls WHERE inbound_id=?", (inbound_id,)).rowcount == 1
+
+    def suppress_phone(self, phone_number: str, reason: str = "operator_request") -> bool:
+        """Add a number to the do-not-call list by hand.
+
+        This used to happen on its own: `complete_extraction` read
+        `do_not_call_requested` off the model's answers and wrote this row.
+        With post-call extraction disabled (see settings.EXTRACTION_ENABLED)
+        nothing detects the request automatically any more, so the operator
+        needs a way to record it -- and "we stopped paying for extraction" is
+        not an acceptable reason to keep calling somebody who asked us not to.
+        """
+        try:
+            normalized = self.normalize_phone(phone_number)
+        except (ValueError, TypeError):
+            return False
+        now = utcnow()
+        with self.transaction(immediate=True) as db:
+            db.execute(
+                "INSERT OR IGNORE INTO suppression_list(phone_number,source_call_id,reason,created_at) VALUES(?,?,?,?)",
+                (normalized, None, reason[:60], now),
+            )
+            db.execute(
+                "UPDATE leads SET do_not_call=1,status='do_not_call',updated_at=? WHERE phone_number=?",
+                (now, normalized),
+            )
+            return True
+
+    @staticmethod
+    def _inbound_from_db(db: sqlite3.Connection, inbound_id: str) -> dict[str, Any]:
+        row = db.execute("SELECT * FROM inbound_calls WHERE inbound_id=?", (inbound_id,)).fetchone()
+        if not row:
+            raise KeyError(inbound_id)
+        return dict(row)
+
+    async def arecord_inbound_call(self, **kwargs: Any) -> dict[str, Any]:
+        return await asyncio.to_thread(lambda: self.record_inbound_call(**kwargs))
+
+    async def aupdate_inbound_status(self, *args: Any, **kwargs: Any) -> bool:
+        return await asyncio.to_thread(self.update_inbound_status, *args, **kwargs)
 
     def record_answered_by(self, call_id: str, answered_by: str, sid: str | None = None) -> dict[str, Any] | None:
         """Persist Twilio's async AMD verdict for a call.

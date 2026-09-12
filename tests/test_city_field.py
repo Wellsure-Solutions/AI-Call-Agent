@@ -62,7 +62,8 @@ def test_legacy_database_without_city_is_migrated_on_reopen(tmp_path):
         lead_columns = {row[1] for row in db.execute("PRAGMA table_info(leads)")}
         version = db.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0]
     assert "city" in lead_columns
-    assert version == "4"
+    # v5 (inbound_calls) chains straight off v4, so a reopened database lands there.
+    assert version == "5"
     # And the migration didn't just add the column -- normal operations work.
     lead = make_lead(reopened)
     assert lead["city"] == "Mumbai"
@@ -75,7 +76,7 @@ def test_migration_is_idempotent_across_repeated_startup(tmp_path):
     store = SQLiteCallStore(path, tmp_path)
     with store.transaction() as db:
         version = db.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0]
-    assert version == "4"
+    assert version == "5"
 
 
 # ---------------------------------------------------------------------------

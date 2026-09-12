@@ -37,6 +37,12 @@
         .nav button { position:relative; display:flex; align-items:center; gap:13px; width:100%; min-height:50px; padding:0 14px; color:var(--sidebar-text); cursor:pointer; border:1px solid transparent; border-radius:14px; background:transparent; text-align:left; font-size:14px; font-weight:620; white-space:nowrap; transition:color .14s ease,background .14s ease,border-color .14s ease,transform .14s ease; }
         .nav button:hover { color:#fff; background:rgba(255,255,255,.06); transform:translateX(2px); }
         .nav button.active { color:#fff; border-color:rgba(99,102,241,.8); background:linear-gradient(110deg,rgba(91,92,240,.42),rgba(69,70,217,.23)); box-shadow:0 0 0 1px rgba(34,199,238,.08) inset,0 8px 28px rgba(66,70,229,.22),0 0 22px rgba(34,199,238,.08); }
+        .row-actions { display:flex; flex-wrap:wrap; gap:6px; }
+        .row-actions .btn { padding:0 10px; min-height:32px; font-size:12px; }
+        .btn.ghost.danger { color:#c0392b; border-color:rgba(192,57,43,.35); }
+        .btn.ghost.danger:hover { background:rgba(192,57,43,.08); }
+        .nav-badge { margin-left:auto; padding:1px 8px; border-radius:999px; background:#f0653a; color:#fff; font-size:11px; font-weight:800; line-height:18px; }
+        .sidebar-collapsed .nav-badge { position:absolute; top:6px; right:6px; margin:0; padding:0 5px; font-size:10px; line-height:15px; }
         .nav-icon { display:grid; place-items:center; width:22px; height:22px; flex:0 0 22px; }
         .nav-icon svg { width:21px; height:21px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
         .side-footer { margin-top:auto; display:flex; flex-direction:column; gap:12px; overflow:hidden; }
@@ -267,6 +273,9 @@
             <button type="button" data-page="calls" data-tooltip="Calls" aria-label="Calls">
                 <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.8 19.8 0 0 1 3 5.18 2 2 0 0 1 5 3h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.62a2 2 0 0 1-.45 2.11L8.9 10.72a16 16 0 0 0 4.38 4.38l1.27-1.27a2 2 0 0 1 2.11-.45c.84.29 1.72.5 2.62.62A2 2 0 0 1 22 16.92Z"/></svg></span><span class="nav-label">Calls</span>
             </button>
+            <button type="button" data-page="callbacks" data-tooltip="Callbacks" aria-label="Callbacks">
+                <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 5a2 2 0 0 1 2-2h2.2a1 1 0 0 1 1 .75l.9 3.4a1 1 0 0 1-.28.98l-1.6 1.5a14 14 0 0 0 6.15 6.15l1.5-1.6a1 1 0 0 1 .98-.28l3.4.9a1 1 0 0 1 .75 1V19a2 2 0 0 1-2 2A16 16 0 0 1 3 5Z"/><path d="M14 8h7m0 0-3-3m3 3-3 3"/></svg></span><span class="nav-label">Callbacks</span><span id="callbackBadge" class="nav-badge hidden">0</span>
+            </button>
             <button type="button" data-page="browser" data-tooltip="Browser Test Call" aria-label="Browser Test Call">
                 <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 8h18M7 6h.01M10 6h.01"/></svg></span><span class="nav-label">Browser Test Call</span>
             </button>
@@ -393,11 +402,11 @@
                 <div class="toolbar" style="margin-top:16px">
                     <input id="search" class="toolbar-search" aria-label="Search call history" placeholder="Search business, phone, category, city...">
                     <select id="statusFilter" aria-label="Filter by call status"><option value="">All statuses</option></select>
-                    <select id="interestFilter" aria-label="Filter by interest"><option value="">All interest</option><option value="true">Interested</option><option value="false">Not interested/unknown</option></select>
                     <select id="callCityFilter" aria-label="Filter by city"><option value="">All cities</option></select>
                     <div class="date-field"><label>From</label><input type="date" id="callDateFrom" aria-label="Call date from"></div>
                     <div class="date-field"><label>To</label><input type="date" id="callDateTo" aria-label="Call date to"></div>
                     <div class="toolbar-actions">
+                        <button id="callClearFilters" class="btn ghost" type="button">Clear filters</button>
                         <select id="callPageSize" aria-label="Calls per page"><option value="50">50 / page</option><option value="100" selected>100 / page</option><option value="200">200 / page</option><option value="500">500 / page</option></select>
                         <button class="btn danger" onclick="clearData('calls')">Delete Call History</button>
                     </div>
@@ -406,6 +415,28 @@
                 <div id="callBulkBar" class="bulk-bar hidden"></div>
                 <div id="callTable"></div>
                 <div id="callPagination" class="pagination"></div>
+            </div>
+        </section>
+
+        <section id="callbacks" class="page hidden">
+            <div class="card">
+                <div class="actions" style="justify-content:space-between;align-items:flex-start">
+                    <div><h3>Received callbacks</h3><div id="callbackResultCount" class="sub"></div></div>
+                    <button class="btn ghost" type="button" onclick="loadCallbacks(true)">Refresh</button>
+                </div>
+                <div class="notice" style="margin-top:14px">These are calls that came <strong>in</strong> to your virtual number &mdash; usually someone returning a call. The agent does not answer them; they are logged here for a human to ring back.</div>
+                <div class="toolbar" style="margin-top:16px">
+                    <input id="callbackSearch" class="toolbar-search" aria-label="Search callbacks" placeholder="Search number, business, category...">
+                    <select id="callbackHandledFilter" aria-label="Filter by handled state">
+                        <option value="false">Needs follow-up</option>
+                        <option value="">All callbacks</option>
+                        <option value="true">Handled</option>
+                    </select>
+                    <div class="toolbar-actions">
+                        <button id="callbackClearFilters" class="btn ghost" type="button">Clear filters</button>
+                    </div>
+                </div>
+                <div id="callbackTable"></div>
             </div>
         </section>
 
@@ -424,6 +455,10 @@
                 <div id="providerNotice" class="notice" style="margin-top:14px">Applies to newly queued calls only. Calls already queued or in flight keep the provider they were created with.</div>
                 <div id="providerChoices" style="margin-top:16px"></div>
                 <div class="actions" style="margin-top:18px"><button id="saveProviderBtn" class="btn" type="button">Save provider</button><span id="providerSaveState" class="sub"></span></div>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <div class="chart-head"><div><h3>Inbound calls (FreJun Teler)</h3><div class="sub">Paste these into the Voice App's Webhooks section so callbacks are captured.</div></div></div>
+                <div id="incomingUrls" style="margin-top:14px"></div>
             </div>
             <div class="card" style="margin-top:16px">
                 <div class="chart-head"><div><h3>Recent changes</h3><div class="sub">Every provider change is recorded with its old and new value.</div></div></div>
@@ -447,7 +482,7 @@
     </div>
 </div>
 <script>
-let previewRows = [], headers = [], calls = [], leads = [], liveCalls = [];
+let previewRows = [], headers = [], calls = [], leads = [], liveCalls = [], callbacks = [];
 let selectedLeadIds = new Set(), selectedCallIds = new Set();
 let leadSort = { key:'created_at', dir:'desc' }, callSort = { key:'', dir:'desc' };
 let leadPage = 1;
@@ -548,6 +583,7 @@ const pageCopy = {
     overview:['Dashboard Overview','Monitor outbound test calls, leads, and AI responses.'],
     leads:['Lead Upload','Import, validate, and prepare contacts for outbound calling.'],
     calls:['Calls','Track active calls, outcomes, transcripts, and follow-ups.'],
+    callbacks:['Callbacks','People who rang your number back. Work the unhandled ones and mark them done.'],
     browser:['Browser Test Call','Speak with your AI agent directly through this browser.'],
     settings:['Settings','Operator configuration for outbound calling.']
 };
@@ -555,7 +591,7 @@ const uiIcons = {
     leads:'<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8-1v6m3-3h-6"/></svg>',
     calls:'<svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.8 19.8 0 0 1 3 5.18 2 2 0 0 1 5 3h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.62 2.62a2 2 0 0 1-.45 2.11L8.9 10.72a16 16 0 0 0 4.38 4.38l1.27-1.27a2 2 0 0 1 2.11-.45c.84.29 1.72.5 2.62.62A2 2 0 0 1 22 16.92Z"/></svg>',
     answered:'<svg viewBox="0 0 24 24"><path d="M4 13v-2a8 8 0 0 1 16 0v2M4 13a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h2v-6H4Zm16 0a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2v-6h2Z"/><path d="M18 19c0 1.1-.9 2-2 2h-3"/></svg>',
-    interested:'<svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>'
+    callbacks:'<svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>'
 };
 
 function toast(message) {
@@ -594,7 +630,11 @@ function setPage(name) {
     closeMobileNav();
     window.scrollTo({ top:0, behavior:'smooth' });
 }
-document.querySelectorAll('.nav button').forEach(button => button.onclick = () => { setPage(button.dataset.page); refresh(); });
+document.querySelectorAll('.nav button').forEach(button => button.onclick = () => {
+    setPage(button.dataset.page);
+    refresh();
+    if (button.dataset.page === 'callbacks') loadCallbacks();
+});
 $('newCallBtn').onclick = () => { setPage('leads'); toast('Choose a lead or add a new contact to begin.'); };
 function wireExportToggle(toggleId, wrapId, onOpen) {
     $(toggleId).onclick = event => {
@@ -632,6 +672,7 @@ async function refresh() {
     pruneSelection(selectedLeadIds, leads.map(l => l.lead_id));
     pruneSelection(selectedCallIds, calls.map(c => c.call_id));
     renderStats(stats); renderLiveCalls(); renderCalls(); renderLeads(); renderLiveSummary();
+    renderCallbackBadge(stats);
     loadTelephonySettings();
 }
 
@@ -659,6 +700,7 @@ async function loadTelephonySettings() {
     }
     renderProviderChoices();
     renderProviderHistory();
+    renderIncomingUrls();
 }
 
 function providerLabel(name) {
@@ -686,6 +728,39 @@ function renderProviderChoices() {
             <span><b>${escapeHtml(providerLabel(name))}</b>${settings.active === name ? ' &mdash; active' : ''}<br><span class="sub">${detail}</span></span>
         </label>`;
     }).join('');
+}
+
+function renderIncomingUrls() {
+    const settings = telephonySettings || {};
+    const inbound = settings.inbound || {};
+    const box = $('incomingUrls');
+    if (!box) return;
+    if (!inbound.configured) {
+        box.innerHTML = `<div class="notice bad">Inbound capture is off. Set <code>TELER_INCOMING_SECRET</code> in the environment and restart, then these URLs will appear here. Until then FreJun has nowhere to report a callback and the endpoint refuses every request.</div>`;
+        return;
+    }
+    const rows = [
+        ['Incoming call URL', inbound.incoming_url, 'Teler fetches this when somebody rings your number. It records the callback and ends the call.'],
+        ['Call status URL', inbound.status_url, 'Reports how the inbound call ended, so the callback shows a duration.'],
+    ];
+    box.innerHTML = rows.map(([label, url, note]) => `
+        <div class="field-row" style="margin-bottom:14px">
+            <label>${label}</label>
+            <div class="actions" style="gap:8px;align-items:center">
+                <input type="text" readonly value="${escapeHtml(url)}" style="flex:1;min-width:0" onclick="this.select()">
+                <button class="btn ghost" type="button" onclick="copyText('${escapeHtml(url)}')">Copy</button>
+            </div>
+            <div class="field-note">${note}</div>
+        </div>`).join('');
+}
+
+async function copyText(value) {
+    try {
+        await navigator.clipboard.writeText(value);
+        toast('Copied to clipboard.');
+    } catch (error) {
+        toast('Could not copy &mdash; select the text and copy manually.');
+    }
 }
 
 function renderProviderHistory() {
@@ -723,10 +798,10 @@ function renderStats(s) {
         { label:'Total leads', value:s.total_leads, icon:'leads', tone:'', note:'Contacts ready for outreach' },
         { label:'Total calls', value:s.total_calls, icon:'calls', tone:'tone-cyan', note:'All completed and active calls' },
         { label:'Answered', value:s.calls_answered, icon:'answered', tone:'tone-green', note:'Conversations successfully connected' },
-        { label:'Interested', value:s.interested_responses, icon:'interested', tone:'tone-amber', note:'Positive responses captured' }
+        { label:'Callbacks', value:s.inbound_calls, icon:'callbacks', tone:'tone-amber', note:'Inbound calls to your number' }
     ];
     const secondary = [
-        ['Not answered',s.calls_not_answered],['Busy / failed',s.busy_failed_calls],['Avg. duration',`${safeNumber(s.average_call_duration)}s`],['Callbacks',s.callback_requested],['Success rate',`${safeNumber(s.success_rate)}%`]
+        ['Not answered',s.calls_not_answered],['Busy / failed',s.busy_failed_calls],['Avg. duration',`${safeNumber(s.average_call_duration)}s`],['Callbacks to action',s.inbound_pending],['Answer rate',`${s.total_calls ? Math.round(1000 * safeNumber(s.calls_answered) / safeNumber(s.total_calls)) / 10 : 0}%`]
     ];
     $('stats').innerHTML = primary.map(item => `<article class="card stat ${item.tone}"><div class="stat-head"><div><div class="label">${item.label}</div><div class="value">${safeNumber(item.value).toLocaleString()}</div></div><span class="stat-icon" aria-hidden="true">${uiIcons[item.icon]}</span></div><div class="stat-note">${item.note}</div></article>`).join('');
     $('secondaryStats').innerHTML = secondary.map(item => `<div class="mini-stat"><span>${item[0]}</span><strong>${item[1] ?? 0}</strong></div>`).join('');
@@ -987,7 +1062,7 @@ async function viewLead(leadId) {
         <h3>Notes</h3><p class="sub">${escapeHtml(lead.notes) || 'No notes recorded.'}</p>
         ${lead.last_error ? `<div class="notice bad">Last error: ${escapeHtml(lead.last_error)}</div>` : ''}
         <h3>Call history${relatedCalls.length ? ` (${relatedCalls.length})` : ''}</h3>
-        ${relatedCalls.length ? `<div class="tablewrap"><table class="table related-calls"><thead><tr><th>Status</th><th>Interested</th><th>Duration</th><th>Timestamp</th><th></th></tr></thead><tbody>${relatedCalls.map(c => `<tr><td>${statusBadge(c.call_status)}</td><td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td><td>${safeNumber(c.duration)}s</td><td>${formatDate(c.timestamp)}</td><td><button class="btn ghost" onclick="detail('${c.call_id}')">View</button></td></tr>`).join('')}</tbody></table></div>` : `<p class="sub">No calls loaded for this lead yet.${moreMayExist ? ' Only the most recently loaded calls are searched here &mdash; increase the calls page size on the Calls tab to look further back.' : ''}</p>`}
+        ${relatedCalls.length ? `<div class="tablewrap"><table class="table related-calls"><thead><tr><th>Status</th><th>Duration</th><th>Timestamp</th><th></th></tr></thead><tbody>${relatedCalls.map(c => `<tr><td>${statusBadge(c.call_status)}</td><td>${safeNumber(c.duration)}s</td><td>${formatDate(c.timestamp)}</td><td><button class="btn ghost" onclick="detail('${c.call_id}')">View</button></td></tr>`).join('')}</tbody></table></div>` : `<p class="sub">No calls loaded for this lead yet.${moreMayExist ? ' Only the most recently loaded calls are searched here &mdash; increase the calls page size on the Calls tab to look further back.' : ''}</p>`}
         <div class="actions" style="justify-content:flex-end;margin-top:16px">
             <button class="btn secondary" onclick="callLead('${lead.lead_id}')">Start Call</button>
             <button class="btn danger" onclick="deleteRecord('leads','${lead.lead_id}','this lead')">Delete Lead</button>
@@ -1033,6 +1108,104 @@ async function callBatch() {
 }
 
 
+// ---------------------------------------------------------------------------
+// Callbacks: calls that came IN to the virtual number
+// ---------------------------------------------------------------------------
+async function loadCallbacks(announce) {
+    try {
+        const handled = $('callbackHandledFilter')?.value ?? 'false';
+        const response = await fetch(`/api/callbacks?limit=500&handled=${encodeURIComponent(handled)}`);
+        if (!response.ok) throw new Error('failed');
+        callbacks = (await response.json()).callbacks || [];
+        renderCallbacks();
+        if (announce) toast(`${callbacks.length} callback${callbacks.length === 1 ? '' : 's'} loaded.`);
+    } catch (error) {
+        $('callbackTable').innerHTML = '<p class="sub">Could not load callbacks. The backend may be restarting.</p>';
+    }
+}
+
+function visibleCallbacks() {
+    const term = ($('callbackSearch')?.value || '').trim().toLowerCase();
+    if (!term) return callbacks;
+    return callbacks.filter(row => [row.from_number, row.business_name, row.category, row.city]
+        .some(value => String(value || '').toLowerCase().includes(term)));
+}
+
+function renderCallbacks() {
+    const rows = visibleCallbacks();
+    const pending = callbacks.filter(row => !row.handled).length;
+    $('callbackResultCount').textContent = rows.length
+        ? `${rows.length} shown · ${pending} still need a follow-up`
+        : 'Nothing matches the current filter.';
+    if (!rows.length) {
+        $('callbackTable').innerHTML = `<p class="sub" style="margin-top:14px">No callbacks recorded yet. Make sure the Incoming call URL is set in FreJun &mdash; see the Settings tab.</p>`;
+        return;
+    }
+    $('callbackTable').innerHTML = `<div class="tablewrap"><table class="table"><thead><tr>
+        ${['Caller','Business','Received','Status','Duration','Follow-up',''].map(h => `<th>${h}</th>`).join('')}
+        </tr></thead><tbody>${rows.map(row => `<tr>
+            <td><strong>${escapeHtml(row.from_number)}</strong></td>
+            <td>${row.business_name ? escapeHtml(row.business_name) : '<span class="sub">Unknown number</span>'}${row.city ? `<br><span class="sub">${escapeHtml(row.city)}</span>` : ''}</td>
+            <td>${formatDate(row.received_at)}</td>
+            <td>${statusBadge(row.status)}</td>
+            <td>${safeNumber(row.duration)}s</td>
+            <td><span class="badge ${row.handled ? 'yes' : 'no'}">${row.handled ? 'Done' : 'Pending'}</span></td>
+            <td class="row-actions">
+                <button class="btn ghost" onclick="toggleCallbackHandled('${row.inbound_id}', ${row.handled ? 'false' : 'true'})">${row.handled ? 'Reopen' : 'Mark done'}</button>
+                <button class="btn ghost" onclick="suppressNumber('${escapeHtml(row.from_number)}')">Do not call</button>
+                <button class="btn ghost danger" onclick="deleteCallback('${row.inbound_id}')">Delete</button>
+            </td>
+        </tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderCallbackBadge(stats) {
+    const badge = $('callbackBadge');
+    if (!badge) return;
+    const pending = safeNumber(stats.inbound_pending);
+    badge.textContent = pending > 99 ? '99+' : String(pending);
+    badge.classList.toggle('hidden', pending === 0);
+}
+
+async function toggleCallbackHandled(id, handled) {
+    try {
+        const response = await fetch(`/api/callbacks/${id}/handled`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ handled: handled === true || handled === 'true' })
+        });
+        if (!response.ok) throw new Error('failed');
+        toast('Callback updated.');
+        await loadCallbacks();
+        refresh();
+    } catch (error) { toast('Could not update that callback.'); }
+}
+
+async function deleteCallback(id) {
+    if (!await confirmDialog('This removes the record of that inbound call. The call itself is unaffected.',
+        { title:'Delete callback', okLabel:'Delete' })) return;
+    try {
+        const response = await fetch(`/api/callbacks/${id}`, { method:'DELETE' });
+        if (!response.ok) throw new Error('failed');
+        toast('Callback deleted.');
+        await loadCallbacks();
+        refresh();
+    } catch (error) { toast('Could not delete that callback.'); }
+}
+
+async function suppressNumber(phone) {
+    if (!await confirmDialog(
+        `<strong>${escapeHtml(phone)}</strong> will be added to the suppression list, and any matching lead is marked do-not-call. Nothing detects this automatically any more, so record it here whenever a customer asks.`,
+        { title:'Do not call this number', okLabel:'Add to do-not-call' })) return;
+    try {
+        const response = await fetch('/api/suppress', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ phone_number: phone })
+        });
+        if (!response.ok) throw new Error('failed');
+        toast('Added to the do-not-call list.');
+        refresh();
+    } catch (error) { toast('Could not suppress that number.'); }
+}
+
 function renderLiveCalls() {
     if (!$('liveCallTable')) return;
     if (!liveCalls.length) { $('liveCallTable').innerHTML = '<div class="empty-state"><div><strong>No active calls</strong><div class="sub">Dashboard-started calls will appear here in real time.</div></div></div>'; return; }
@@ -1067,7 +1240,7 @@ async function changeCallPage(delta) {
 function toggleCallSort(key) { callSort = { key, dir: callSort.key === key && callSort.dir === 'asc' ? 'desc' : 'asc' }; renderCalls(); }
 function buildCallExportParams() {
     const params = new URLSearchParams();
-    const entries = { q:$('search')?.value || '', status:$('statusFilter')?.value || '', interested:$('interestFilter')?.value || '', city:$('callCityFilter')?.value || '', date_from:$('callDateFrom')?.value || '', date_to:$('callDateTo')?.value || '' };
+    const entries = { q:$('search')?.value || '', status:$('statusFilter')?.value || '', city:$('callCityFilter')?.value || '', date_from:$('callDateFrom')?.value || '', date_to:$('callDateTo')?.value || '' };
     Object.entries(entries).forEach(([key, value]) => { if (value) params.set(key, value); });
     return params.toString();
 }
@@ -1079,7 +1252,6 @@ function refreshExportLinks() {
 }
 function renderCalls() {
     const q = ($('search')?.value || '').toLowerCase();
-    const int = $('interestFilter')?.value || '';
     const dateFrom = $('callDateFrom')?.value || '', dateTo = $('callDateTo')?.value || '';
     populateSelect('statusFilter', [...new Set(calls.map(c => c.call_status).filter(Boolean))].sort(), 'All statuses');
     populateSelect('callCityFilter', [...new Set(calls.map(c => c.city).filter(Boolean))].sort(), 'All cities');
@@ -1088,7 +1260,6 @@ function renderCalls() {
     let rows = calls.filter(c => {
         if (q && ![c.business_name, c.phone, c.category, c.city].join(' ').toLowerCase().includes(q)) return false;
         if (st && c.call_status !== st) return false;
-        if (int && String(!!c.interested) !== int) return false;
         if (city && c.city !== city) return false;
         const day = (c.timestamp || '').slice(0, 10);
         if (dateFrom && day < dateFrom) return false;
@@ -1096,7 +1267,7 @@ function renderCalls() {
         return true;
     });
     rows = sortRows(rows, callSort, { business_name:r => r.business_name, phone:r => r.phone, category:r => r.category, city:r => r.city, call_status:r => r.call_status, duration:r => safeNumber(r.duration), timestamp:r => r.timestamp });
-    const filtered = Boolean(q || st || int || city || dateFrom || dateTo);
+    const filtered = Boolean(q || st || city || dateFrom || dateTo);
     const hintNeeded = filtered && calls.length >= callLimit;
     $('callSearchHint').classList.toggle('hidden', !hintNeeded);
     if (hintNeeded) $('callSearchHint').textContent = `The table's filters only apply to the ${calls.length.toLocaleString()} calls currently loaded (offset ${callOffset.toLocaleString()}) &mdash; page forward or raise the page size to see further back. Export applies these filters to the full call history instead.`;
@@ -1112,7 +1283,6 @@ function renderCalls() {
             ${sortHeader('Category','category',callSort,'toggleCallSort')}
             ${sortHeader('City','city',callSort,'toggleCallSort')}
             ${sortHeader('Call Status','call_status',callSort,'toggleCallSort')}
-            <th>Interested</th><th>Callback Requested</th>
             ${sortHeader('Duration','duration',callSort,'toggleCallSort')}
             ${sortHeader('Timestamp','timestamp',callSort,'toggleCallSort')}
             <th>Action</th>
@@ -1123,8 +1293,6 @@ function renderCalls() {
             <td>${escapeHtml(c.category)}</td>
             <td>${escapeHtml(c.city) || '&mdash;'}</td>
             <td>${statusBadge(c.call_status)}</td>
-            <td><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></td>
-            <td><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></td>
             <td>${safeNumber(c.duration)}s</td>
             <td>${formatDate(c.timestamp)}</td>
             <td><div class="actions"><button class="btn secondary" onclick="event.stopPropagation(); detail('${c.call_id}')">View</button><button class="btn danger" onclick="event.stopPropagation(); deleteRecord('calls','${c.call_id}','this call')">Delete</button></div></td>
@@ -1135,8 +1303,16 @@ function renderCalls() {
     renderCallBulkBar();
     refreshExportLinks();
 }
-$('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls; $('interestFilter').onchange = renderCalls;
+$('search').oninput = renderCalls; $('statusFilter').onchange = renderCalls;
 $('callCityFilter').onchange = renderCalls; $('callDateFrom').onchange = renderCalls; $('callDateTo').onchange = renderCalls;
+$('callbackSearch').oninput = renderCallbacks;
+$('callbackHandledFilter').onchange = () => loadCallbacks();
+$('callbackClearFilters').onclick = () => { $('callbackSearch').value = ''; $('callbackHandledFilter').value = 'false'; loadCallbacks(); };
+$('callClearFilters').onclick = () => {
+    ['search','statusFilter','callCityFilter','callDateFrom','callDateTo'].forEach(id => { if ($(id)) $(id).value = ''; });
+    renderCalls();
+    toast('Call filters cleared.');
+};
 $('callPageSize').onchange = async () => { callLimit = Number($('callPageSize').value) || 100; callOffset = 0; selectedCallIds.clear(); await fetchCalls(); renderCalls(); };
 async function detail(id) {
     try {
@@ -1149,12 +1325,15 @@ async function detail(id) {
             <div><span>City</span><strong>${escapeHtml(c.city) || '&mdash;'}</strong></div>
             <div><span>Status</span><strong>${statusBadge(c.call_status)}</strong></div>
             <div><span>Duration</span><strong>${safeNumber(c.duration)}s</strong></div>
-            <div><span>Interested</span><strong><span class="badge ${c.interested ? 'yes' : 'no'}">${c.interested ? 'Yes' : 'No'}</span></strong></div>
-            <div><span>Callback requested</span><strong><span class="badge ${c.callback_requested ? 'yes' : 'no'}">${c.callback_requested ? 'Yes' : 'No'}</span></strong></div>
         </div>
-        <h3>Structured AI response</h3><pre>${escapeHtml(JSON.stringify(c.structured_response || {}, null, 2))}</pre>
         <h3>Transcript</h3><pre>${escapeHtml(c.transcript || 'No transcript saved.')}</pre>
-        <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn danger" onclick="deleteRecord('calls','${c.call_id}','this call')">Delete Call</button></div>`;
+        <div class="actions" style="justify-content:space-between;margin-top:16px">
+            <button class="btn ghost" onclick="suppressNumber('${escapeHtml(c.phone)}')">Do not call this number</button>
+            <div class="actions">
+                <button class="btn ghost" onclick="closeModal()">Close</button>
+                <button class="btn danger" onclick="deleteRecord('calls','${c.call_id}','this call')">Delete Call</button>
+            </div>
+        </div>`;
         openModal(c.business_name || 'Call detail', html);
     } catch (error) { toast(error.message); }
 }

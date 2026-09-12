@@ -131,7 +131,16 @@ class DurableCallCoordinator:
         action = await asyncio.to_thread(self.store.claim_due_action, self.owner)
         if action:
             await self._reconcile(action)
-        extraction = await asyncio.to_thread(self.store.claim_extraction, self.owner, int(self.extraction_timeout) + 30)
+        # Skipped entirely when extraction is off: `persist_raw` queues no jobs
+        # then, so this would be a SQLite round-trip per iteration that can
+        # only ever return None. Read per iteration rather than captured at
+        # construction so the switch takes effect on a restart without also
+        # needing the coordinator rebuilt.
+        from app.core.settings import EXTRACTION_ENABLED
+
+        extraction = None
+        if EXTRACTION_ENABLED:
+            extraction = await asyncio.to_thread(self.store.claim_extraction, self.owner, int(self.extraction_timeout) + 30)
         if extraction:
             await self._extract(extraction)
         call = await asyncio.to_thread(self.store.claim_job, self.owner, self.maximum)

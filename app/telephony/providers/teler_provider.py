@@ -96,6 +96,13 @@ FIELD_RECORD = "record"
 # bridges, so it is sent explicitly rather than left to a default.
 FLOW_ACTION = "action"
 FLOW_STREAM = "stream"
+# The two other actions, used for inbound calls. `media_url` is the documented
+# parameter name for `play`; the SDK's CallFlow.play() calls it `file_url`,
+# which the call-flows reference does not. The reference wins -- it describes
+# the wire, the SDK only builds a dict nothing validates.
+FLOW_PLAY = "play"
+FLOW_HANGUP = "hangup"
+FLOW_MEDIA_URL = "media_url"
 FLOW_WS_URL = "ws_url"
 FLOW_CHUNK_SIZE = "chunk_size"
 FLOW_SAMPLE_RATE = "sample_rate"
@@ -457,6 +464,21 @@ class TelerProvider:
             FLOW_SAMPLE_RATE: sample_rate,
             FLOW_RECORD: bool(record),
         }
+
+    @staticmethod
+    def build_incoming_flow(media_url: str = "") -> dict[str, Any]:
+        """What to answer an inbound caller with, once the callback is logged.
+
+        Teler's call flow is a single action, so this is `play` or `hangup` and
+        not both -- there is no way to say "play this, then hang up" in one
+        response. `hangup` is the default because it is the only one that needs
+        no hosted audio, and a flow naming a `media_url` that 404s is worse
+        than a clean disconnect: the caller waits on silence and the line stays
+        billable until Teler gives up.
+        """
+        if media_url:
+            return {FLOW_ACTION: FLOW_PLAY, FLOW_MEDIA_URL: media_url}
+        return {FLOW_ACTION: FLOW_HANGUP}
 
 
 # ===========================================================================

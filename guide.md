@@ -57,6 +57,9 @@ The pinned provider integrations verified for this implementation are Twilio `9.
 | `TELER_CHUNK_MS` | No | **Milliseconds**, not bytes, of audio per inbound chunk. Teler requires 20–2000 and a multiple of 20. Their default of 400 would quantise barge-in detection to 400 ms | `20` | No |
 | `TELER_SEND_CHUNK_MS` | No | Milliseconds of audio per outbound message. FreJun recommend ≥500; the tail of a turn is flushed early regardless | `500` | No |
 | `TELER_WEBHOOK_SECRET` | No | Voice App signing secret, for verifying `X-Teler-Signature`. Defence in depth only — the HMAC query token is the primary control. See §8b | unset (signature not checked) | Yes |
+| `TELER_INCOMING_SECRET` | Yes for inbound | Shared secret in the Incoming call URL. FreJun's incoming URL is configured once on the Voice App, so it cannot carry a per-call HMAC. **Unset means the endpoint refuses everything** — it fails closed rather than becoming a public write. See §8c | unset (inbound capture off) | Yes |
+| `TELER_INCOMING_MEDIA_URL` | No | Publicly reachable audio played to an inbound caller before the line drops. A call flow is one action, so this is `play` *or* `hangup`, never both | unset (hang up immediately) | No |
+| `EXTRACTION_ENABLED` | No | Post-call OpenAI extraction (interest, callback intent, summary). **Off by default** — it spent a request per answered call on fields nobody acted on. Transcripts are unaffected; they are persisted on a path that never touches OpenAI. See §8d | `0` | No |
 | `CALL_AGENT_DEFAULT_PROVIDER` | No | **Seed only.** Written to the database the first time it is opened and ignored from then on — once a provider is saved in the dashboard, the database is authoritative. See §8a | `twilio`; also `exotel`, `teler` or `auto` | No |
 | `DEEPGRAM_API_KEY` | Yes for conversation | Deepgram agent access | provider key | Yes |
 | `OPENAI_API_KEY` | Required only when extraction runs | Post-call extraction | provider key; absence never blocks raw persistence | Yes |
@@ -231,6 +234,55 @@ outbound commands — nothing is ever acknowledged, and the call ending is the s
 adapter therefore models playback from bytes sent rather than reading it off mark round-trips; see
 `docs/teler-adapter.md` for what that costs and what remains unverified. AMD is off for Teler:
 the initiate endpoint documents no detection parameter and no verdict on any webhook.
+
+## 8c. Capturing callbacks (inbound calls)
+
+Somebody who missed the agent's call often rings the number back. Those calls
+are captured and listed on the dashboard's **Callbacks** tab for a human to
+return; the agent is deliberately not run on them, because answering an inbound
+caller with the outbound pitch is the wrong conversation.
+
+Set `TELER_INCOMING_SECRET` to any long random string, restart, then open
+**Settings → Inbound calls** in the dashboard. It renders the two exact URLs to
+paste into the FreJun Voice App's **Webhooks** section:
+
+| FreJun field | Value |
+|---|---|
+| Incoming call URL | `<PUBLIC_BASE_URL>/teler/incoming?key=<TELER_INCOMING_SECRET>` |
+| Call status URL | `<PUBLIC_BASE_URL>/teler/incoming/status?key=<TELER_INCOMING_SECRET>` |
+
+**Both must include the `?key=` query string.** Without it the endpoint returns
+403 and the callback is lost. Setting them to the bare domain — which is what
+they default to — sends inbound calls to the dashboard's index page, so FreJun
+receives HTML where it expects a call flow and nothing is recorded anywhere.
+
+The secret is a single shared value rather than a per-call HMAC because the
+Incoming call URL is typed into the Voice App once, before any inbound call
+exists, so there is nothing per-call to sign. It fails closed: unset means every
+request is refused, never that authentication is skipped.
+
+Inbound calls are recorded in their own `inbound_calls` table, never in `calls`.
+An inbound row in the outbound queue would occupy a concurrency slot for a call
+nobody placed, and `one_active_phone` could then block the queue from ever
+dialling that number again.
+
+## 8d. Post-call extraction is off
+
+`EXTRACTION_ENABLED` defaults to `0`. Extraction ran one OpenAI request per
+answered call to derive interest, callback intent and a structured summary —
+fields nobody acted on, so the spend bought nothing.
+
+Nothing about call recording changes: the transcript is written by
+`persist_raw`, on a path that never touches OpenAI.
+
+**One thing does go away.** `complete_extraction` was what noticed
+`do_not_call_requested` and wrote the suppression list, so with extraction off
+nothing detects "stop calling me" automatically. Use the **Do not call** button
+on any call detail or callback row when a customer asks — it adds the number to
+the suppression list and flags the matching lead, exactly as extraction used to.
+
+Set `EXTRACTION_ENABLED=1` to switch the whole pipeline back on; the worker, the
+schema and the columns are all still there.
 
 ### Choosing the active provider
 

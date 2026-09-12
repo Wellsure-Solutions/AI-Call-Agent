@@ -4,6 +4,7 @@ import logging
 import base64
 import hmac
 from contextlib import asynccontextmanager, suppress
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
@@ -319,6 +320,53 @@ async def delete_call(call_id: str):
     return {"deleted": True, "call_id": call_id}
 
 
+@app.get("/api/callbacks")
+async def list_callbacks(limit: int = 200, offset: int = 0, handled: str = ""):
+    """Calls that came *in* to the virtual number.
+
+    Separate from /api/calls on purpose: these are not rows in the outbound
+    queue and have no lifecycle, capacity slot or reconciliation deadline.
+    """
+    return {"callbacks": await asyncio.to_thread(answer_store.list_inbound_calls, limit, offset, handled)}
+
+
+@app.post("/api/callbacks/{inbound_id}/handled")
+async def set_callback_handled(inbound_id: str, payload: dict | None = None):
+    body = payload or {}
+    handled = bool(body.get("handled", True))
+    updated = await asyncio.to_thread(
+        answer_store.set_inbound_handled, inbound_id, handled, str(body.get("notes") or "")
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Callback not found")
+    return updated
+
+
+@app.delete("/api/callbacks/{inbound_id}")
+async def delete_callback(inbound_id: str):
+    if not await asyncio.to_thread(answer_store.delete_inbound_call, inbound_id):
+        raise HTTPException(status_code=404, detail="Callback not found")
+    return {"deleted": True, "inbound_id": inbound_id}
+
+
+@app.post("/api/suppress")
+async def suppress_number(payload: dict):
+    """Add a number to the do-not-call list by hand.
+
+    Automatic detection came from post-call extraction, which is off by default
+    now (settings.EXTRACTION_ENABLED). Not paying for extraction is a fine
+    reason to stop deriving a summary; it is not a reason to keep calling
+    somebody who asked us not to, so the operator gets an explicit control.
+    """
+    phone = str((payload or {}).get("phone_number") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=422, detail="phone_number is required")
+    if not await asyncio.to_thread(answer_store.suppress_phone, phone, "operator_request"):
+        raise HTTPException(status_code=422, detail="phone_number is not a valid number")
+    logger.warning("operator_suppressed_number", extra={"phone_number": phone})
+    return {"suppressed": True, "phone_number": phone}
+
+
 @app.delete("/api/data")
 async def clear_data(payload: dict):
     scope = payload.get("scope", "")
@@ -358,6 +406,31 @@ async def operations():
     }
 
 
+def _inbound_webhook_config() -> dict[str, object]:
+    """The two URLs to paste into FreJun's Voice App, built rather than typed.
+
+    Handing the operator the exact string removes the failure this shipped to
+    fix: the Incoming call URL was set to the bare domain, so inbound calls hit
+    the dashboard's index page, FreJun got HTML where it expected a call flow,
+    and every callback was lost with nothing anywhere to say so.
+
+    The secret appears in these URLs because it *is* the query parameter --
+    there is no way to show a usable value without it. That is the same
+    exposure as the media and callback tokens the dashboard already renders,
+    and the dashboard is behind operator auth.
+    """
+    from app.core.settings import PUBLIC_BASE_URL, TELER_INCOMING_SECRET
+
+    if not TELER_INCOMING_SECRET or not PUBLIC_BASE_URL:
+        return {"configured": False, "incoming_url": "", "status_url": ""}
+    key = quote(TELER_INCOMING_SECRET, safe="")
+    return {
+        "configured": True,
+        "incoming_url": f"{PUBLIC_BASE_URL}/teler/incoming?key={key}",
+        "status_url": f"{PUBLIC_BASE_URL}/teler/incoming/status?key={key}",
+    }
+
+
 @app.get("/api/settings/telephony")
 async def get_telephony_settings():
     """The active provider and what each one can actually do.
@@ -371,6 +444,7 @@ async def get_telephony_settings():
         "active": await asyncio.to_thread(answer_store.active_provider_setting),
         "selectable": list(SELECTABLE_PROVIDERS),
         "providers": await asyncio.to_thread(provider_status_report),
+        "inbound": _inbound_webhook_config(),
         "recent_changes": await asyncio.to_thread(answer_store.list_settings_events, 10),
         "note": "Applies to newly queued calls only. Calls already queued or in flight keep the provider they were created with.",
     }

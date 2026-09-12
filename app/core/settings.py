@@ -226,6 +226,43 @@ TELER_SEND_CHUNK_MS = int(_env("TELER_SEND_CHUNK_MS", "500"))
 # cannot be absent or mismatched without us knowing. See teler_routes.
 TELER_WEBHOOK_SECRET = os.getenv("TELER_WEBHOOK_SECRET", "")
 
+# ------------------------------------------------------------
+# Inbound calls (somebody ringing the virtual number back)
+# ------------------------------------------------------------
+#
+# FreJun's Incoming Call URL is configured once on the Voice App, so unlike the
+# outbound flow_url it cannot carry a per-call HMAC -- there is no call to mint
+# one against when the URL is saved. A single shared secret in the query string
+# is the available control, so it is required rather than optional: without it
+# anyone who guesses the path can write rows into the callbacks table.
+TELER_INCOMING_SECRET = os.getenv("TELER_INCOMING_SECRET", "")
+
+# Optional publicly reachable audio file played to an inbound caller before the
+# line drops. Teler's call flow is one action, so this is either a `play` or a
+# `hangup` -- not both. Unset means the callback is recorded and the call ends
+# immediately, which is cheap but abrupt; set it once you have a "thanks, we
+# will call you back" recording hosted somewhere.
+TELER_INCOMING_MEDIA_URL = os.getenv("TELER_INCOMING_MEDIA_URL", "")
+
+# ============================================================
+# POST-CALL EXTRACTION (OpenAI)
+# ============================================================
+#
+# Off by default. Extraction ran an OpenAI request per answered call to derive
+# interest, callback intent and a structured summary -- fields nobody was
+# acting on, so the spend bought nothing.
+#
+# Disabled here rather than deleted: the transcript is what the operator reads,
+# and it is persisted by `persist_raw` on a completely separate path that does
+# not touch OpenAI, so turning this off costs no call data. Flip it back on and
+# the worker, the schema and the columns are all still there.
+#
+# One thing genuinely goes away with it. `complete_extraction` was what noticed
+# `do_not_call_requested` and wrote the suppression list, so with extraction off
+# nothing detects "stop calling me" automatically. Use the Do-not-call action in
+# the dashboard on any call or callback where the customer asks.
+EXTRACTION_ENABLED = _env_bool("EXTRACTION_ENABLED", False)
+
 # ============================================================
 # TELEPHONY PROVIDER SELECTION
 # ============================================================

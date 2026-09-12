@@ -10,6 +10,23 @@ from app.services.call_coordinator import DurableCallCoordinator
 from app.storage.sqlite_store import SQLiteCallStore, SuppressedError
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def extraction_enabled(monkeypatch):
+    """Post-call extraction is opt-in now (settings.EXTRACTION_ENABLED, default
+    off) because it spent an OpenAI request per answered call on fields nobody
+    acted on. The machinery is still expected to work when it is switched on,
+    which is what this file tests, so switch it on.
+
+    Patched on the settings module rather than on an importer: `persist_raw`
+    and the coordinator both read the flag at call time precisely so it can be
+    changed without a rebuild.
+    """
+    monkeypatch.setattr("app.core.settings.EXTRACTION_ENABLED", True)
+
+
 def repo(tmp_path: Path) -> SQLiteCallStore:
     return SQLiteCallStore(tmp_path / "pipeline.db", tmp_path)
 
